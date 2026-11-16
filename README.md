@@ -14,7 +14,7 @@
 
 ---
 
-> **Project Status:** **Phase 1 (`v0.0.2-core-lexer`) Complete** — Typed `Value`, `GlyphError` redaction, `ResourceBudget`, and O(n) UTF-8-validating `Lexer` verified (`noxc test`: 3/3 suites passing on LLVM & QBE). Next up: Phase 2 (`v0.0.3-parser-ast`, see [todo.md](todo.md) and [docs/roadmap.md](docs/roadmap.md)).
+> **Project Status:** **Phase 2 (`v0.0.3-parser-ast`) Complete** — Pratt expression parser, immutable AST, statement nesting, static validation, and ADR-0002 verified (`noxc test`: 5/5 suites passing on LLVM & QBE). Next up: Phase 3 (`v0.1.0` MVP, see [todo.md](todo.md) and [docs/roadmap.md](docs/roadmap.md)).
 
 ---
 
@@ -87,7 +87,7 @@ noxc sbom . -o glyph.sbom.json
 |---|---|---|---|
 | **Phase 0** | `v0.0.1-audit` | Toolchain lock (`noxc 2.1.186`), capability audit, PoCs, CI/Release, `ADR-0001` | Done |
 | **Phase 1** | `v0.0.2-core-lexer` | Typed `Value`, `SourceSpan`, `GlyphError`, `ResourceBudget`, O(n) `Lexer` | Done |
-| **Phase 2** | `v0.0.3-parser-ast` | Pratt expression parser, AST, `if`/`for`/`set`, static validation | Planned |
+| **Phase 2** | `v0.0.3-parser-ast` | Pratt expression parser, AST, `if`/`for`/`set`, static validation | Done |
 | **Phase 3** | `v0.1.0` **(MVP)** | Interpreter, chunked `Writer`, HTML escape, MVP filters, `MemoryLoader` | Planned |
 | **Phase 4** | `v0.2.0` | `FilesystemLoader` sandbox, `include`, `ParseCache`/`CompileCache` | Planned |
 | **Phase 5** | `v0.3.0` | `extends`, `block`, `super()`, `macro`, `import`, `call/caller` | Planned |

@@ -1,0 +1,72 @@
+# Expression AST definitions for Glyph safe expression language.
+# Enforces ADR-0002 and AGENTS.md §7. Pure NOX, freestanding-safe.
+from glyph.errors import SourceSpan
+
+enum UnaryOp:
+    UNeg
+    UPos
+    UNot
+
+enum BinaryOp:
+    BAdd
+    BSub
+    BMul
+    BDiv
+    BFloorDiv
+    BMod
+    BEq
+    BNotEq
+    BLt
+    BLtEq
+    BGt
+    BGtEq
+    BIn
+    BNotIn
+    BAnd
+    BOr
+
+class CallArg:
+    name: str
+    value: Expr
+    span: SourceSpan
+
+    def __init__(self: CallArg, name: str, value: Expr, span: SourceSpan) -> None:
+        self.name = name
+        self.value = value
+        self.span = span
+
+class MapEntry:
+    key: Expr
+    value: Expr
+    span: SourceSpan
+
+    def __init__(self: MapEntry, key: Expr, value: Expr, span: SourceSpan) -> None:
+        self.key = key
+        self.value = value
+        self.span = span
+
+enum ExprKind:
+    ENull
+    EBool(value: bool)
+    EInt(value: int)
+    EFloat(value: float)
+    EStr(value: str)
+    EIdent(name: str)
+    EList(items: list[Expr])
+    EMap(entries: list[MapEntry])
+    EMember(target: Expr, field: str)
+    EIndex(target: Expr, index: Expr)
+    EUnary(op: UnaryOp, operand: Expr)
+    EBinary(op: BinaryOp, left: Expr, right: Expr)
+    EConditional(cond: Expr, then_expr: Expr, else_expr: Expr)
+    EFilter(target: Expr, name: str, args: list[CallArg])
+    EIsTest(target: Expr, name: str, negated: bool, args: list[CallArg])
+    ECall(name: str, args: list[CallArg])
+
+class Expr:
+    kind: ExprKind
+    span: SourceSpan
+
+    def __init__(self: Expr, kind: ExprKind, span: SourceSpan) -> None:
+        self.kind = kind
+        self.span = span

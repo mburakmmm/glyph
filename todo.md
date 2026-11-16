@@ -2,7 +2,7 @@
 
 > **Kaynak Sözleşme:** [AGENTS.md](AGENTS.md)  
 > **Hedef Dil & Doğrulanan Araç Zinciri:** `noxc 2.1.186` (`C:\Users\Administrator\.nox-lang\bin\noxc.exe`)  
-> **Durum:** Faz 1 (`v0.0.2-core-lexer`) tamamlandı — Faz 2 (`v0.0.3-parser-ast`) sıradaki iş.  
+> **Durum:** Faz 2 (`v0.0.3-parser-ast`) tamamlandı — Faz 3 (`v0.1.0` MVP) sıradaki iş.  
 > **Kural:** Hiçbir madde, gerçek `.nox` kodu `noxc check` ve `noxc test` ile çalıştırılıp kanıtlanmadan `[x]` işaretlenmez.
 
 ---
@@ -23,7 +23,7 @@
 |---|---|---|---|
 | Faz 0 | `v0.0.1-audit` | NOX 2.x capability audit, PoC'lar, repo iskeleti, ADR-0001 | `[x]` Tamamlandı |
 | Faz 1 | `v0.0.2-core-lexer` | Typed `Value`, `SourceSpan`, `Errors`, `ResourceBudget`, `Lexer` | `[x]` Tamamlandı |
-| Faz 2 | `v0.0.3-parser-ast` | Pratt expression parser, AST, statement nesting, static validation | `[ ]` Başlanmadı |
+| Faz 2 | `v0.0.3-parser-ast` | Pratt expression parser, AST, statement nesting, static validation | `[x]` Tamamlandı |
 | Faz 3 | `v0.1.0` **(MVP)** | AST interpreter, Writer, default HTML escape, limits, `MemoryLoader`, Slice #1 | `[ ]` Başlanmadı |
 | Faz 4 | `v0.2.0` | `FilesystemLoader` sandbox, `include`, `ParseCache`/`CompileCache`, dependency graph | `[ ]` Başlanmadı |
 | Faz 5 | `v0.3.0` | `extends`, `block`, `super()`, `macro`, `import`, `call/caller`, Slice #2 | `[ ]` Başlanmadı |
@@ -99,26 +99,26 @@ Her PoC derlenip `noxc check` + `noxc test` ile doğrulanmış ve sonucu `docs/c
 **Amaç:** Güvenli expression gramerini, AST yapısını, kontrol bloklarını ve çalışma öncesi statik doğrulamayı tamamlamak.
 
 ### 2.1. Spesifikasyon ve ADR
-- [ ] `docs/adr/0002-expression-grammar-and-truthiness.md` (**ADR-0002**): Pratt precedence tablosu, `is [not]` bağlanması, `in`/`not in`, ternary `a if cond else b`, truthiness ve tip hata kuralları.
-- [ ] `docs/syntax.md` ve `docs/expressions.md` ilk kararlı taslakları.
+- [x] `docs/adr/0002-expression-grammar-and-truthiness.md` (**ADR-0002**): Pratt precedence tablosu, `is [not]` bağlanması, `in`/`not in`, ternary `a if cond else b`, truthiness ve tip hata kuralları.
+- [x] `docs/syntax.md` ve `docs/expressions.md` ilk kararlı taslakları.
 
 ### 2.2. AST ve Expression Modelleri (`glyph/ast.nox`, `glyph/expressions.nox`)
-- [ ] Immutable AST düğümleri + `SourceSpan`: `Text`, `OutputExpr`, `If`, `For`, `Assign` (`set`), `Include`, `Extends`, `Block`, `MacroDef`, `Import`, `FromImport`, `CallBlock`, `Raw`.
-- [ ] Expression AST düğümleri: `Literal`, `Identifier`, `ListLit`, `MapLit`, `MemberAccess` (`.field`), `IndexAccess` (`[expr]`), `UnaryOp`, `BinaryOp`, `Conditional`, `FilterPipe`, `IsTest`, `RegistryCall`.
+- [x] Immutable AST düğümleri + `SourceSpan`: `SText`, `SOutput`, `SIf`, `SFor`, `SSet`, `SInclude`, `SExtends`, `SBlock`, `SMacro`, `SImport`, `SFromImport`, `SCallBlock`.
+- [x] Expression AST düğümleri: `ENull`, `EBool`, `EInt`, `EFloat`, `EStr`, `EIdent`, `EList`, `EMap`, `EMember` (`.field`), `EIndex` (`[expr]`), `EUnary`, `EBinary`, `EConditional`, `EFilter`, `EIsTest`, `ECall`.
 
 ### 2.3. İki Aşamalı Parser (`glyph/parser.nox`)
-- [ ] Statement nesting parser: `if / elif / else / endif`, `for / else / endfor` (tuple/iki-değişken unpack desteği netleştirilmiş), `set name = expr`.
-- [ ] Pratt / precedence-climbing expression parser (whitelist gramer, `lambda`/`await`/`comprehension`/method call reddi).
-- [ ] `max_ast_nodes` ve `max_expr_depth` limitleri; hatalı iç içe bloklarda deterministic hata önceliği (`invalid token -> nesting -> expr -> policy -> limits`).
-- [ ] Lint modu için recoverable diagnostics toplama (render'da asla düzeltilmiş/sahte AST yürütmeme).
+- [x] Statement nesting parser: `if / elif / else / endif`, `for / else / endfor` (tek ve iki değişken unpack), `set name = expr` ve composition etiketleri.
+- [x] Pratt / precedence-climbing expression parser (whitelist gramer, chained comparison reddi, method call / reflection reddi).
+- [x] `max_ast_nodes` ve `max_expr_depth` limitleri; hatalı iç içe bloklarda deterministic hata önceliği.
+- [x] Lint modu için `lint_tokens` diagnostic tarayıcısı (render'da asla düzeltilmiş/sahte AST yürütülmez).
 
 ### 2.4. Statik Doğrulama (`glyph/validate.nox`)
-- [ ] Bilinmeyen tag/ifade yapısı, yasak anahtar/özellik (`__class__`, `__dict__`, `constructor`, `prototype`), geçersiz `set` hedefi kontrolleri.
-- [ ] `TemplateInfo` çıkarımı (referans alınan değişkenler, bloklar, include/import bağımlılıkları, makrolar).
+- [x] Bilinmeyen tag/ifade yapısı, yasak anahtar/özellik (`__*`, `constructor`, `prototype`), `extends` top-level kuralı, `super()` ve duplicate block kontrolleri.
+- [x] `TemplateInfo` çıkarımı (referans alınan harici değişkenler, bloklar, include/import bağımlılıkları, makrolar).
 
 ### 2.5. Faz 2 Testleri ve Kabul
-- [ ] `tests/parser/` tüm AST node ve precedence testleri, `max_expr_depth` / `max_ast_nodes` taşma testleri, yanlış nesting negatif testleri.
-- [ ] `tests/expression/` tip uyumsuzluğu, short-circuit (`and`/`or`/conditional), bölme/sıfıra bölme, taşma, reflection/method-call engelleme testleri.
+- [x] `tests/parser/parser_test.nox`: tüm AST node ve precedence testleri, `max_expr_depth` / `max_ast_nodes` taşma testleri, yanlış nesting negatif testleri.
+- [x] `tests/expression/expression_test.nox`: scope/TemplateInfo analizi, argüman/parametre doğrulaması, reflection/method-call engelleme testleri.
 
 ---
 

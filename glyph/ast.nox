@@ -1,0 +1,60 @@
+# Statement AST definitions for Glyph templates.
+# Enforces AGENTS.md §6.3 and ADR-0001. Pure NOX, freestanding-safe.
+from glyph.errors import SourceSpan
+from glyph.expressions import Expr, CallArg
+
+class IfBranch:
+    cond: Expr
+    body: list[Stmt]
+    span: SourceSpan
+
+    def __init__(self: IfBranch, cond: Expr, body: list[Stmt], span: SourceSpan) -> None:
+        self.cond = cond
+        self.body = body
+        self.span = span
+
+class MacroParam:
+    name: str
+    has_default: bool
+    default_expr: Expr
+    span: SourceSpan
+
+    def __init__(self: MacroParam, name: str, has_default: bool, default_expr: Expr, span: SourceSpan) -> None:
+        self.name = name
+        self.has_default = has_default
+        self.default_expr = default_expr
+        self.span = span
+
+enum StmtKind:
+    SText(text: str)
+    SOutput(expr: Expr)
+    SIf(branches: list[IfBranch], else_body: list[Stmt])
+    SFor(targets: list[str], iterable: Expr, body: list[Stmt], else_body: list[Stmt])
+    SSet(target: str, value: Expr)
+    SInclude(template_expr: Expr, with_context: bool, ignore_missing: bool)
+    SExtends(template_name: str)
+    SBlock(name: str, body: list[Stmt])
+    SMacro(name: str, params: list[MacroParam], body: list[Stmt])
+    SImport(template_name: str, alias: str)
+    SFromImport(template_name: str, names: list[str])
+    SCallBlock(macro_name: str, args: list[CallArg], caller_params: list[str], body: list[Stmt])
+
+class Stmt:
+    kind: StmtKind
+    span: SourceSpan
+
+    def __init__(self: Stmt, kind: StmtKind, span: SourceSpan) -> None:
+        self.kind = kind
+        self.span = span
+
+class TemplateAst:
+    logical_name: str
+    body: list[Stmt]
+    has_extends: bool
+    extends_target: str
+
+    def __init__(self: TemplateAst, logical_name: str, body: list[Stmt], has_extends: bool, extends_target: str) -> None:
+        self.logical_name = logical_name
+        self.body = body
+        self.has_extends = has_extends
+        self.extends_target = extends_target

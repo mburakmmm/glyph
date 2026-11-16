@@ -1,0 +1,53 @@
+# Phase 2 Expression AST, Macro/Import Parsing, and TemplateInfo Static Analysis Tests
+import nox.test
+from glyph.errors import GlyphSyntaxError, GLYPH_SYNTAX_UNEXPECTED_TOKEN
+from glyph.ast import TemplateAst
+from glyph.parser import parse_source
+from glyph.validate import TemplateInfo, validate_ast
+
+def _contains(xs: list[str], target: str) -> bool:
+    i: int = 0
+    while i < len(xs):
+        if xs[i] == target:
+            return True
+        i = i + 1
+    return False
+
+def test_template_info_and_scope_tracking() -> None:
+    tpl: str = "{% import \"macros.html\" as m %}{% from \"ui.html\" import badge %}{% set greeting = \"hi\" %}{% for item in items %}{{ greeting }} {{ item.name }} {{ loop.index }} {{ ext_var }}{% endfor %}{% macro card(title, sub=\"\") %}{{ title }} {{ caller() }}{% endmacro %}{% call card(\"A\", sub=sub_val) %}inner{% endcall %}{{ [1, 2,] }} {{ {\"k\": map_val,} }}"
+    ast: TemplateAst = parse_source(tpl, "info.html")
+    info: TemplateInfo = validate_ast(ast, False)
+
+    nox.test.assert_eq_int(len(info.imports), 2, "two imports recorded")
+    nox.test.assert_eq_int(len(info.macros), 1, "one macro recorded")
+    nox.test.assert_eq_str(info.macros[0], "card", "macro name")
+
+    # Referenced external vars: items, ext_var, sub_val, map_val (NOT greeting, item, loop, m, badge, title, caller)
+    nox.test.assert_true(_contains(info.referenced_vars, "items"), "items referenced")
+    nox.test.assert_true(_contains(info.referenced_vars, "ext_var"), "ext_var referenced")
+    nox.test.assert_true(_contains(info.referenced_vars, "sub_val"), "sub_val referenced")
+    nox.test.assert_true(_contains(info.referenced_vars, "map_val"), "map_val referenced")
+    nox.test.assert_true(not _contains(info.referenced_vars, "greeting"), "set local excluded")
+    nox.test.assert_true(not _contains(info.referenced_vars, "item"), "loop target excluded")
+    nox.test.assert_true(not _contains(info.referenced_vars, "loop"), "loop metadata excluded")
+    nox.test.assert_true(not _contains(info.referenced_vars, "m"), "import alias excluded")
+    nox.test.assert_true(not _contains(info.referenced_vars, "badge"), "from-import symbol excluded")
+
+def assert_expr_syntax_err(src: str, label: str) -> None:
+    got: str = ""
+    try:
+        _ast: TemplateAst = parse_source(src, "expr_err.html")
+    except GlyphSyntaxError as se:
+        got = se.code
+    nox.test.assert_eq_str(got, GLYPH_SYNTAX_UNEXPECTED_TOKEN, label)
+
+def test_argument_and_target_validation() -> None:
+    assert_expr_syntax_err("{{ fn(a=1, 2) }}", "positional after keyword rejected")
+    assert_expr_syntax_err("{{ fn(a=1, a=2) }}", "duplicate keyword arg rejected")
+    assert_expr_syntax_err("{% macro m(a=1, b) %}{% endmacro %}", "non-default after default param rejected")
+    assert_expr_syntax_err("{% macro m(a, a) %}{% endmacro %}", "duplicate macro param rejected")
+    assert_expr_syntax_err("{% for x, x in xs %}{% endfor %}", "duplicate loop target rejected")
+    assert_expr_syntax_err("{{ true if }}", "incomplete conditional rejected")
+
+test_template_info_and_scope_tracking()
+test_argument_and_target_validation()

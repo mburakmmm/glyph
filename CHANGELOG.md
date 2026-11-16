@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.3-parser-ast] - 2026-11-16
+
+### Added
+- `docs/adr/0002-expression-grammar-and-truthiness.md` (ADR-0002), `docs/syntax.md`, and `docs/expressions.md`.
+- `glyph/expressions.nox` & `glyph/ast.nox`: Immutable tagged-union AST and expression nodes (`Expr`, `ExprKind`, `Stmt`, `StmtKind`, `TemplateAst`) with `SourceSpan`.
+- `glyph/parser.nox`: Two-stage statement nesting + Pratt/precedence-climbing expression parser (`if/elif/else`, `for/else`, `set`, `include`, `extends`, `block`, `macro`, `import`, `from`, `call`), `max_expr_depth`/`max_ast_nodes` bounds, chained comparison rejection, method-call/reflection rejection, and `lint_tokens`.
+- `glyph/validate.nox`: Static validator and `TemplateInfo` extractor (duplicate block checks, top-level `extends`, `super()` placement, dynamic include policy, external variable tracking).
+- Phase 2 test suites: `tests/parser/parser_test.nox` and `tests/expression/expression_test.nox`.
+
 ## [0.0.2-core-lexer] - 2026-11-16
 
 ### Added

@@ -1,0 +1,163 @@
+# Phase 2 Parser, Precedence, Nesting, Limits, and Security Tests
+import nox.test
+from glyph.errors import GlyphError, GlyphSyntaxError, GlyphSecurityError, GlyphLimitError
+from glyph.errors import GLYPH_SYNTAX_UNEXPECTED_TOKEN, GLYPH_SYNTAX_UNCLOSED_BLOCK, GLYPH_SYNTAX_UNKNOWN_TAG
+from glyph.errors import GLYPH_SYNTAX_INVALID_NESTING, GLYPH_SYNTAX_DUPLICATE_BLOCK
+from glyph.errors import GLYPH_SECURITY_REFLECTION, GLYPH_SECURITY_POLICY
+from glyph.errors import GLYPH_LIMIT_EXPR_DEPTH, GLYPH_LIMIT_AST_NODES
+from glyph.limits import ResourceBudget, BudgetTracker
+from glyph.token import Token
+from glyph.lexer import tokenize_with_budget
+from glyph.expressions import Expr, ExprKind, BinaryOp, UnaryOp
+from glyph.ast import Stmt, StmtKind, TemplateAst
+from glyph.parser import parse_source, parse_string, lint_tokens
+from glyph.validate import TemplateInfo, validate_ast
+
+def test_precedence_rules() -> None:
+    # 1 + 2 * 3 -> Binary(BAdd, 1, Binary(BMul, 2, 3))
+    ast1: TemplateAst = parse_source("{{ 1 + 2 * 3 }}", "prec1.html")
+    match ast1.body[0].kind:
+        case StmtKind.SOutput(e):
+            match e.kind:
+                case ExprKind.EBinary(op, _, right):
+                    nox.test.assert_true(op == BinaryOp.BAdd, "top op is BAdd")
+                    match right.kind:
+                        case ExprKind.EBinary(rop, _, _):
+                            nox.test.assert_true(rop == BinaryOp.BMul, "right op is BMul")
+                        case _:
+                            nox.test.assert_true(False, "expected BMul on right")
+                case _:
+                    nox.test.assert_true(False, "expected EBinary")
+        case _:
+            nox.test.assert_true(False, "expected SOutput")
+
+    # a or b and c -> Binary(BOr, a, Binary(BAnd, b, c))
+    ast2: TemplateAst = parse_source("{{ a or b and c }}", "prec2.html")
+    match ast2.body[0].kind:
+        case StmtKind.SOutput(e2):
+            match e2.kind:
+                case ExprKind.EBinary(op2, _, right2):
+                    nox.test.assert_true(op2 == BinaryOp.BOr, "top op is BOr")
+                    match right2.kind:
+                        case ExprKind.EBinary(rop2, _, _):
+                            nox.test.assert_true(rop2 == BinaryOp.BAnd, "right op is BAnd")
+                        case _:
+                            nox.test.assert_true(False, "expected BAnd on right")
+                case _:
+                    nox.test.assert_true(False, "expected EBinary")
+        case _:
+            nox.test.assert_true(False, "expected SOutput")
+
+    # item.name | upper | truncate(10)
+    ast3: TemplateAst = parse_source("{{ item.name | upper | truncate(10) }}", "pipe.html")
+    match ast3.body[0].kind:
+        case StmtKind.SOutput(e3):
+            match e3.kind:
+                case ExprKind.EFilter(inner, fname, args):
+                    nox.test.assert_eq_str(fname, "truncate", "outer filter truncate")
+                    nox.test.assert_eq_int(len(args), 1, "truncate arg count")
+                    match inner.kind:
+                        case ExprKind.EFilter(target, fname2, _):
+                            nox.test.assert_eq_str(fname2, "upper", "inner filter upper")
+                            match target.kind:
+                                case ExprKind.EMember(_, field):
+                                    nox.test.assert_eq_str(field, "name", "member field name")
+                                case _:
+                                    nox.test.assert_true(False, "expected EMember")
+                        case _:
+                            nox.test.assert_true(False, "expected inner EFilter")
+                case _:
+                    nox.test.assert_true(False, "expected EFilter")
+        case _:
+            nox.test.assert_true(False, "expected SOutput")
+
+    # x is not none
+    ast4: TemplateAst = parse_source("{{ x is not none }}", "istest.html")
+    match ast4.body[0].kind:
+        case StmtKind.SOutput(e4):
+            match e4.kind:
+                case ExprKind.EIsTest(_, tname, neg, _):
+                    nox.test.assert_eq_str(tname, "none", "test name none")
+                    nox.test.assert_true(neg, "is not negated")
+                case _:
+                    nox.test.assert_true(False, "expected EIsTest")
+        case _:
+            nox.test.assert_true(False, "expected SOutput")
+
+def test_statement_blocks() -> None:
+    tpl: str = "{% extends \"base.html\" %}{% block body %}{% if a %}1{% elif b %}2{% else %}3{% endif %}{% for k, v in pairs %}{{ super() }}{% else %}empty{% endfor %}{% set x = 1 %}{% include \"p.html\" ignore missing without context %}{% endblock body %}"
+    ast: TemplateAst = parse_source(tpl, "child.html")
+    nox.test.assert_true(ast.has_extends, "has_extends true")
+    nox.test.assert_eq_str(ast.extends_target, "base.html", "extends target")
+    info: TemplateInfo = validate_ast(ast, False)
+    nox.test.assert_eq_int(len(info.blocks), 1, "one block")
+    nox.test.assert_eq_str(info.blocks[0], "body", "block name")
+    nox.test.assert_eq_int(len(info.includes), 1, "one include")
+    nox.test.assert_eq_str(info.includes[0], "p.html", "include name")
+
+def assert_parse_syntax_err(src: str, code: str, label: str) -> None:
+    got: str = ""
+    try:
+        ast: TemplateAst = parse_source(src, "err.html")
+        _info: TemplateInfo = validate_ast(ast, False)
+    except GlyphSyntaxError as se:
+        got = se.code
+    nox.test.assert_eq_str(got, code, label)
+
+def assert_parse_sec_err(src: str, code: str, label: str) -> None:
+    got: str = ""
+    try:
+        ast: TemplateAst = parse_source(src, "sec.html")
+        _info: TemplateInfo = validate_ast(ast, False)
+    except GlyphSecurityError as se:
+        got = se.code
+    nox.test.assert_eq_str(got, code, label)
+
+def test_negative_syntax_and_security() -> None:
+    assert_parse_syntax_err("{{ 1 < x < 10 }}", GLYPH_SYNTAX_UNEXPECTED_TOKEN, "chained comparison rejected")
+    assert_parse_syntax_err("{% if x %}hi", GLYPH_SYNTAX_UNCLOSED_BLOCK, "unclosed if")
+    assert_parse_syntax_err("{% endif %}", GLYPH_SYNTAX_INVALID_NESTING, "orphan endif")
+    assert_parse_syntax_err("{% else %}", GLYPH_SYNTAX_INVALID_NESTING, "orphan else")
+    assert_parse_syntax_err("{% block a %}x{% endblock b %}", GLYPH_SYNTAX_INVALID_NESTING, "mismatched endblock name")
+    assert_parse_syntax_err("{% block a %}1{% endblock %}{% block a %}2{% endblock %}", GLYPH_SYNTAX_DUPLICATE_BLOCK, "duplicate block rejected")
+    assert_parse_syntax_err("hi{% extends \"base.html\" %}", GLYPH_SYNTAX_INVALID_NESTING, "extends after text rejected")
+    assert_parse_syntax_err("{{ super() }}", GLYPH_SYNTAX_INVALID_NESTING, "super() outside block rejected")
+    assert_parse_syntax_err("{% break %}", GLYPH_SYNTAX_UNKNOWN_TAG, "break tag rejected")
+    assert_parse_syntax_err("{% debug %}", GLYPH_SYNTAX_UNKNOWN_TAG, "debug tag rejected")
+
+    assert_parse_sec_err("{{ user.save() }}", GLYPH_SECURITY_POLICY, "method call rejected")
+    assert_parse_sec_err("{{ user.__class__ }}", GLYPH_SECURITY_REFLECTION, "__class__ rejected")
+    assert_parse_sec_err("{{ user.prototype }}", GLYPH_SECURITY_REFLECTION, "prototype rejected")
+    assert_parse_sec_err("{{ eval(\"1\") }}", GLYPH_SECURITY_REFLECTION, "eval() call rejected")
+    assert_parse_sec_err("{% include name_var %}", GLYPH_SECURITY_POLICY, "dynamic include rejected by default")
+
+def test_limits_and_lint() -> None:
+    # Expr depth limit
+    deep_budget: ResourceBudget = ResourceBudget(4096, 1000, 256, 1000, 8, 8, 4, 100, 100, 100)
+    deep_hit: bool = False
+    try:
+        _a: TemplateAst = parse_string("{{ (((((x))))) }}", "deep.html", BudgetTracker(deep_budget))
+    except GlyphLimitError as le:
+        deep_hit = (le.code == GLYPH_LIMIT_EXPR_DEPTH)
+    nox.test.assert_true(deep_hit, "max_expr_depth enforced")
+
+    # AST node limit
+    node_budget: ResourceBudget = ResourceBudget(4096, 1000, 256, 3, 8, 8, 16, 100, 100, 100)
+    node_hit: bool = False
+    try:
+        _a2: TemplateAst = parse_string("{{ a + b + c + d }}", "nodes.html", BudgetTracker(node_budget))
+    except GlyphLimitError as le2:
+        node_hit = (le2.code == GLYPH_LIMIT_AST_NODES)
+    nox.test.assert_true(node_hit, "max_ast_nodes enforced")
+
+    # Lint diagnostics
+    tr1: BudgetTracker = BudgetTracker(ResourceBudget(4096, 1000, 256, 1000, 8, 8, 16, 100, 100, 100))
+    toks: list[Token] = tokenize_with_budget("{{ user.__dict__ }}", "lint.html", tr1)
+    diags: list[GlyphError] = lint_tokens(toks, "lint.html", tr1)
+    nox.test.assert_eq_int(len(diags), 1, "lint reports 1 diagnostic")
+    nox.test.assert_eq_str(diags[0].code, GLYPH_SECURITY_REFLECTION, "lint error code")
+
+test_precedence_rules()
+test_statement_blocks()
+test_negative_syntax_and_security()
+test_limits_and_lint()

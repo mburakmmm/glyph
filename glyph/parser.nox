@@ -1,0 +1,752 @@
+# Two-stage parser for Glyph: statement nesting parser + Pratt/precedence-climbing expression parser.
+# Enforces ADR-0002, AGENTS.md §6.3-6.4, §7, and ResourceBudget bounds.
+import nox.strings
+from glyph.errors import SourceSpan, GlyphError, GlyphSyntaxError, GlyphSecurityError, GlyphTypeError, GlyphLimitError
+from glyph.errors import GLYPH_SYNTAX_UNEXPECTED_TOKEN, GLYPH_SYNTAX_UNCLOSED_BLOCK, GLYPH_SYNTAX_UNKNOWN_TAG
+from glyph.errors import GLYPH_SYNTAX_INVALID_NESTING, GLYPH_SYNTAX_INVALID_NUMBER
+from glyph.errors import GLYPH_SECURITY_REFLECTION, GLYPH_SECURITY_POLICY
+from glyph.limits import BudgetTracker, default_budget
+from glyph.value import is_forbidden_key, validate_float
+from glyph.token import Token, TokenKind
+from glyph.lexer import tokenize_with_budget
+from glyph.expressions import Expr, ExprKind, UnaryOp, BinaryOp, CallArg, MapEntry
+from glyph.ast import Stmt, StmtKind, IfBranch, MacroParam, TemplateAst
+from glyph.validate import TemplateInfo, validate_ast
+
+def _is_reserved_word(w: str) -> bool:
+    if w == "if" or w == "elif" or w == "else" or w == "endif":
+        return True
+    if w == "for" or w == "in" or w == "endfor":
+        return True
+    if w == "set" or w == "and" or w == "or" or w == "not" or w == "is":
+        return True
+    if w == "true" or w == "false" or w == "null" or w == "none":
+        return True
+    if w == "include" or w == "extends" or w == "block" or w == "endblock":
+        return True
+    if w == "macro" or w == "endmacro" or w == "import" or w == "from" or w == "as":
+        return True
+    if w == "call" or w == "endcall" or w == "raw" or w == "endraw":
+        return True
+    return False
+
+def _is_blocked_call_name(name: str) -> bool:
+    if is_forbidden_key(name):
+        return True
+    if name == "eval" or name == "exec" or name == "open" or name == "import":
+        return True
+    if name == "getattr" or name == "setattr" or name == "globals" or name == "locals":
+        return True
+    return False
+
+def _is_ws_only(s: str) -> bool:
+    blen: int = nox.strings.byte_len(s)
+    i: int = 0
+    while i < blen:
+        b: int = nox.strings.byte_at(s, i)
+        if b != 32 and b != 9 and b != 10 and b != 13:
+            return False
+        i = i + 1
+    return True
+
+def _kind_eq(a: TokenKind, b: TokenKind) -> bool:
+    return a == b
+
+class _Parser:
+    tokens: list[Token]
+    pos: int
+    logical_name: str
+    tracker: BudgetTracker
+
+    def __init__(self: _Parser, tokens: list[Token], logical_name: str, tracker: BudgetTracker) -> None:
+        self.tokens = tokens
+        self.pos = 0
+        self.logical_name = logical_name
+        self.tracker = tracker
+
+    def peek(self: _Parser) -> Token:
+        if self.pos < len(self.tokens):
+            return self.tokens[self.pos]
+        return self.tokens[len(self.tokens) - 1]
+
+    def peek_at(self: _Parser, offset: int) -> Token:
+        idx: int = self.pos + offset
+        if idx >= 0 and idx < len(self.tokens):
+            return self.tokens[idx]
+        return self.tokens[len(self.tokens) - 1]
+
+    def at_eof(self: _Parser) -> bool:
+        return self.peek().kind == TokenKind.TEof
+
+    def advance(self: _Parser) -> Token:
+        tok: Token = self.peek()
+        if self.pos < len(self.tokens) - 1:
+            self.pos = self.pos + 1
+        return tok
+
+    def check_kind(self: _Parser, k: TokenKind) -> bool:
+        return self.peek().kind == k
+
+    def check_ident(self: _Parser, word: str) -> bool:
+        t: Token = self.peek()
+        return t.kind == TokenKind.TIdent and t.text == word
+
+    def check_ident_at(self: _Parser, offset: int, word: str) -> bool:
+        t: Token = self.peek_at(offset)
+        return t.kind == TokenKind.TIdent and t.text == word
+
+    def expect_kind(self: _Parser, k: TokenKind, msg: str) -> Token:
+        t: Token = self.peek()
+        if t.kind != k:
+            raise GlyphSyntaxError(GLYPH_SYNTAX_UNEXPECTED_TOKEN, msg, t.span, "check template syntax")
+        return self.advance()
+
+    def expect_ident_word(self: _Parser, word: str, msg: str) -> Token:
+        t: Token = self.peek()
+        if t.kind != TokenKind.TIdent or t.text != word:
+            raise GlyphSyntaxError(GLYPH_SYNTAX_UNEXPECTED_TOKEN, msg, t.span, "expected keyword '" + word + "'")
+        return self.advance()
+
+    def expect_name(self: _Parser, msg: str) -> Token:
+        t: Token = self.peek()
+        if t.kind != TokenKind.TIdent:
+            raise GlyphSyntaxError(GLYPH_SYNTAX_UNEXPECTED_TOKEN, msg, t.span, "provide a valid identifier")
+        if is_forbidden_key(t.text):
+            raise GlyphSecurityError(GLYPH_SECURITY_REFLECTION, "restricted identifier '" + t.text + "' is not allowed", t.span, "choose a plain identifier")
+        if _is_reserved_word(t.text):
+            raise GlyphSyntaxError(GLYPH_SYNTAX_UNEXPECTED_TOKEN, "reserved keyword '" + t.text + "' cannot be used as identifier", t.span, "choose a non-reserved identifier")
+        return self.advance()
+
+    def _make_expr(self: _Parser, kind: ExprKind, span: SourceSpan) -> Expr:
+        self.tracker.consume_ast_node(span)
+        return Expr(kind, span)
+
+    def _make_stmt(self: _Parser, kind: StmtKind, span: SourceSpan) -> Stmt:
+        self.tracker.consume_ast_node(span)
+        return Stmt(kind, span)
+
+    # -----------------------------------------------------------------
+    # Expression Parser (ADR-0002 precedence)
+    # -----------------------------------------------------------------
+    def parse_expr(self: _Parser) -> Expr:
+        sp: SourceSpan = self.peek().span
+        self.tracker.enter_expr(sp)
+        e: Expr = self.parse_conditional()
+        self.tracker.exit_expr()
+        return e
+
+    def parse_conditional(self: _Parser) -> Expr:
+        then_expr: Expr = self.parse_or()
+        if self.check_ident("if"):
+            sp: SourceSpan = self.advance().span
+            cond_expr: Expr = self.parse_or()
+            _el: Token = self.expect_ident_word("else", "expected 'else' in conditional expression")
+            else_expr: Expr = self.parse_conditional()
+            return self._make_expr(ExprKind.EConditional(cond_expr, then_expr, else_expr), sp)
+        return then_expr
+
+    def parse_or(self: _Parser) -> Expr:
+        left: Expr = self.parse_and()
+        while self.check_ident("or"):
+            sp: SourceSpan = self.advance().span
+            right: Expr = self.parse_and()
+            left = self._make_expr(ExprKind.EBinary(BinaryOp.BOr, left, right), sp)
+        return left
+
+    def parse_and(self: _Parser) -> Expr:
+        left: Expr = self.parse_not()
+        while self.check_ident("and"):
+            sp: SourceSpan = self.advance().span
+            right: Expr = self.parse_not()
+            left = self._make_expr(ExprKind.EBinary(BinaryOp.BAnd, left, right), sp)
+        return left
+
+    def parse_not(self: _Parser) -> Expr:
+        if self.check_ident("not"):
+            sp: SourceSpan = self.advance().span
+            self.tracker.enter_expr(sp)
+            operand: Expr = self.parse_not()
+            self.tracker.exit_expr()
+            return self._make_expr(ExprKind.EUnary(UnaryOp.UNot, operand), sp)
+        return self.parse_compare()
+
+    def _is_cmp_start(self: _Parser) -> bool:
+        k: TokenKind = self.peek().kind
+        if k == TokenKind.TEqEq or k == TokenKind.TNotEq or k == TokenKind.TLt or k == TokenKind.TLtEq or k == TokenKind.TGt or k == TokenKind.TGtEq:
+            return True
+        if self.check_ident("in") or self.check_ident("is"):
+            return True
+        if self.check_ident("not") and self.check_ident_at(1, "in"):
+            return True
+        return False
+
+    def parse_compare(self: _Parser) -> Expr:
+        left: Expr = self.parse_sum()
+        if not self._is_cmp_start():
+            return left
+        res: Expr = left
+        if self.check_ident("is"):
+            sp: SourceSpan = self.advance().span
+            negated: bool = False
+            if self.check_ident("not"):
+                _n: Token = self.advance()
+                negated = True
+            t_tok: Token = self.expect_kind(TokenKind.TIdent, "expected test name after 'is'")
+            if is_forbidden_key(t_tok.text):
+                raise GlyphSecurityError(GLYPH_SECURITY_REFLECTION, "restricted test name", t_tok.span, "use a registered test name")
+            t_args: list[CallArg] = []
+            if self.check_kind(TokenKind.TLParen):
+                t_args = self.parse_call_args()
+            res = self._make_expr(ExprKind.EIsTest(left, t_tok.text, negated, t_args), sp)
+        elif self.check_ident("not") and self.check_ident_at(1, "in"):
+            sp_ni: SourceSpan = self.advance().span
+            _in_tok: Token = self.advance()
+            right_ni: Expr = self.parse_sum()
+            res = self._make_expr(ExprKind.EBinary(BinaryOp.BNotIn, left, right_ni), sp_ni)
+        elif self.check_ident("in"):
+            sp_in: SourceSpan = self.advance().span
+            right_in: Expr = self.parse_sum()
+            res = self._make_expr(ExprKind.EBinary(BinaryOp.BIn, left, right_in), sp_in)
+        else:
+            op_tok: Token = self.advance()
+            right_c: Expr = self.parse_sum()
+            bop: BinaryOp = BinaryOp.BEq
+            if op_tok.kind == TokenKind.TNotEq:
+                bop = BinaryOp.BNotEq
+            elif op_tok.kind == TokenKind.TLt:
+                bop = BinaryOp.BLt
+            elif op_tok.kind == TokenKind.TLtEq:
+                bop = BinaryOp.BLtEq
+            elif op_tok.kind == TokenKind.TGt:
+                bop = BinaryOp.BGt
+            elif op_tok.kind == TokenKind.TGtEq:
+                bop = BinaryOp.BGtEq
+            res = self._make_expr(ExprKind.EBinary(bop, left, right_c), op_tok.span)
+
+        if self._is_cmp_start():
+            raise GlyphSyntaxError(
+                GLYPH_SYNTAX_UNEXPECTED_TOKEN,
+                "chained comparisons are not permitted; combine with 'and'",
+                self.peek().span,
+                "write 'a < x and x < b'"
+            )
+        return res
+
+    def parse_sum(self: _Parser) -> Expr:
+        left: Expr = self.parse_product()
+        while self.check_kind(TokenKind.TPlus) or self.check_kind(TokenKind.TMinus):
+            op_tok: Token = self.advance()
+            right: Expr = self.parse_product()
+            bop: BinaryOp = BinaryOp.BAdd
+            if op_tok.kind == TokenKind.TMinus:
+                bop = BinaryOp.BSub
+            left = self._make_expr(ExprKind.EBinary(bop, left, right), op_tok.span)
+        return left
+
+    def parse_product(self: _Parser) -> Expr:
+        left: Expr = self.parse_unary()
+        while self.check_kind(TokenKind.TStar) or self.check_kind(TokenKind.TSlash) or self.check_kind(TokenKind.TSlashSlash) or self.check_kind(TokenKind.TPercent):
+            op_tok: Token = self.advance()
+            right: Expr = self.parse_unary()
+            bop: BinaryOp = BinaryOp.BMul
+            if op_tok.kind == TokenKind.TSlash:
+                bop = BinaryOp.BDiv
+            elif op_tok.kind == TokenKind.TSlashSlash:
+                bop = BinaryOp.BFloorDiv
+            elif op_tok.kind == TokenKind.TPercent:
+                bop = BinaryOp.BMod
+            left = self._make_expr(ExprKind.EBinary(bop, left, right), op_tok.span)
+        return left
+
+    def parse_unary(self: _Parser) -> Expr:
+        if self.check_kind(TokenKind.TPlus) or self.check_kind(TokenKind.TMinus):
+            op_tok: Token = self.advance()
+            self.tracker.enter_expr(op_tok.span)
+            operand: Expr = self.parse_unary()
+            self.tracker.exit_expr()
+            uop: UnaryOp = UnaryOp.UPos
+            if op_tok.kind == TokenKind.TMinus:
+                uop = UnaryOp.UNeg
+            return self._make_expr(ExprKind.EUnary(uop, operand), op_tok.span)
+        return self.parse_filter()
+
+    def parse_filter(self: _Parser) -> Expr:
+        expr: Expr = self.parse_postfix()
+        while self.check_kind(TokenKind.TPipe):
+            pipe_sp: SourceSpan = self.advance().span
+            name_tok: Token = self.expect_kind(TokenKind.TIdent, "expected filter name after '|'")
+            if _is_blocked_call_name(name_tok.text):
+                raise GlyphSecurityError(GLYPH_SECURITY_REFLECTION, "restricted filter name '" + name_tok.text + "'", name_tok.span, "use an approved filter")
+            args: list[CallArg] = []
+            if self.check_kind(TokenKind.TLParen):
+                args = self.parse_call_args()
+            expr = self._make_expr(ExprKind.EFilter(expr, name_tok.text, args), pipe_sp)
+        return expr
+
+    def parse_postfix(self: _Parser) -> Expr:
+        expr: Expr = self.parse_primary()
+        cont: bool = True
+        while cont:
+            if self.check_kind(TokenKind.TDot):
+                dot_sp: SourceSpan = self.advance().span
+                field_tok: Token = self.expect_kind(TokenKind.TIdent, "expected field name after '.'")
+                if is_forbidden_key(field_tok.text):
+                    raise GlyphSecurityError(GLYPH_SECURITY_REFLECTION, "access to restricted metadata key '" + field_tok.text + "' is denied", field_tok.span, "reflection fields are forbidden")
+                if self.check_kind(TokenKind.TLParen):
+                    raise GlyphSecurityError(GLYPH_SECURITY_POLICY, "method calls on values are not permitted; use filters or registered functions", field_tok.span, "replace obj.method(...) with obj | filter(...)")
+                expr = self._make_expr(ExprKind.EMember(expr, field_tok.text), dot_sp)
+            elif self.check_kind(TokenKind.TLBracket):
+                br_sp: SourceSpan = self.advance().span
+                idx_expr: Expr = self.parse_expr()
+                _rb: Token = self.expect_kind(TokenKind.TRBracket, "expected ']' after index expression")
+                expr = self._make_expr(ExprKind.EIndex(expr, idx_expr), br_sp)
+            else:
+                cont = False
+        return expr
+
+    def parse_call_args(self: _Parser) -> list[CallArg]:
+        _lp: Token = self.expect_kind(TokenKind.TLParen, "expected '('")
+        args: list[CallArg] = []
+        seen_kw: bool = False
+        kw_names: list[str] = []
+        if not self.check_kind(TokenKind.TRParen):
+            done: bool = False
+            while not done:
+                if self.peek().kind == TokenKind.TIdent and self.peek_at(1).kind == TokenKind.TAssign:
+                    kw_tok: Token = self.advance()
+                    if is_forbidden_key(kw_tok.text):
+                        raise GlyphSecurityError(GLYPH_SECURITY_REFLECTION, "restricted argument name", kw_tok.span, "choose a plain name")
+                    _eq: Token = self.advance()
+                    ki: int = 0
+                    while ki < len(kw_names):
+                        if kw_names[ki] == kw_tok.text:
+                            raise GlyphSyntaxError(GLYPH_SYNTAX_UNEXPECTED_TOKEN, "duplicate keyword argument '" + kw_tok.text + "'", kw_tok.span, "pass each keyword argument once")
+                        ki = ki + 1
+                    kw_names.append(kw_tok.text)
+                    seen_kw = True
+                    val_expr: Expr = self.parse_expr()
+                    args.append(CallArg(kw_tok.text, val_expr, kw_tok.span))
+                else:
+                    if seen_kw:
+                        raise GlyphSyntaxError(GLYPH_SYNTAX_UNEXPECTED_TOKEN, "positional argument cannot follow keyword argument", self.peek().span, "move positional arguments before keyword arguments")
+                    pos_expr: Expr = self.parse_expr()
+                    args.append(CallArg("", pos_expr, pos_expr.span))
+                if self.check_kind(TokenKind.TComma):
+                    _cm: Token = self.advance()
+                    if self.check_kind(TokenKind.TRParen):
+                        done = True
+                else:
+                    done = True
+        _rp: Token = self.expect_kind(TokenKind.TRParen, "expected ')' after arguments")
+        return args
+
+    def parse_primary(self: _Parser) -> Expr:
+        t: Token = self.peek()
+        if t.kind == TokenKind.TInt:
+            _tok: Token = self.advance()
+            try:
+                iv: int = int(t.text)
+                return self._make_expr(ExprKind.EInt(iv), t.span)
+            except ValueError:
+                raise GlyphSyntaxError(GLYPH_SYNTAX_INVALID_NUMBER, "integer literal out of 64-bit range", t.span, "use a smaller integer")
+        if t.kind == TokenKind.TFloat:
+            _ftok: Token = self.advance()
+            fv: float = 0.0
+            try:
+                fv = float(t.text)
+            except ValueError:
+                raise GlyphSyntaxError(GLYPH_SYNTAX_INVALID_NUMBER, "invalid float literal", t.span, "check float syntax")
+            _vf: float = validate_float(fv, t.span)
+            return self._make_expr(ExprKind.EFloat(fv), t.span)
+        if t.kind == TokenKind.TString:
+            _stok: Token = self.advance()
+            return self._make_expr(ExprKind.EStr(t.text), t.span)
+        if t.kind == TokenKind.TIdent:
+            _itok: Token = self.advance()
+            if t.text == "true":
+                return self._make_expr(ExprKind.EBool(True), t.span)
+            if t.text == "false":
+                return self._make_expr(ExprKind.EBool(False), t.span)
+            if t.text == "null" or t.text == "none":
+                return self._make_expr(ExprKind.ENull, t.span)
+            if _is_blocked_call_name(t.text):
+                raise GlyphSecurityError(GLYPH_SECURITY_REFLECTION, "access to restricted identifier '" + t.text + "' is denied", t.span, "use safe template variables and helpers")
+            if _is_reserved_word(t.text):
+                raise GlyphSyntaxError(GLYPH_SYNTAX_UNEXPECTED_TOKEN, "unexpected keyword '" + t.text + "' in expression", t.span, "check expression syntax")
+            if self.check_kind(TokenKind.TLParen):
+                cargs: list[CallArg] = self.parse_call_args()
+                return self._make_expr(ExprKind.ECall(t.text, cargs), t.span)
+            return self._make_expr(ExprKind.EIdent(t.text), t.span)
+        if t.kind == TokenKind.TLParen:
+            _lp: Token = self.advance()
+            inner: Expr = self.parse_expr()
+            _rp: Token = self.expect_kind(TokenKind.TRParen, "expected ')' after expression")
+            return inner
+        if t.kind == TokenKind.TLBracket:
+            lb_sp: SourceSpan = self.advance().span
+            self.tracker.enter_expr(lb_sp)
+            items: list[Expr] = []
+            if not self.check_kind(TokenKind.TRBracket):
+                ldone: bool = False
+                while not ldone:
+                    items.append(self.parse_expr())
+                    if self.check_kind(TokenKind.TComma):
+                        _lc: Token = self.advance()
+                        if self.check_kind(TokenKind.TRBracket):
+                            ldone = True
+                    else:
+                        ldone = True
+            _rb: Token = self.expect_kind(TokenKind.TRBracket, "expected ']' after list literal")
+            self.tracker.exit_expr()
+            return self._make_expr(ExprKind.EList(items), lb_sp)
+        if t.kind == TokenKind.TLBrace:
+            lbr_sp: SourceSpan = self.advance().span
+            self.tracker.enter_expr(lbr_sp)
+            entries: list[MapEntry] = []
+            if not self.check_kind(TokenKind.TRBrace):
+                mdone: bool = False
+                while not mdone:
+                    k_expr: Expr = self.parse_expr()
+                    _col: Token = self.expect_kind(TokenKind.TColon, "expected ':' in map literal")
+                    v_expr: Expr = self.parse_expr()
+                    entries.append(MapEntry(k_expr, v_expr, k_expr.span))
+                    if self.check_kind(TokenKind.TComma):
+                        _mc: Token = self.advance()
+                        if self.check_kind(TokenKind.TRBrace):
+                            mdone = True
+                    else:
+                        mdone = True
+            _rbr: Token = self.expect_kind(TokenKind.TRBrace, "expected '}' after map literal")
+            self.tracker.exit_expr()
+            return self._make_expr(ExprKind.EMap(entries), lbr_sp)
+        raise GlyphSyntaxError(GLYPH_SYNTAX_UNEXPECTED_TOKEN, "unexpected token in expression", t.span, "expected literal, identifier, or '('")
+
+    # -----------------------------------------------------------------
+    # Statement Nesting Parser
+    # -----------------------------------------------------------------
+    def _peek_stmt_tag(self: _Parser) -> str:
+        t: Token = self.peek_at(1)
+        if t.kind == TokenKind.TIdent:
+            return t.text
+        return ""
+
+    def _is_stop_tag(self: _Parser, tag: str, stop_tags: list[str]) -> bool:
+        i: int = 0
+        while i < len(stop_tags):
+            if stop_tags[i] == tag:
+                return True
+            i = i + 1
+        return False
+
+    def parse_body(self: _Parser, stop_tags: list[str], open_tag: str, open_span: SourceSpan) -> list[Stmt]:
+        stmts: list[Stmt] = []
+        done: bool = False
+        while not done:
+            if self.at_eof():
+                if len(stop_tags) > 0:
+                    raise GlyphSyntaxError(
+                        GLYPH_SYNTAX_UNCLOSED_BLOCK,
+                        "unclosed '" + open_tag + "' block",
+                        open_span,
+                        "close the block before end of template"
+                    )
+                done = True
+            elif self.check_kind(TokenKind.TText):
+                tt: Token = self.advance()
+                stmts.append(self._make_stmt(StmtKind.SText(tt.text), tt.span))
+            elif self.check_kind(TokenKind.TExprStart):
+                _es: Token = self.advance()
+                expr: Expr = self.parse_expr()
+                _ee: Token = self.expect_kind(TokenKind.TExprEnd, "expected '}}' after expression")
+                stmts.append(self._make_stmt(StmtKind.SOutput(expr), expr.span))
+            elif self.check_kind(TokenKind.TStmtStart):
+                tag: str = self._peek_stmt_tag()
+                if len(tag) > 0 and self._is_stop_tag(tag, stop_tags):
+                    done = True
+                else:
+                    stmts.append(self.parse_stmt())
+            else:
+                raise GlyphSyntaxError(GLYPH_SYNTAX_UNEXPECTED_TOKEN, "unexpected token at template level", self.peek().span, "check template delimiters")
+        return stmts
+
+    def parse_stmt(self: _Parser) -> Stmt:
+        start_tok: Token = self.expect_kind(TokenKind.TStmtStart, "expected '{%'")
+        tag_tok: Token = self.peek()
+        if tag_tok.kind != TokenKind.TIdent:
+            raise GlyphSyntaxError(GLYPH_SYNTAX_UNKNOWN_TAG, "expected statement keyword after '{%'", tag_tok.span, "use if, for, set, include, extends, block, macro, import, from, or call")
+        tag: str = self.advance().text
+
+        if tag == "if":
+            return self.parse_if(start_tok.span)
+        if tag == "for":
+            return self.parse_for(start_tok.span)
+        if tag == "set":
+            return self.parse_set(start_tok.span)
+        if tag == "include":
+            return self.parse_include(start_tok.span)
+        if tag == "extends":
+            return self.parse_extends(start_tok.span)
+        if tag == "block":
+            return self.parse_block(start_tok.span)
+        if tag == "macro":
+            return self.parse_macro(start_tok.span)
+        if tag == "import":
+            return self.parse_import(start_tok.span)
+        if tag == "from":
+            return self.parse_from_import(start_tok.span)
+        if tag == "call":
+            return self.parse_call_block(start_tok.span)
+
+        if tag == "elif" or tag == "else" or tag == "endif" or tag == "endfor" or tag == "endblock" or tag == "endmacro" or tag == "endcall":
+            raise GlyphSyntaxError(GLYPH_SYNTAX_INVALID_NESTING, "unexpected '" + tag + "' without matching opening tag", tag_tok.span, "check block nesting")
+
+        raise GlyphSyntaxError(GLYPH_SYNTAX_UNKNOWN_TAG, "unknown statement tag '" + tag + "'", tag_tok.span, "check supported statement tags")
+
+    def parse_if(self: _Parser, start_span: SourceSpan) -> Stmt:
+        cond: Expr = self.parse_expr()
+        _se: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after if condition")
+        branches: list[IfBranch] = []
+        stop_if: list[str] = ["elif", "else", "endif"]
+        first_body: list[Stmt] = self.parse_body(stop_if, "if", start_span)
+        branches.append(IfBranch(cond, first_body, start_span))
+        else_body: list[Stmt] = []
+
+        loop_if: bool = True
+        while loop_if:
+            next_tag: str = self._peek_stmt_tag()
+            if next_tag == "elif":
+                _s1: Token = self.advance()
+                elif_tok: Token = self.advance()
+                elif_cond: Expr = self.parse_expr()
+                _s2: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after elif condition")
+                elif_body: list[Stmt] = self.parse_body(stop_if, "elif", elif_tok.span)
+                branches.append(IfBranch(elif_cond, elif_body, elif_tok.span))
+            elif next_tag == "else":
+                _s3: Token = self.advance()
+                else_tok: Token = self.advance()
+                _s4: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after else")
+                stop_end: list[str] = ["endif"]
+                else_body = self.parse_body(stop_end, "else", else_tok.span)
+                _s5: Token = self.expect_kind(TokenKind.TStmtStart, "expected '{% endif %}'")
+                _ei: Token = self.expect_ident_word("endif", "expected 'endif'")
+                _s6: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after endif")
+                loop_if = False
+            elif next_tag == "endif":
+                _s7: Token = self.advance()
+                _ei2: Token = self.advance()
+                _s8: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after endif")
+                loop_if = False
+            else:
+                raise GlyphSyntaxError(GLYPH_SYNTAX_UNCLOSED_BLOCK, "expected 'endif'", start_span, "close 'if' with '{% endif %}'")
+        return self._make_stmt(StmtKind.SIf(branches, else_body), start_span)
+
+    def parse_for(self: _Parser, start_span: SourceSpan) -> Stmt:
+        t1: Token = self.expect_name("expected loop variable name after 'for'")
+        targets: list[str] = [t1.text]
+        if self.check_kind(TokenKind.TComma):
+            _cm: Token = self.advance()
+            t2: Token = self.expect_name("expected second loop variable after ','")
+            if t2.text == t1.text:
+                raise GlyphSyntaxError(GLYPH_SYNTAX_UNEXPECTED_TOKEN, "duplicate loop target variable '" + t2.text + "'", t2.span, "use distinct loop variable names")
+            targets.append(t2.text)
+        _in: Token = self.expect_ident_word("in", "expected 'in' in for statement")
+        iterable: Expr = self.parse_expr()
+        _se: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after for header")
+        stop_for: list[str] = ["else", "endfor"]
+        body: list[Stmt] = self.parse_body(stop_for, "for", start_span)
+        else_body: list[Stmt] = []
+        next_tag: str = self._peek_stmt_tag()
+        if next_tag == "else":
+            _s1: Token = self.advance()
+            el_tok: Token = self.advance()
+            _s2: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after else")
+            stop_ef: list[str] = ["endfor"]
+            else_body = self.parse_body(stop_ef, "else", el_tok.span)
+        _s3: Token = self.expect_kind(TokenKind.TStmtStart, "expected '{% endfor %}'")
+        _ef: Token = self.expect_ident_word("endfor", "expected 'endfor'")
+        _s4: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after endfor")
+        return self._make_stmt(StmtKind.SFor(targets, iterable, body, else_body), start_span)
+
+    def parse_set(self: _Parser, start_span: SourceSpan) -> Stmt:
+        target: Token = self.expect_name("expected variable name after 'set'")
+        _eq: Token = self.expect_kind(TokenKind.TAssign, "expected '=' in set statement")
+        val: Expr = self.parse_expr()
+        _se: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after set statement")
+        return self._make_stmt(StmtKind.SSet(target.text, val), start_span)
+
+    def parse_include(self: _Parser, start_span: SourceSpan) -> Stmt:
+        tpl_expr: Expr = self.parse_expr()
+        ignore_missing: bool = False
+        with_context: bool = False
+        if self.check_ident("ignore"):
+            _ig: Token = self.advance()
+            _ms: Token = self.expect_ident_word("missing", "expected 'missing' after 'ignore'")
+            ignore_missing = True
+        if self.check_ident("with"):
+            _w: Token = self.advance()
+            _ctx: Token = self.expect_ident_word("context", "expected 'context' after 'with'")
+            with_context = True
+        elif self.check_ident("without"):
+            _wo: Token = self.advance()
+            _ctx2: Token = self.expect_ident_word("context", "expected 'context' after 'without'")
+            with_context = False
+        _se: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after include statement")
+        return self._make_stmt(StmtKind.SInclude(tpl_expr, with_context, ignore_missing), start_span)
+
+    def parse_extends(self: _Parser, start_span: SourceSpan) -> Stmt:
+        tpl_tok: Token = self.expect_kind(TokenKind.TString, "expected literal template string after 'extends'")
+        _se: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after extends statement")
+        return self._make_stmt(StmtKind.SExtends(tpl_tok.text), start_span)
+
+    def parse_block(self: _Parser, start_span: SourceSpan) -> Stmt:
+        name_tok: Token = self.expect_name("expected block name after 'block'")
+        _se: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after block header")
+        stop_blk: list[str] = ["endblock"]
+        body: list[Stmt] = self.parse_body(stop_blk, "block", start_span)
+        _s1: Token = self.expect_kind(TokenKind.TStmtStart, "expected '{% endblock %}'")
+        _eb: Token = self.expect_ident_word("endblock", "expected 'endblock'")
+        if self.check_kind(TokenKind.TIdent):
+            end_name: Token = self.expect_name("expected matching block name after 'endblock'")
+            if end_name.text != name_tok.text:
+                raise GlyphSyntaxError(GLYPH_SYNTAX_INVALID_NESTING, "endblock name '" + end_name.text + "' does not match block '" + name_tok.text + "'", end_name.span, "match the opening block name")
+        _s2: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after endblock")
+        return self._make_stmt(StmtKind.SBlock(name_tok.text, body), start_span)
+
+    def parse_macro(self: _Parser, start_span: SourceSpan) -> Stmt:
+        name_tok: Token = self.expect_name("expected macro name after 'macro'")
+        _lp: Token = self.expect_kind(TokenKind.TLParen, "expected '(' after macro name")
+        params: list[MacroParam] = []
+        seen_names: list[str] = []
+        seen_default: bool = False
+        if not self.check_kind(TokenKind.TRParen):
+            pdone: bool = False
+            while not pdone:
+                p_tok: Token = self.expect_name("expected macro parameter name")
+                pi: int = 0
+                while pi < len(seen_names):
+                    if seen_names[pi] == p_tok.text:
+                        raise GlyphSyntaxError(GLYPH_SYNTAX_UNEXPECTED_TOKEN, "duplicate macro parameter '" + p_tok.text + "'", p_tok.span, "rename duplicate parameter")
+                    pi = pi + 1
+                seen_names.append(p_tok.text)
+                if self.check_kind(TokenKind.TAssign):
+                    _eq: Token = self.advance()
+                    def_expr: Expr = self.parse_expr()
+                    seen_default = True
+                    params.append(MacroParam(p_tok.text, True, def_expr, p_tok.span))
+                else:
+                    if seen_default:
+                        raise GlyphSyntaxError(GLYPH_SYNTAX_UNEXPECTED_TOKEN, "non-default parameter cannot follow default parameter", p_tok.span, "reorder macro parameters")
+                    params.append(MacroParam(p_tok.text, False, Expr(ExprKind.ENull, p_tok.span), p_tok.span))
+                if self.check_kind(TokenKind.TComma):
+                    _cm: Token = self.advance()
+                    if self.check_kind(TokenKind.TRParen):
+                        pdone = True
+                else:
+                    pdone = True
+        _rp: Token = self.expect_kind(TokenKind.TRParen, "expected ')' after macro parameters")
+        _se: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after macro header")
+        stop_mac: list[str] = ["endmacro"]
+        body: list[Stmt] = self.parse_body(stop_mac, "macro", start_span)
+        _s1: Token = self.expect_kind(TokenKind.TStmtStart, "expected '{% endmacro %}'")
+        _em: Token = self.expect_ident_word("endmacro", "expected 'endmacro'")
+        _s2: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after endmacro")
+        return self._make_stmt(StmtKind.SMacro(name_tok.text, params, body), start_span)
+
+    def parse_import(self: _Parser, start_span: SourceSpan) -> Stmt:
+        tpl_tok: Token = self.expect_kind(TokenKind.TString, "expected template string in import")
+        _as: Token = self.expect_ident_word("as", "expected 'as' in import statement")
+        alias_tok: Token = self.expect_name("expected alias name after 'as'")
+        _se: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after import")
+        return self._make_stmt(StmtKind.SImport(tpl_tok.text, alias_tok.text), start_span)
+
+    def parse_from_import(self: _Parser, start_span: SourceSpan) -> Stmt:
+        tpl_tok: Token = self.expect_kind(TokenKind.TString, "expected template string after 'from'")
+        _imp: Token = self.expect_ident_word("import", "expected 'import' after template string")
+        names: list[str] = []
+        done: bool = False
+        while not done:
+            n_tok: Token = self.expect_name("expected imported symbol name")
+            names.append(n_tok.text)
+            if self.check_kind(TokenKind.TComma):
+                _cm: Token = self.advance()
+            else:
+                done = True
+        _se: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after from-import")
+        return self._make_stmt(StmtKind.SFromImport(tpl_tok.text, names), start_span)
+
+    def parse_call_block(self: _Parser, start_span: SourceSpan) -> Stmt:
+        caller_params: list[str] = []
+        if self.check_kind(TokenKind.TLParen):
+            _lp: Token = self.advance()
+            if not self.check_kind(TokenKind.TRParen):
+                cdone: bool = False
+                while not cdone:
+                    cp: Token = self.expect_name("expected caller parameter name")
+                    caller_params.append(cp.text)
+                    if self.check_kind(TokenKind.TComma):
+                        _cm: Token = self.advance()
+                        if self.check_kind(TokenKind.TRParen):
+                            cdone = True
+                    else:
+                        cdone = True
+            _rp: Token = self.expect_kind(TokenKind.TRParen, "expected ')' after caller parameters")
+        mac_tok: Token = self.expect_name("expected macro name in call statement")
+        args: list[CallArg] = self.parse_call_args()
+        _se: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after call header")
+        stop_call: list[str] = ["endcall"]
+        body: list[Stmt] = self.parse_body(stop_call, "call", start_span)
+        _s1: Token = self.expect_kind(TokenKind.TStmtStart, "expected '{% endcall %}'")
+        _ec: Token = self.expect_ident_word("endcall", "expected 'endcall'")
+        _s2: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after endcall")
+        return self._make_stmt(StmtKind.SCallBlock(mac_tok.text, args, caller_params, body), start_span)
+
+def parse_tokens(tokens: list[Token], logical_name: str, tracker: BudgetTracker) -> TemplateAst:
+    p: _Parser = _Parser(tokens, logical_name, tracker)
+    stop_empty: list[str] = []
+    body: list[Stmt] = p.parse_body(stop_empty, "", SourceSpan(logical_name, 1, 1, 0, 0))
+    has_ext: bool = False
+    ext_target: str = ""
+    seen_content: bool = False
+    i: int = 0
+    while i < len(body):
+        st: Stmt = body[i]
+        match st.kind:
+            case StmtKind.SText(txt):
+                if not _is_ws_only(txt):
+                    seen_content = True
+            case StmtKind.SExtends(target):
+                if has_ext:
+                    raise GlyphSyntaxError(GLYPH_SYNTAX_INVALID_NESTING, "multiple 'extends' statements are not permitted", st.span, "keep a single extends at the top of the template")
+                if seen_content:
+                    raise GlyphSyntaxError(GLYPH_SYNTAX_INVALID_NESTING, "'extends' must be the first statement in the template", st.span, "move '{% extends %}' to the top")
+                has_ext = True
+                ext_target = target
+            case _:
+                seen_content = True
+        i = i + 1
+    return TemplateAst(logical_name, body, has_ext, ext_target)
+
+def parse_string(source: str, logical_name: str, tracker: BudgetTracker) -> TemplateAst:
+    tokens: list[Token] = tokenize_with_budget(source, logical_name, tracker)
+    return parse_tokens(tokens, logical_name, tracker)
+
+def parse_source(source: str, logical_name: str) -> TemplateAst:
+    tracker: BudgetTracker = BudgetTracker(default_budget())
+    return parse_string(source, logical_name, tracker)
+
+# Diagnostic scanner for `lint()`: never returns an executable TemplateAst when errors exist.
+def lint_tokens(tokens: list[Token], logical_name: str, tracker: BudgetTracker) -> list[GlyphError]:
+    diags: list[GlyphError] = []
+    try:
+        ast: TemplateAst = parse_tokens(tokens, logical_name, tracker)
+        _info: TemplateInfo = validate_ast(ast, False)
+        return diags
+    except GlyphSyntaxError as se:
+        diags.append(se)
+    except GlyphSecurityError as sec:
+        diags.append(sec)
+    except GlyphTypeError as te:
+        diags.append(te)
+    except GlyphLimitError as le:
+        diags.append(le)
+    return diags

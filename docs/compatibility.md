@@ -40,6 +40,8 @@
 | Variable shadowing in same scope | **unavailable** | Redefining a variable name with a different type in the same scope is rejected (`TypeMismatch`). |
 | `break` / `continue` | **unavailable** | Not supported in Nox loops (`collections.nox` confirms boolean loop flags are required). |
 | `.append()` on member fields | **unavailable** | Requires local copy-append-assign (`xs = self.items; xs.append(v); self.items = xs`). |
+| `.append()` on function parameters | **unavailable** | Codegen rejects `.append()` on `list[T]` function parameters (`genListAppend`); build a local list or reassign returned list. |
+| Mutually recursive `class` + `enum` | **verified** | `class Expr { kind: ExprKind }` + `enum ExprKind` with `list[Expr]` compiles and passes `match` on LLVM and QBE. |
 | Empty list literal `[]` | **verified** | Allowed when explicitly type-annotated (`items: list[T] = []`). |
 | Function overloading | **unavailable** | Separate typed function names are required. |
 | Parenthesized `from m import (...)` | **unavailable** | Use comma-separated imports per line (`from m import A, B`). |

@@ -1,0 +1,275 @@
+# Static validation and TemplateInfo extraction for compiled Glyph ASTs.
+# Enforces AGENTS.md §6.3, §7.2, §9.1-9.2, §16.3. Pure NOX, freestanding-safe.
+from glyph.errors import SourceSpan, GlyphSyntaxError, GlyphSecurityError
+from glyph.errors import GLYPH_SYNTAX_INVALID_NESTING, GLYPH_SYNTAX_DUPLICATE_BLOCK, GLYPH_SECURITY_POLICY
+from glyph.expressions import Expr, ExprKind, CallArg, MapEntry
+from glyph.ast import Stmt, StmtKind, IfBranch, MacroParam, TemplateAst
+
+class TemplateInfo:
+    logical_name: str
+    referenced_vars: list[str]
+    blocks: list[str]
+    includes: list[str]
+    macros: list[str]
+    imports: list[str]
+    has_extends: bool
+    extends_target: str
+
+    def __init__(
+        self: TemplateInfo,
+        logical_name: str,
+        referenced_vars: list[str],
+        blocks: list[str],
+        includes: list[str],
+        macros: list[str],
+        imports: list[str],
+        has_extends: bool,
+        extends_target: str
+    ) -> None:
+        self.logical_name = logical_name
+        self.referenced_vars = referenced_vars
+        self.blocks = blocks
+        self.includes = includes
+        self.macros = macros
+        self.imports = imports
+        self.has_extends = has_extends
+        self.extends_target = extends_target
+
+def _append_unique(items: list[str], val: str) -> list[str]:
+    out: list[str] = []
+    i: int = 0
+    found: bool = False
+    while i < len(items):
+        if items[i] == val:
+            found = True
+        out.append(items[i])
+        i = i + 1
+    if not found:
+        out.append(val)
+    return out
+
+def _has_name(items: list[str], val: str) -> bool:
+    i: int = 0
+    while i < len(items):
+        if items[i] == val:
+            return True
+        i = i + 1
+    return False
+
+class _Validator:
+    has_extends: bool
+    allow_dynamic_include: bool
+    in_block: bool
+    referenced_vars: list[str]
+    blocks: list[str]
+    includes: list[str]
+    macros: list[str]
+    imports: list[str]
+
+    def __init__(self: _Validator, has_extends: bool, allow_dynamic_include: bool) -> None:
+        self.has_extends = has_extends
+        self.allow_dynamic_include = allow_dynamic_include
+        self.in_block = False
+        empty_v: list[str] = []
+        empty_b: list[str] = []
+        empty_inc: list[str] = []
+        empty_m: list[str] = []
+        empty_imp: list[str] = []
+        self.referenced_vars = empty_v
+        self.blocks = empty_b
+        self.includes = empty_inc
+        self.macros = empty_m
+        self.imports = empty_imp
+
+    def visit_expr(self: _Validator, expr: Expr, bound_locals: list[str]) -> None:
+        match expr.kind:
+            case ExprKind.ENull:
+                return
+            case ExprKind.EBool(_):
+                return
+            case ExprKind.EInt(_):
+                return
+            case ExprKind.EFloat(_):
+                return
+            case ExprKind.EStr(_):
+                return
+            case ExprKind.EIdent(name):
+                if not _has_name(bound_locals, name) and name != "loop":
+                    self.referenced_vars = _append_unique(self.referenced_vars, name)
+            case ExprKind.EList(items):
+                i: int = 0
+                while i < len(items):
+                    self.visit_expr(items[i], bound_locals)
+                    i = i + 1
+            case ExprKind.EMap(entries):
+                j: int = 0
+                while j < len(entries):
+                    ent: MapEntry = entries[j]
+                    self.visit_expr(ent.key, bound_locals)
+                    self.visit_expr(ent.value, bound_locals)
+                    j = j + 1
+            case ExprKind.EMember(target, _):
+                self.visit_expr(target, bound_locals)
+            case ExprKind.EIndex(target, index):
+                self.visit_expr(target, bound_locals)
+                self.visit_expr(index, bound_locals)
+            case ExprKind.EUnary(_, operand):
+                self.visit_expr(operand, bound_locals)
+            case ExprKind.EBinary(_, left, right):
+                self.visit_expr(left, bound_locals)
+                self.visit_expr(right, bound_locals)
+            case ExprKind.EConditional(cond, then_expr, else_expr):
+                self.visit_expr(cond, bound_locals)
+                self.visit_expr(then_expr, bound_locals)
+                self.visit_expr(else_expr, bound_locals)
+            case ExprKind.EFilter(target, _, args):
+                self.visit_expr(target, bound_locals)
+                self.visit_args(args, bound_locals)
+            case ExprKind.EIsTest(target, _, _, args):
+                self.visit_expr(target, bound_locals)
+                self.visit_args(args, bound_locals)
+            case ExprKind.ECall(name, args):
+                if name == "super":
+                    if not self.in_block or not self.has_extends:
+                        raise GlyphSyntaxError(
+                            GLYPH_SYNTAX_INVALID_NESTING,
+                            "super() is only valid inside a block in a template using extends",
+                            expr.span,
+                            "use super() inside {% block %} of a child template"
+                        )
+                    if len(args) > 0:
+                        raise GlyphSyntaxError(
+                            GLYPH_SYNTAX_INVALID_NESTING,
+                            "super() takes no arguments",
+                            expr.span,
+                            "call super()"
+                        )
+                self.visit_args(args, bound_locals)
+
+    def visit_args(self: _Validator, args: list[CallArg], bound_locals: list[str]) -> None:
+        i: int = 0
+        while i < len(args):
+            a: CallArg = args[i]
+            self.visit_expr(a.value, bound_locals)
+            i = i + 1
+
+    def visit_stmts(self: _Validator, stmts: list[Stmt], bound_locals: list[str], top_level: bool) -> None:
+        i: int = 0
+        while i < len(stmts):
+            st: Stmt = stmts[i]
+            match st.kind:
+                case StmtKind.SText(_):
+                    pass
+                case StmtKind.SOutput(expr):
+                    self.visit_expr(expr, bound_locals)
+                case StmtKind.SIf(branches, else_body):
+                    bi: int = 0
+                    while bi < len(branches):
+                        br: IfBranch = branches[bi]
+                        self.visit_expr(br.cond, bound_locals)
+                        self.visit_stmts(br.body, _copy_names(bound_locals), False)
+                        bi = bi + 1
+                    self.visit_stmts(else_body, _copy_names(bound_locals), False)
+                case StmtKind.SFor(targets, iterable, body, else_body):
+                    self.visit_expr(iterable, bound_locals)
+                    loop_locals: list[str] = _copy_names(bound_locals)
+                    ti: int = 0
+                    while ti < len(targets):
+                        loop_locals = _append_unique(loop_locals, targets[ti])
+                        ti = ti + 1
+                    self.visit_stmts(body, loop_locals, False)
+                    self.visit_stmts(else_body, _copy_names(bound_locals), False)
+                case StmtKind.SSet(target, val):
+                    self.visit_expr(val, bound_locals)
+                    bound_locals = _append_unique(bound_locals, target)
+                case StmtKind.SInclude(tpl_expr, _, _):
+                    self.visit_expr(tpl_expr, bound_locals)
+                    match tpl_expr.kind:
+                        case ExprKind.EStr(lit_name):
+                            self.includes = _append_unique(self.includes, lit_name)
+                        case _:
+                            if not self.allow_dynamic_include:
+                                raise GlyphSecurityError(
+                                    GLYPH_SECURITY_POLICY,
+                                    "dynamic include path requires trusted-template dynamic-include policy",
+                                    st.span,
+                                    "pass a literal template path string"
+                                )
+                case StmtKind.SExtends(_):
+                    if not top_level:
+                        raise GlyphSyntaxError(
+                            GLYPH_SYNTAX_INVALID_NESTING,
+                            "'extends' is only allowed at top level",
+                            st.span,
+                            "move '{% extends %}' to top level"
+                        )
+                case StmtKind.SBlock(bname, body):
+                    if _has_name(self.blocks, bname):
+                        raise GlyphSyntaxError(
+                            GLYPH_SYNTAX_DUPLICATE_BLOCK,
+                            "duplicate block '" + bname + "' in template",
+                            st.span,
+                            "block names must be unique per template"
+                        )
+                    blks: list[str] = self.blocks
+                    blks.append(bname)
+                    self.blocks = blks
+                    prev_in_block: bool = self.in_block
+                    self.in_block = True
+                    self.visit_stmts(body, _copy_names(bound_locals), False)
+                    self.in_block = prev_in_block
+                case StmtKind.SMacro(mname, params, body):
+                    self.macros = _append_unique(self.macros, mname)
+                    mac_locals: list[str] = _copy_names(bound_locals)
+                    pi: int = 0
+                    while pi < len(params):
+                        mp: MacroParam = params[pi]
+                        if mp.has_default:
+                            self.visit_expr(mp.default_expr, bound_locals)
+                        mac_locals = _append_unique(mac_locals, mp.name)
+                        pi = pi + 1
+                    mac_locals = _append_unique(mac_locals, "caller")
+                    self.visit_stmts(body, mac_locals, False)
+                case StmtKind.SImport(tpl_name, alias):
+                    self.imports = _append_unique(self.imports, tpl_name)
+                    bound_locals = _append_unique(bound_locals, alias)
+                case StmtKind.SFromImport(tpl_name, names):
+                    self.imports = _append_unique(self.imports, tpl_name)
+                    ni: int = 0
+                    while ni < len(names):
+                        bound_locals = _append_unique(bound_locals, names[ni])
+                        ni = ni + 1
+                case StmtKind.SCallBlock(macro_name, args, caller_params, body):
+                    if not _has_name(bound_locals, macro_name):
+                        self.referenced_vars = _append_unique(self.referenced_vars, macro_name)
+                    self.visit_args(args, bound_locals)
+                    call_locals: list[str] = _copy_names(bound_locals)
+                    ci: int = 0
+                    while ci < len(caller_params):
+                        call_locals = _append_unique(call_locals, caller_params[ci])
+                        ci = ci + 1
+                    self.visit_stmts(body, call_locals, False)
+            i = i + 1
+
+def _copy_names(src: list[str]) -> list[str]:
+    out: list[str] = []
+    i: int = 0
+    while i < len(src):
+        out.append(src[i])
+        i = i + 1
+    return out
+
+def validate_ast(ast: TemplateAst, allow_dynamic_include: bool) -> TemplateInfo:
+    val: _Validator = _Validator(ast.has_extends, allow_dynamic_include)
+    root_locals: list[str] = []
+    val.visit_stmts(ast.body, root_locals, True)
+    return TemplateInfo(
+        ast.logical_name,
+        val.referenced_vars,
+        val.blocks,
+        val.includes,
+        val.macros,
+        val.imports,
+        ast.has_extends,
+        ast.extends_target
+    )

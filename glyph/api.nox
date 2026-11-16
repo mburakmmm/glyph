@@ -10,6 +10,10 @@ from glyph.value import Value, MarkupContext, UndefinedPolicy, from_json, from_j
 from glyph.value import is_truthy, stringify, map_get, list_get
 from glyph.token import Token, TokenKind, token_kind_name
 from glyph.lexer import tokenize, tokenize_with_budget
+from glyph.expressions import Expr, ExprKind, UnaryOp, BinaryOp, CallArg, MapEntry
+from glyph.ast import Stmt, StmtKind, IfBranch, MacroParam, TemplateAst
+from glyph.parser import parse_tokens, parse_string, parse_source, lint_tokens
+from glyph.validate import TemplateInfo, validate_ast
 
 def engine_version() -> str:
     return glyph.version.version()

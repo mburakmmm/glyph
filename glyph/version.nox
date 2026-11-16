@@ -1,7 +1,7 @@
-# Glyph version metadata (Phase 1: Core & Lexer).
+# Glyph version metadata (Phase 2: Parser, Expressions, Static Validation).
 # Pure NOX, freestanding-compatible (no hosted-only imports).
 
-GLYPH_VERSION: str = "0.0.2-core-lexer"
+GLYPH_VERSION: str = "0.0.3-parser-ast"
 GLYPH_MIN_NOX_VERSION: str = "2.1.186"
 
 def version() -> str:
