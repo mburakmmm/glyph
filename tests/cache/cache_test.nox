@@ -1,0 +1,111 @@
+# Phase 4 ParseCache / CompileCache, Dependency Invalidation, and Policy Isolation Tests
+import nox.test
+import glyph.api
+from glyph.api import Value, MemoryLoader, Environment, EnvironmentOptions, Template
+from glyph.api import Context, OutputMode, TrustTier, UndefinedPolicy, FilterArgValue, BudgetTracker, SourceSpan
+from glyph.cache import CompileCache, ParseCache, build_compile_cache_key
+
+def _tag_filter(val: Value, _a: list[FilterArgValue], _t: BudgetTracker, _s: SourceSpan) -> Value:
+    match val:
+        case Value.VStr(s):
+            return Value.VStr("[" + s + "]")
+        case _:
+            return val
+
+def test_cache_hits_and_transitive_invalidation() -> None:
+    mem: MemoryLoader = MemoryLoader()
+    mem.put("page.html", "{% include 'mid.html' with context %}")
+    mem.put("mid.html", "{% include 'leaf.html' with context %}")
+    mem.put("leaf.html", "v1:{{ name }}")
+
+    env: Environment = glyph.api.default_environment(mem)
+    ctx: Context = glyph.api.context_from_json('{"name":"Ada"}')
+
+    # First load -> miss, second load -> hit
+    t1: Template = glyph.api.get_template("page.html", env)
+    nox.test.assert_eq_int(env.compile_cache.misses, 1, "first compile miss")
+    nox.test.assert_eq_str(glyph.api.render(t1, ctx, env), "v1:Ada", "initial render")
+
+    t2: Template = glyph.api.get_template("page.html", env)
+    nox.test.assert_eq_int(env.compile_cache.hits, 1, "second compile hit")
+    nox.test.assert_eq_str(glyph.api.render(t2, ctx, env), "v1:Ada", "cached render")
+
+    # Update transitive leaf dependency -> parent page.html invalidates automatically!
+    mem.put("leaf.html", "v2:{{ name }}")
+    t3: Template = glyph.api.get_template("page.html", env)
+    nox.test.assert_eq_int(env.compile_cache.invalidations, 1, "transitive dependency invalidation recorded")
+    nox.test.assert_eq_str(glyph.api.render(t3, ctx, env), "v2:Ada", "updated transitive output")
+
+def test_missing_to_present_dependency_invalidation() -> None:
+    mem: MemoryLoader = MemoryLoader()
+    mem.put("host.html", "H:{% include 'opt.html' ignore missing %}")
+    env: Environment = glyph.api.default_environment(mem)
+
+    t1: Template = glyph.api.get_template("host.html", env)
+    nox.test.assert_eq_str(glyph.api.render(t1, glyph.api.empty_context(), env), "H:", "missing optional include")
+
+    mem.put("opt.html", "FOUND")
+    t2: Template = glyph.api.get_template("host.html", env)
+    nox.test.assert_eq_str(glyph.api.render(t2, glyph.api.empty_context(), env), "H:FOUND", "newly created optional include invalidates host")
+
+def test_cache_key_policy_and_locale_isolation() -> None:
+    opts_html: EnvironmentOptions = glyph.api.html_safe_defaults()
+    opts_text: EnvironmentOptions = glyph.api.text_safe_defaults()
+    opts_tr: EnvironmentOptions = EnvironmentOptions(
+        OutputMode.Html, True, UndefinedPolicy.StrictUndefined, TrustTier.Trusted, False, False, glyph.api.default_budget(), "tr"
+    )
+    opts_no_ae: EnvironmentOptions = EnvironmentOptions(
+        OutputMode.Html, False, UndefinedPolicy.StrictUndefined, TrustTier.Trusted, False, False, glyph.api.default_budget(), "en"
+    )
+
+    k_html: str = build_compile_cache_key("mem://a.html", "fp1", opts_html, TrustTier.Trusted, 1, 1, 1)
+    k_text: str = build_compile_cache_key("mem://a.html", "fp1", opts_text, TrustTier.Trusted, 1, 1, 1)
+    k_tr: str = build_compile_cache_key("mem://a.html", "fp1", opts_tr, TrustTier.Trusted, 1, 1, 1)
+    k_no_ae: str = build_compile_cache_key("mem://a.html", "fp1", opts_no_ae, TrustTier.Trusted, 1, 1, 1)
+    k_restr: str = build_compile_cache_key("mem://a.html", "fp1", opts_html, TrustTier.Restricted, 1, 1, 1)
+    k_reg2: str = build_compile_cache_key("mem://a.html", "fp1", opts_html, TrustTier.Trusted, 2, 1, 1)
+
+    nox.test.assert_true(k_html != k_text, "Html vs Text cache key distinct")
+    nox.test.assert_true(k_html != k_tr, "Locale cache key distinct")
+    nox.test.assert_true(k_html != k_no_ae, "Autoescape cache key distinct")
+    nox.test.assert_true(k_html != k_restr, "TrustTier cache key distinct")
+    nox.test.assert_true(k_html != k_reg2, "Registry generation cache key distinct")
+
+    # Shared CompileCache across two environments with different OutputMode never bleeds
+    mem: MemoryLoader = MemoryLoader()
+    mem.put("x.html", "{{ v }}")
+    env_html: Environment = glyph.api.new_environment(mem, opts_html)
+    env_text: Environment = glyph.api.new_environment(mem, opts_text)
+    env_text.compile_cache = env_html.compile_cache
+
+    ctx: Context = glyph.api.context_from_json('{"v":"<b>"}')
+    out_h: str = glyph.api.render(glyph.api.get_template("x.html", env_html), ctx, env_html)
+    out_t: str = glyph.api.render(glyph.api.get_template("x.html", env_text), ctx, env_text)
+    nox.test.assert_eq_str(out_h, "&lt;b&gt;", "HTML env escapes")
+    nox.test.assert_eq_str(out_t, "<b>", "Text env does not receive escaped/mixed cache")
+
+    # Registering a filter bumps generation and triggers clean recompile
+    env_html.filters.register("tag", _tag_filter)
+    mem.put("y.html", "{{ v | tag }}")
+    nox.test.assert_eq_str(glyph.api.render(glyph.api.get_template("y.html", env_html), ctx, env_html), "[&lt;b&gt;]", "filter registration works with cache")
+
+def test_bounded_lru_eviction() -> None:
+    mem: MemoryLoader = MemoryLoader()
+    mem.put("t1.html", "1")
+    mem.put("t2.html", "2")
+    mem.put("t3.html", "3")
+    env: Environment = glyph.api.default_environment(mem)
+    env.compile_cache = CompileCache(2, 65536)
+
+    _a: Template = glyph.api.get_template("t1.html", env)
+    _b: Template = glyph.api.get_template("t2.html", env)
+    _c: Template = glyph.api.get_template("t3.html", env)
+    nox.test.assert_true(env.compile_cache.entries.size() <= 2, "LRU cache stays within max_entries")
+
+    glyph.api.clear_cache(env)
+    nox.test.assert_eq_int(env.compile_cache.entries.size(), 0, "clear_cache empties entries")
+
+test_cache_hits_and_transitive_invalidation()
+test_missing_to_present_dependency_invalidation()
+test_cache_key_policy_and_locale_isolation()
+test_bounded_lru_eviction()

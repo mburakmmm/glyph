@@ -20,6 +20,7 @@ dist/
 *.junit.xml
 *.tmp
 *.nox-tmp
+_fs_tmp/
 
 # Editor & OS files
 .vscode/

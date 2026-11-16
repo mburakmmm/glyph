@@ -1,0 +1,188 @@
+# Phase 4 Loader Confinement, Composite Loaders, and Include Semantics Tests
+import nox.test
+import nox.fs
+import nox.strings
+import glyph.api
+from glyph.api import MemoryLoader, Loader, ChoiceLoader, PrefixLoader, Environment
+from glyph.api import EnvironmentOptions, RenderOptions, Template, Context, TrustTier
+from glyph.api import OutputMode, UndefinedPolicy, ResourceBudget, GlyphLoadError
+from glyph.api import GlyphRenderError, GlyphLimitError, GlyphSecurityError, SourceRecord
+from glyph.errors import GLYPH_LOADER_NOT_FOUND, GLYPH_LOADER_OUTSIDE_ROOT, GLYPH_RENDER_CYCLE
+from glyph.errors import GLYPH_LIMIT_INCLUDE_DEPTH, GLYPH_SECURITY_POLICY
+from glyph.loader_fs import FilesystemLoader
+
+def _setup_fs_fixture(base_dir: str) -> None:
+    if not nox.fs.exists(base_dir):
+        nox.fs.create_dir(base_dir)
+    root_dir: str = base_dir + "/root"
+    pages_dir: str = root_dir + "/pages"
+    evil_dir: str = base_dir + "/root_evil"
+    if not nox.fs.exists(root_dir):
+        nox.fs.create_dir(root_dir)
+    if not nox.fs.exists(pages_dir):
+        nox.fs.create_dir(pages_dir)
+    if not nox.fs.exists(evil_dir):
+        nox.fs.create_dir(evil_dir)
+    nox.fs.write_string(pages_dir + "/hello.html", "<h1>{{ title }}</h1>{% include 'pages/part.html' with context %}")
+    nox.fs.write_string(pages_dir + "/part.html", "<span>{{ sub }}</span>")
+    nox.fs.write_string(evil_dir + "/secret.html", "SECRET")
+
+def test_filesystem_loader_isolation() -> None:
+    base_dir: str = "tests/loaders/_fs_tmp"
+    _setup_fs_fixture(base_dir)
+    fs: FilesystemLoader = FilesystemLoader(base_dir + "/root", TrustTier.Trusted)
+    env: Environment = glyph.api.environment_with_loader(fs.as_loader(), glyph.api.html_safe_defaults())
+
+    # Valid load & include
+    tpl: Template = glyph.api.get_template("pages/hello.html", env)
+    ctx: Context = glyph.api.context_from_json('{"title":"<Ada>","sub":"&ok"}')
+    nox.test.assert_eq_str(glyph.api.render(tpl, ctx, env), "<h1>&lt;Ada&gt;</h1><span>&amp;ok</span>", "FS load + include")
+
+    # Verify origin_id does NOT expose physical disk path
+    rec: SourceRecord = fs.load("pages/part.html")
+    nox.test.assert_true(not nox.strings.contains(rec.origin_id, "tests"), "origin_id hides physical disk path")
+
+    # Traversal, sibling-prefix, absolute, backslash, drive, percent-encoded, NUL rejections
+    bad_paths: list[str] = [
+        "../root_evil/secret.html",
+        "pages/../../root_evil/secret.html",
+        "/etc/passwd",
+        "\\windows\\win.ini",
+        "C:/Windows/win.ini",
+        "%2e%2e/root_evil/secret.html",
+        "%2E%2E%2Fsecret.html",
+        "pages\\hello.html",
+        "./pages/hello.html",
+        "pages/hello.html" + nox.strings.char_from_byte(0)
+    ]
+    bi: int = 0
+    while bi < len(bad_paths):
+        bp: str = bad_paths[bi]
+        got_code: str = ""
+        got_msg: str = ""
+        try:
+            _r: SourceRecord = fs.load(bp)
+        except GlyphLoadError as le:
+            got_code = le.code
+            got_msg = le.message
+        nox.test.assert_eq_str(got_code, GLYPH_LOADER_OUTSIDE_ROOT, "blocked traversal path idx " + str(bi))
+        nox.test.assert_true(not nox.strings.contains(got_msg, "fs_tmp"), "error hides physical root")
+        bi = bi + 1
+
+    # Missing file and directory-as-file rejected with GLYPH_LOADER_NOT_FOUND
+    miss_code: str = ""
+    try:
+        _r2: SourceRecord = fs.load("pages/missing.html")
+    except GlyphLoadError as le2:
+        miss_code = le2.code
+    nox.test.assert_eq_str(miss_code, GLYPH_LOADER_NOT_FOUND, "missing FS file")
+
+    dir_code: str = ""
+    try:
+        _r3: SourceRecord = fs.load("pages")
+    except GlyphLoadError as le3:
+        dir_code = le3.code
+    nox.test.assert_eq_str(dir_code, GLYPH_LOADER_NOT_FOUND, "directory path rejected as non-file")
+
+def test_choice_and_prefix_loaders() -> None:
+    m1: MemoryLoader = MemoryLoader()
+    m1.put("a.html", "from-m1")
+    m2: MemoryLoader = MemoryLoader()
+    m2.put("a.html", "from-m2")
+    m2.put("b.html", "only-m2")
+
+    choice: ChoiceLoader = ChoiceLoader([m1.as_loader(), m2.as_loader()])
+    nox.test.assert_eq_str(choice.load("a.html").content, "from-m1", "ChoiceLoader respects order")
+    nox.test.assert_eq_str(choice.load("b.html").content, "only-m2", "ChoiceLoader falls back on NOT_FOUND")
+
+    # Security/outside-root error must NOT fall back
+    sec_err_code: str = ""
+    try:
+        _bad: SourceRecord = choice.load("../a.html")
+    except GlyphLoadError as le:
+        sec_err_code = le.code
+    nox.test.assert_eq_str(sec_err_code, GLYPH_LOADER_OUTSIDE_ROOT, "ChoiceLoader rejects traversal without fallback")
+
+    # PrefixLoader isolates trust zones
+    restricted_mem: MemoryLoader = MemoryLoader()
+    restricted_mem.set_trust_tier(TrustTier.Restricted)
+    restricted_mem.put("welcome.txt", "mail")
+    empty_pfx: list[str] = []
+    empty_ldrs: list[Loader] = []
+    pfx: PrefixLoader = PrefixLoader(empty_pfx, empty_ldrs)
+    pfx.mount("pages/", m1.as_loader())
+    pfx.mount("email/", restricted_mem.as_loader())
+
+    nox.test.assert_eq_str(pfx.load("pages/a.html").content, "from-m1", "PrefixLoader pages/")
+    mail_rec: SourceRecord = pfx.load("email/welcome.txt")
+    nox.test.assert_eq_str(mail_rec.content, "mail", "PrefixLoader email/")
+    nox.test.assert_true(mail_rec.trust_tier == TrustTier.Restricted, "PrefixLoader preserves trust tier")
+
+def test_include_semantics_cycles_and_limits() -> None:
+    mem: MemoryLoader = MemoryLoader()
+    mem.put("main_wo.html", "{% set x = 'outer' %}[{% include 'part_wo.html' %}][{{ x }}]")
+    mem.put("part_wo.html", "{% set x = 'inner' %}{{ val | default('NO_CTX') }}")
+
+    mem.put("main_with.html", "{% set x = 'outer' %}[{% include 'part_with.html' with context %}][{{ x }}]")
+    mem.put("part_with.html", "{% set x = 'inner' %}{{ x }}:{{ val }}")
+
+    mem.put("opt_caller.html", "A{% include 'does_not_exist.html' ignore missing %}B")
+
+    mem.put("cyc_a.html", "{% include 'cyc_b.html' %}")
+    mem.put("cyc_b.html", "{% include 'cyc_a.html' %}")
+
+    mem.put("d1.html", "{% include 'd2.html' %}")
+    mem.put("d2.html", "{% include 'd3.html' %}")
+    mem.put("d3.html", "ok")
+
+    mem.put("parent_trusted.html", "{% include 'child_restricted.html' %}")
+    mem.put_with_trust("child_restricted.html", "{{ v | safe }}", TrustTier.Restricted)
+
+    env: Environment = glyph.api.default_environment(mem)
+
+    # Default include is without context
+    ctx: Context = glyph.api.context_from_json('{"val":"HOST"}')
+    out_wo: str = glyph.api.render(glyph.api.get_template("main_wo.html", env), ctx, env)
+    nox.test.assert_eq_str(out_wo, "[NO_CTX][outer]", "include defaults to without context")
+
+    # with context reads parent vars without mutating parent scope
+    out_with: str = glyph.api.render(glyph.api.get_template("main_with.html", env), ctx, env)
+    nox.test.assert_eq_str(out_with, "[inner:HOST][outer]", "include with context isolates set")
+
+    # ignore missing
+    out_opt: str = glyph.api.render(glyph.api.get_template("opt_caller.html", env), ctx, env)
+    nox.test.assert_eq_str(out_opt, "AB", "ignore missing skips absent partial")
+
+    # Cycle detection
+    cyc_code: str = ""
+    try:
+        _c: str = glyph.api.render(glyph.api.get_template("cyc_a.html", env), ctx, env)
+    except GlyphRenderError as re:
+        cyc_code = re.code
+    nox.test.assert_eq_str(cyc_code, GLYPH_RENDER_CYCLE, "cyclic include detected")
+
+    # Depth budget limit (max_include_depth = 1)
+    shallow: ResourceBudget = ResourceBudget(4096, 1000, 256, 1000, 1, 4, 16, 100, 4096, 10000)
+    shallow_opts: RenderOptions = RenderOptions(OutputMode.Html, True, UndefinedPolicy.StrictUndefined, TrustTier.Trusted, shallow, "en")
+    depth_code: str = ""
+    try:
+        _d: str = glyph.api.render_with_options(glyph.api.get_template("d1.html", env), ctx, shallow_opts, env)
+    except GlyphLimitError as le:
+        depth_code = le.code
+    nox.test.assert_eq_str(depth_code, GLYPH_LIMIT_INCLUDE_DEPTH, "max_include_depth enforced")
+
+    # Trust floor across include even when env has allow_safe_filter=True
+    safe_env_opts: EnvironmentOptions = EnvironmentOptions(
+        OutputMode.Html, True, UndefinedPolicy.StrictUndefined, TrustTier.Trusted, True, False, glyph.api.default_budget(), "en"
+    )
+    safe_env: Environment = glyph.api.new_environment(mem, safe_env_opts)
+    trust_code: str = ""
+    try:
+        _t: str = glyph.api.render(glyph.api.get_template("parent_trusted.html", safe_env), glyph.api.context_from_json('{"v":"<b>"}'), safe_env)
+    except GlyphSecurityError as se:
+        trust_code = se.code
+    nox.test.assert_eq_str(trust_code, GLYPH_SECURITY_POLICY, "Restricted included child cannot use |safe")
+
+test_filesystem_loader_isolation()
+test_choice_and_prefix_loaders()
+test_include_semantics_cycles_and_limits()

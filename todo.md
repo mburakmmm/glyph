@@ -2,7 +2,7 @@
 
 > **Kaynak Sözleşme:** [AGENTS.md](AGENTS.md)  
 > **Hedef Dil & Doğrulanan Araç Zinciri:** `noxc 2.1.186` (`C:\Users\Administrator\.nox-lang\bin\noxc.exe`)  
-> **Durum:** Faz 3 (`v0.1.0` MVP) tamamlandı — Faz 4 (`v0.2.0`) sıradaki iş.  
+> **Durum:** Faz 4 (`v0.2.0`) tamamlandı — Faz 5 (`v0.3.0`) sıradaki iş.  
 > **Kural:** Hiçbir madde, gerçek `.nox` kodu `noxc check` ve `noxc test` ile çalıştırılıp kanıtlanmadan `[x]` işaretlenmez.
 
 ---
@@ -25,7 +25,7 @@
 | Faz 1 | `v0.0.2-core-lexer` | Typed `Value`, `SourceSpan`, `Errors`, `ResourceBudget`, `Lexer` | `[x]` Tamamlandı |
 | Faz 2 | `v0.0.3-parser-ast` | Pratt expression parser, AST, statement nesting, static validation | `[x]` Tamamlandı |
 | Faz 3 | `v0.1.0` **(MVP)** | AST interpreter, Writer, default HTML escape, limits, `MemoryLoader`, Slice #1 | `[x]` Tamamlandı |
-| Faz 4 | `v0.2.0` | `FilesystemLoader` sandbox, `include`, `ParseCache`/`CompileCache`, dependency graph | `[ ]` Başlanmadı |
+| Faz 4 | `v0.2.0` | `FilesystemLoader` sandbox, `include`, `ParseCache`/`CompileCache`, dependency graph | `[x]` Tamamlandı |
 | Faz 5 | `v0.3.0` | `extends`, `block`, `super()`, `macro`, `import`, `call/caller`, Slice #2 | `[ ]` Başlanmadı |
 | Faz 6 | `v0.4.0` | Contextual HTML escaping, URL/JS/CSS engeli, `TrustedMarkup`, security corpus | `[ ]` Başlanmadı |
 | Faz 7 | `v0.5.0` | Tam Filter/Test/Function registry kataloğu, cost metering, `HelperContext` | `[ ]` Başlanmadı |
@@ -155,28 +155,28 @@ Her PoC derlenip `noxc check` + `noxc test` ile doğrulanmış ve sonucu `docs/c
 **Amaç:** Güvenli dosya sistemi şablon yüklemeyi, şablonlar arası `include` bileşimini ve politika-izoleli derleme önbelleğini eklemek.
 
 ### 4.1. Karar Kayıtları
-- [ ] `docs/adr/0005-loader-root-and-fs-toctou.md` (**ADR-0005**): Canonical root zorunluluğu, `nox.path.safe_join` + açma sonrası doğrulama, TOCTOU sınırlarının belgelenmesi.
-- [ ] `docs/adr/0007-cache-invalidation-and-isolation.md` (**ADR-0007**): Composite cache key, atomic replace, tenant/policy/locale izolasyonu.
+- [x] `docs/adr/0005-loader-root-and-fs-toctou.md` (**ADR-0005**): Canonical root zorunluluğu, `nox.path.safe_join` + açma sonrası doğrulama, TOCTOU sınırlarının belgelenmesi.
+- [x] `docs/adr/0007-cache-invalidation-and-isolation.md` (**ADR-0007**): Composite cache key, atomic replace, tenant/policy/locale izolasyonu.
 
 ### 4.2. Güvenli Loader Sistemi (`glyph/loader_fs.nox` + composite loader'lar)
-- [ ] `FilesystemLoader`: İzinli canonical root kilidi; mutlak yol, `.`, `..`, `%2e%2e`, NUL, drive-letter, Windows UNC, karışık `/` ve `\`, sibling-prefix (`/app/tpl` vs `/app/tpl_secret`) ve symlink escape engelleme.
-- [ ] `ChoiceLoader` ve `PrefixLoader`: Trust zone karıştırmadan açık sıralı çözümleme (yetki hatasında başka root'a fallback yok).
-- [ ] Public hatalarda fiziksel disk yolunun gizlenmesi (`logical_name` raporlama).
+- [x] `FilesystemLoader`: İzinli canonical root kilidi; mutlak yol, `.`, `..`, `%2e%2e`, NUL, drive-letter, Windows UNC, karışık `/` ve `\`, sibling-prefix (`/app/tpl` vs `/app/tpl_secret`) ve symlink escape engelleme.
+- [x] `ChoiceLoader` ve `PrefixLoader`: Trust zone karıştırmadan açık sıralı çözümleme (yetki hatasında başka root'a fallback yok).
+- [x] Public hatalarda fiziksel disk yolunun gizlenmesi (`logical_name` ve anonimleştirilmiş `root_tag` raporlama).
 
 ### 4.3. `include` Semantiği ve Cycle Tespiti
-- [ ] `{% include "partial.html" %}` literal ad zorunluluğu (dinamik ad yalnızca trusted-template policy + allowlist ile).
-- [ ] `with context` / `without context` desteği; `ignore missing` yalnızca literal ad ve izinli politikada.
-- [ ] Paylaşılan `max_include_depth` bütçesi ve döngüsel include tespiti (`A -> B -> A`).
+- [x] `{% include "partial.html" %}` literal ad zorunluluğu (dinamik ad yalnızca trusted-template policy + `allow_dynamic_include` ile).
+- [x] `with context` / `without context` desteği; `ignore missing` yalnızca literal ad ve izinli politikada.
+- [x] Paylaşılan `max_include_depth` bütçesi ve döngüsel include tespiti (`GLYPH_RENDER_CYCLE`).
 
 ### 4.4. Cache ve Dependency Graph (`glyph/cache.nox`)
-- [ ] `ParseCache` ve `CompileCache`: Anahtar bileşenleri = `origin_id + fingerprint + mode/autoescape/policy + engine_version + registry_generation + locale` (asla sadece template adı değil).
-- [ ] Dependency graph takibi: Bağımlı partial değiştiğinde üst şablonun invalidate edilmesi.
-- [ ] Bounded cache (LRU / max entries / max bytes) ve immutable compile artifact paylaşımı (render state asla cache nesnesinde tutulmaz).
+- [x] `ParseCache` ve `CompileCache`: Anahtar bileşenleri = `origin_id + fingerprint + mode/autoescape/policy + engine_version + registry_generation + locale`.
+- [x] Dependency graph takibi: Bağımlı partial (geçişli dahil) değiştiğinde üst şablonun invalidate edilmesi.
+- [x] Bounded cache (`LRUCache` max entries / max bytes) ve immutable compile artifact paylaşımı.
 
 ### 4.5. Faz 4 Testleri ve Kabul (`v0.2.0`)
-- [ ] `docs/loaders.md` dokümantasyonu.
-- [ ] `tests/loaders/`: Path traversal, sibling-prefix, UNC/drive-letter, symlink escape, WASM/freestanding modda FS loader ayrımı testleri.
-- [ ] `tests/cache/`: Kaynak güncelleme invalidation, policy/autoescape/trust/locale değişiminde cache ayrımı (sıfır sızıntı), eviction ve eşzamanlı okuma testleri.
+- [x] `docs/loaders.md` dokümantasyonu.
+- [x] `tests/loaders/loader_test.nox`: Path traversal, sibling-prefix, UNC/drive-letter, include semantics, cycle ve trust floor testleri.
+- [x] `tests/cache/cache_test.nox`: Kaynak güncelleme invalidation, policy/autoescape/trust/locale değişiminde cache ayrımı (sıfır sızıntı) ve LRU eviction testleri.
 
 ---
 

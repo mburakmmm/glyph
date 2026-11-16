@@ -1,7 +1,7 @@
-# Glyph version metadata (Phase 3: v0.1.0 MVP).
+# Glyph version metadata (Phase 4: Loaders, Include, Compile Cache).
 # Pure NOX, freestanding-compatible (no hosted-only imports).
 
-GLYPH_VERSION: str = "0.1.0"
+GLYPH_VERSION: str = "0.2.0"
 GLYPH_MIN_NOX_VERSION: str = "2.1.186"
 
 def version() -> str:

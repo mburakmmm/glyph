@@ -73,6 +73,19 @@ class RenderScope:
             i = i - 1
         return Value.VUndefined(name)
 
+    # Produces an isolated child scope with snapshots of current frames so included
+    # templates can read parent context without mutating caller frames via `set`.
+    def clone_for_include(self: RenderScope) -> RenderScope:
+        copied: list[OrderedDict[str, Value]] = []
+        i: int = 0
+        while i < len(self.frames):
+            copied.append(self.frames[i])
+            i = i + 1
+        copied.append(OrderedDict[str, Value]())
+        rs: RenderScope = RenderScope(OrderedDict[str, Value]())
+        rs.frames = copied
+        return rs
+
 def make_loop_metadata(index0: int, total_len: int) -> Value:
     m: OrderedDict[str, Value] = OrderedDict[str, Value]()
     m.set("index", Value.VInt(index0 + 1))

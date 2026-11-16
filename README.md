@@ -14,7 +14,7 @@
 
 ---
 
-> **Project Status:** **Phase 3 (`v0.1.0` MVP) Complete** — End-to-end AST interpreter, `MemoryLoader`, HTML-safe defaults, `ResourceBudget`, MVP filters, and Vertical Slice #1 verified (`noxc test`: 7/7 suites passing on LLVM & QBE). Next up: Phase 4 (`v0.2.0` Loaders, `include`, and Compile Cache — see [todo.md](todo.md) and [docs/roadmap.md](docs/roadmap.md)).
+> **Project Status:** **Phase 4 (`v0.2.0`) Complete** — Confined `FilesystemLoader`, `ChoiceLoader`/`PrefixLoader`, `{% include %}` with cycle/depth/trust guards, and policy-isolated `ParseCache`/`CompileCache` verified (`noxc test`: 9/9 suites passing on LLVM & QBE). Next up: Phase 5 (`v0.3.0` Inheritance, Blocks & Macros — see [todo.md](todo.md) and [docs/roadmap.md](docs/roadmap.md)).
 
 ---
 
@@ -92,7 +92,7 @@ noxc sbom . -o glyph.sbom.json
 | **Phase 1** | `v0.0.2-core-lexer` | Typed `Value`, `SourceSpan`, `GlyphError`, `ResourceBudget`, O(n) `Lexer` | Done |
 | **Phase 2** | `v0.0.3-parser-ast` | Pratt expression parser, AST, `if`/`for`/`set`, static validation | Done |
 | **Phase 3** | `v0.1.0` **(MVP)** | Interpreter, chunked `Writer`, HTML escape, MVP filters, `MemoryLoader` | Done |
-| **Phase 4** | `v0.2.0` | `FilesystemLoader` sandbox, `include`, `ParseCache`/`CompileCache` | Planned |
+| **Phase 4** | `v0.2.0` | `FilesystemLoader` sandbox, `include`, `ParseCache`/`CompileCache` | Done |
 | **Phase 5** | `v0.3.0` | `extends`, `block`, `super()`, `macro`, `import`, `call/caller` | Planned |
 | **Phase 6** | `v0.4.0` | Contextual escaping, URL/JS/CSS denial, `TrustedMarkup`, XSS corpus | Planned |
 | **Phase 7** | `v0.5.0` | Full built-in filter/test registry, `HelperContext`, cost metering | Planned |

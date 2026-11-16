@@ -1,0 +1,115 @@
+# Canonical-root-confined FilesystemLoader for hosted NOX targets.
+# Enforces AGENTS.md §2.6, §2.12, §11.3 and ADR-0005.
+# Hosted-only (imports nox.fs and nox.path); intentionally not imported by glyph/api.nox.
+import nox.fs
+import nox.path
+from nox.fs import FsError
+from nox.path import PathError
+from glyph.errors import GlyphLoadError, empty_span, GLYPH_LOADER_NOT_FOUND, GLYPH_LOADER_OUTSIDE_ROOT
+from glyph.options import TrustTier
+from glyph.loader import SourceRecord, Loader, compute_fingerprint, validate_logical_template_name
+
+def _components_start_with(full: list[str], base: list[str]) -> bool:
+    if len(full) < len(base):
+        return False
+    i: int = 0
+    while i < len(base):
+        if full[i] != base[i]:
+            return False
+        i = i + 1
+    return True
+
+class FilesystemLoader:
+    canonical_root: str
+    root_components: list[str]
+    root_tag: str
+    trust_tier: TrustTier
+
+    def __init__(self: FilesystemLoader, root_dir: str, trust_tier: TrustTier) -> None:
+        canon: str = ""
+        try:
+            canon = nox.path.canonicalize(root_dir)
+        except PathError:
+            raise GlyphLoadError(
+                GLYPH_LOADER_NOT_FOUND,
+                "configured template root directory does not exist",
+                empty_span("<root>"),
+                "provide an existing template root directory"
+            )
+        if not nox.fs.is_dir(canon):
+            raise GlyphLoadError(
+                GLYPH_LOADER_NOT_FOUND,
+                "configured template root is not a directory",
+                empty_span("<root>"),
+                "provide a directory path for FilesystemLoader"
+            )
+        self.canonical_root = canon
+        self.root_components = nox.path.components(canon)
+        self.root_tag = compute_fingerprint(canon)
+        self.trust_tier = trust_tier
+
+    def load(self: FilesystemLoader, logical_name: str) -> SourceRecord:
+        safe_name: str = validate_logical_template_name(logical_name)
+        joined: str = ""
+        try:
+            joined = nox.path.safe_join(self.canonical_root, safe_name)
+        except PathError:
+            raise GlyphLoadError(
+                GLYPH_LOADER_OUTSIDE_ROOT,
+                "template path escapes configured root: " + safe_name,
+                empty_span(safe_name),
+                "keep template paths inside the configured root"
+            )
+
+        canon_file: str = ""
+        try:
+            canon_file = nox.path.canonicalize(joined)
+        except PathError:
+            raise GlyphLoadError(
+                GLYPH_LOADER_NOT_FOUND,
+                "template '" + safe_name + "' not found",
+                empty_span(safe_name),
+                "verify template path exists inside root"
+            )
+
+        if not _components_start_with(nox.path.components(canon_file), self.root_components):
+            raise GlyphLoadError(
+                GLYPH_LOADER_OUTSIDE_ROOT,
+                "resolved template path escapes configured root: " + safe_name,
+                empty_span(safe_name),
+                "symlinks pointing outside root are forbidden"
+            )
+
+        if not nox.fs.is_file(canon_file):
+            raise GlyphLoadError(
+                GLYPH_LOADER_NOT_FOUND,
+                "template '" + safe_name + "' is not a regular file",
+                empty_span(safe_name),
+                "specify a regular template file"
+            )
+
+        content: str = ""
+        try:
+            content = nox.fs.read_to_string(canon_file)
+        except FsError:
+            raise GlyphLoadError(
+                GLYPH_LOADER_NOT_FOUND,
+                "failed to read template '" + safe_name + "'",
+                empty_span(safe_name),
+                "verify file readability"
+            )
+
+        fp: str = compute_fingerprint(content)
+        origin: str = "fs:" + self.root_tag + "://" + safe_name
+        return SourceRecord(safe_name, content, origin, fp, self.trust_tier)
+
+    def as_loader(self: FilesystemLoader) -> Loader:
+        root_canon: str = self.canonical_root
+        trust: TrustTier = self.trust_tier
+        def _load(name: str) -> SourceRecord:
+            fs: FilesystemLoader = FilesystemLoader(root_canon, trust)
+            return fs.load(name)
+        return Loader("fs", _load)
+
+def new_filesystem_loader(root_dir: str) -> FilesystemLoader:
+    return FilesystemLoader(root_dir, TrustTier.Trusted)

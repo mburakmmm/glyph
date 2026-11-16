@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-16
+
+### Added
+- `docs/adr/0005-loader-root-and-fs-toctou.md` (ADR-0005), `docs/adr/0007-cache-invalidation-and-isolation.md` (ADR-0007), and `docs/loaders.md`.
+- `glyph/loader.nox`: `Loader` closure-backed interface, `validate_logical_template_name` (blocks `/`, `\`, drives, UNC, `.`, `..`, NUL, `%2e`/`%2f`/`%5c`), `ChoiceLoader` (no fallback on confinement errors), and `PrefixLoader` (trust-zone isolation).
+- `glyph/loader_fs.nox`: Hosted-only `FilesystemLoader` with canonical root confinement, `nox.path.safe_join` + post-canonicalization verification, anonymized root origin hash, and redacted `GlyphLoadError` messages.
+- `glyph/cache.nox`: Bounded `ParseCache` and `CompileCache` using composite keys (`origin_id`, `fingerprint`, `OutputMode`, `autoescape`, `TrustTier`, `allow_safe_filter`, `allow_dynamic_include`, registry generations, `locale`, `GLYPH_VERSION`) and transitive dependency invalidation.
+- `glyph/runtime.nox` & `glyph/environment.nox`: `{% include %}` execution (`without context` default, `with context` isolated frame copy, `ignore missing`, cycle detection `GLYPH_RENDER_CYCLE`, shared `max_include_depth` budget, and `TrustTier` floor enforcement).
+- Phase 4 tests: `tests/loaders/loader_test.nox` and `tests/cache/cache_test.nox`.
+
 ## [0.1.0] - 2026-11-16 (MVP)
 
 ### Added

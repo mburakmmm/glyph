@@ -1,0 +1,172 @@
+# Bounded ParseCache and policy-isolated CompileCache with dependency validation.
+# Enforces AGENTS.md §2.10, §12 and ADR-0007. Pure NOX, freestanding-safe.
+from nox.collections import LRUCache, OrderedDict
+import glyph.version
+from glyph.ast import TemplateAst
+from glyph.options import EnvironmentOptions, OutputMode, TrustTier
+from glyph.runtime import Template
+
+class DepFingerprint:
+    logical_name: str
+    origin_id: str
+    fingerprint: str
+
+    def __init__(self: DepFingerprint, logical_name: str, origin_id: str, fingerprint: str) -> None:
+        self.logical_name = logical_name
+        self.origin_id = origin_id
+        self.fingerprint = fingerprint
+
+def _mode_tag(m: OutputMode) -> str:
+    match m:
+        case OutputMode.Html:
+            return "html"
+        case OutputMode.Text:
+            return "text"
+        case OutputMode.Xml:
+            return "xml"
+        case OutputMode.Markdown:
+            return "md"
+
+def _trust_tag(t: TrustTier) -> str:
+    match t:
+        case TrustTier.Trusted:
+            return "trusted"
+        case TrustTier.Restricted:
+            return "restricted"
+        case TrustTier.Untrusted:
+            return "untrusted"
+
+def _bool_tag(b: bool) -> str:
+    if b:
+        return "1"
+    return "0"
+
+def build_parse_cache_key(origin_id: str, fingerprint: str) -> str:
+    return origin_id + "|" + fingerprint + "|" + glyph.version.version()
+
+def build_compile_cache_key(
+    origin_id: str,
+    fingerprint: str,
+    opts: EnvironmentOptions,
+    effective_trust: TrustTier,
+    filters_gen: int,
+    tests_gen: int,
+    functions_gen: int
+) -> str:
+    return (
+        origin_id + "|" + fingerprint
+        + "|" + _mode_tag(opts.output_mode)
+        + "|ae=" + _bool_tag(opts.autoescape)
+        + "|tr=" + _trust_tag(effective_trust)
+        + "|sf=" + _bool_tag(opts.allow_safe_filter)
+        + "|di=" + _bool_tag(opts.allow_dynamic_include)
+        + "|rg=" + str(filters_gen) + ":" + str(tests_gen) + ":" + str(functions_gen)
+        + "|loc=" + opts.default_locale
+        + "|v=" + glyph.version.version()
+    )
+
+class ParseCache:
+    entries: LRUCache[str, TemplateAst]
+    hits: int
+    misses: int
+
+    def __init__(self: ParseCache, capacity: int) -> None:
+        cap: int = capacity
+        if cap < 1:
+            cap = 1
+        lru: LRUCache[str, TemplateAst] = LRUCache[str, TemplateAst](cap)
+        self.entries = lru
+        self.hits = 0
+        self.misses = 0
+
+    def has(self: ParseCache, key: str) -> bool:
+        return self.entries.contains(key)
+
+    def get(self: ParseCache, key: str) -> TemplateAst:
+        self.hits = self.hits + 1
+        return self.entries.get(key)
+
+    def put(self: ParseCache, key: str, ast: TemplateAst) -> None:
+        self.entries.put(key, ast)
+
+    def clear(self: ParseCache) -> None:
+        cap: int = self.entries.capacity
+        self.entries = LRUCache[str, TemplateAst](cap)
+
+class CompileCacheEntry:
+    template: Template
+    deps: list[DepFingerprint]
+    source_bytes: int
+
+    def __init__(self: CompileCacheEntry, template: Template, deps: list[DepFingerprint], source_bytes: int) -> None:
+        self.template = template
+        self.deps = deps
+        self.source_bytes = source_bytes
+
+class CompileCache:
+    entries: LRUCache[str, CompileCacheEntry]
+    stale_keys: OrderedDict[str, bool]
+    max_entries: int
+    max_bytes: int
+    current_bytes: int
+    hits: int
+    misses: int
+    invalidations: int
+
+    def __init__(self: CompileCache, max_entries: int, max_bytes: int) -> None:
+        cap: int = max_entries
+        if cap < 1:
+            cap = 1
+        mb: int = max_bytes
+        if mb < 1024:
+            mb = 1024
+        lru: LRUCache[str, CompileCacheEntry] = LRUCache[str, CompileCacheEntry](cap)
+        stale: OrderedDict[str, bool] = OrderedDict[str, bool]()
+        self.entries = lru
+        self.stale_keys = stale
+        self.max_entries = cap
+        self.max_bytes = mb
+        self.current_bytes = 0
+        self.hits = 0
+        self.misses = 0
+        self.invalidations = 0
+
+    def contains_fresh(self: CompileCache, key: str) -> bool:
+        if self.stale_keys.contains(key):
+            return False
+        return self.entries.contains(key)
+
+    def get(self: CompileCache, key: str) -> CompileCacheEntry:
+        return self.entries.get(key)
+
+    def record_hit(self: CompileCache) -> None:
+        self.hits = self.hits + 1
+
+    def record_miss(self: CompileCache) -> None:
+        self.misses = self.misses + 1
+
+    def invalidate_key(self: CompileCache, key: str) -> None:
+        if self.entries.contains(key):
+            self.invalidations = self.invalidations + 1
+            self.stale_keys.set(key, True)
+
+    def put(self: CompileCache, key: str, entry: CompileCacheEntry) -> None:
+        if entry.source_bytes > self.max_bytes:
+            return
+        if self.stale_keys.contains(key):
+            _removed: bool = self.stale_keys.remove(key)
+        if self.entries.size() >= self.max_entries or self.current_bytes + entry.source_bytes > self.max_bytes:
+            if self.current_bytes + entry.source_bytes > self.max_bytes:
+                self.entries = LRUCache[str, CompileCacheEntry](self.max_entries)
+                self.stale_keys = OrderedDict[str, bool]()
+                self.current_bytes = 0
+        self.entries.put(key, entry)
+        self.current_bytes = self.current_bytes + entry.source_bytes
+
+    def clear(self: CompileCache) -> None:
+        self.entries = LRUCache[str, CompileCacheEntry](self.max_entries)
+        self.stale_keys = OrderedDict[str, bool]()
+        self.current_bytes = 0
+
+def default_compile_cache() -> CompileCache:
+    return CompileCache(256, 8388608)

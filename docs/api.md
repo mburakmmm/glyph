@@ -1,6 +1,6 @@
 # Glyph Public API Reference (`docs/api.md`)
 
-> **Version:** `0.1.0` (MVP)  
+> **Version:** `0.2.0` (Phase 4)  
 > **Entry Module:** `import glyph.api`  
 > **Stability Legend:** `Stable` (contract frozen in SemVer), `Experimental` (v0.x shape subject to refinement before `v1.0`), `Internal` (implementation detail).
 
@@ -28,9 +28,13 @@
 - `context_from_json(raw: str) -> Context` — Parses JSON into `Value` (preserving 64-bit integer precision; never marks JSON strings as `VTrustedMarkup`).
 - `escape_html(text: str) -> str` — Escapes `&`, `<`, `>`, `"`, `'` and rejects NUL bytes in HTML output.
 
-## 4. Loaders, Options & Registries (`Experimental` until `v1.0.0`)
+## 4. Loaders, Cache, Options & Registries (`Experimental` until `v1.0.0`)
 
-- `MemoryLoader` (`put`, `put_with_trust`, `has`, `load`)
+- `Loader` (`load`), `MemoryLoader` (`put`, `put_with_trust`, `has`, `load`, `as_loader`)
+- `ChoiceLoader` & `PrefixLoader` (composite loaders; `ChoiceLoader` never falls back on security/path confinement errors)
+- `FilesystemLoader` (`glyph/loader_fs.nox` — hosted-only, canonical root lock, path traversal & sibling-prefix protection)
+- `environment_with_loader(loader: Loader, options: EnvironmentOptions) -> Environment`
+- `ParseCache`, `CompileCache`, `clear_cache(env)` (composite policy/version/locale/registry keys + transitive dependency invalidation)
 - `html_safe_defaults()`, `text_safe_defaults()`, `restricted_defaults()`, `default_render_options(env_opts)`
 - `FilterRegistry` (`register` — core security/built-in filters cannot be overridden)
 - `ResourceBudget` (`default_budget()`, `restricted_budget()`)

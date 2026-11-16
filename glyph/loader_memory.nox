@@ -1,21 +1,9 @@
 # Pure in-memory template loader for Glyph (freestanding/WASM/test/embedded safe).
-# Enforces AGENTS.md §11.2.
-import nox.strings
+# Enforces AGENTS.md §11.2 and ADR-0005.
 from nox.collections import OrderedDict
 from glyph.errors import SourceSpan, GlyphLoadError, empty_span, GLYPH_LOADER_NOT_FOUND
 from glyph.options import TrustTier
-from glyph.loader import SourceRecord
-
-# Deterministic non-cryptographic content fingerprint for memory-resident cache keys.
-def compute_fingerprint(content: str) -> str:
-    blen: int = nox.strings.byte_len(content)
-    h1: int = 2166136261
-    i: int = 0
-    while i < blen:
-        b: int = nox.strings.byte_at(content, i)
-        h1 = ((h1 ^ b) * 16777619) % 4294967296
-        i = i + 1
-    return "mem:" + str(blen) + ":" + str(h1)
+from glyph.loader import SourceRecord, Loader, compute_fingerprint, validate_logical_template_name
 
 class MemoryLoader:
     templates: OrderedDict[str, SourceRecord]
@@ -30,25 +18,42 @@ class MemoryLoader:
         self.default_trust = tier
 
     def put(self: MemoryLoader, logical_name: str, content: str) -> None:
+        safe_name: str = validate_logical_template_name(logical_name)
         fp: str = compute_fingerprint(content)
-        rec: SourceRecord = SourceRecord(logical_name, content, "memory://" + logical_name, fp, self.default_trust)
-        self.templates.set(logical_name, rec)
+        rec: SourceRecord = SourceRecord(safe_name, content, "memory://" + safe_name, fp, self.default_trust)
+        self.templates.set(safe_name, rec)
 
     def put_with_trust(self: MemoryLoader, logical_name: str, content: str, trust: TrustTier) -> None:
+        safe_name: str = validate_logical_template_name(logical_name)
         fp: str = compute_fingerprint(content)
-        rec: SourceRecord = SourceRecord(logical_name, content, "memory://" + logical_name, fp, trust)
-        self.templates.set(logical_name, rec)
+        rec: SourceRecord = SourceRecord(safe_name, content, "memory://" + safe_name, fp, trust)
+        self.templates.set(safe_name, rec)
 
     def has(self: MemoryLoader, logical_name: str) -> bool:
         return self.templates.contains(logical_name)
 
     def load(self: MemoryLoader, logical_name: str) -> SourceRecord:
-        if not self.templates.contains(logical_name):
-            sp: SourceSpan = empty_span(logical_name)
+        safe_name: str = validate_logical_template_name(logical_name)
+        if not self.templates.contains(safe_name):
+            sp: SourceSpan = empty_span(safe_name)
             raise GlyphLoadError(
                 GLYPH_LOADER_NOT_FOUND,
-                "template '" + logical_name + "' not found",
+                "template '" + safe_name + "' not found",
                 sp,
                 "verify template name in MemoryLoader"
             )
-        return self.templates.get(logical_name)
+        return self.templates.get(safe_name)
+
+    def as_loader(self: MemoryLoader) -> Loader:
+        tpls: OrderedDict[str, SourceRecord] = self.templates
+        def _load(name: str) -> SourceRecord:
+            safe_name: str = validate_logical_template_name(name)
+            if not tpls.contains(safe_name):
+                raise GlyphLoadError(
+                    GLYPH_LOADER_NOT_FOUND,
+                    "template '" + safe_name + "' not found",
+                    empty_span(safe_name),
+                    "verify template name in MemoryLoader"
+                )
+            return tpls.get(safe_name)
+        return Loader("memory", _load)

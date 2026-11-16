@@ -1,6 +1,6 @@
 # Public entry point for Glyph (`import glyph.api`).
-# Exposes Phase 3 (v0.1.0 MVP) Environment, Template, Context, Loaders, Filters, Safety, and AST APIs.
-# Freestanding-safe (no nox.fs or nox.unicode imports).
+# Exposes Phase 4 (v0.2.0) Environment, Template, Context, Loaders, Cache, Filters, Safety, and AST APIs.
+# Freestanding-safe (no nox.fs or nox.unicode imports; use `import glyph.loader_fs` for hosted FilesystemLoader).
 from nox.collections import OrderedDict
 import glyph.version
 import glyph.errors
@@ -22,6 +22,7 @@ import glyph.functions
 import glyph.loader
 import glyph.loader_memory
 import glyph.runtime
+import glyph.cache
 import glyph.environment
 
 from glyph.errors import SourceSpan, RelatedSpan
@@ -40,9 +41,10 @@ from glyph.writer import GlyphWriter, RenderResult
 from glyph.filters import FilterRegistry, FilterArgValue
 from glyph.tests_registry import TestRegistry
 from glyph.functions import FunctionRegistry
-from glyph.loader import SourceRecord
+from glyph.loader import SourceRecord, Loader, ChoiceLoader, PrefixLoader
 from glyph.loader_memory import MemoryLoader
 from glyph.runtime import Template
+from glyph.cache import DepFingerprint, ParseCache, CompileCacheEntry, CompileCache
 from glyph.environment import Environment
 
 def engine_version() -> str:
@@ -78,11 +80,20 @@ def context_from_map(entries: OrderedDict[str, Value]) -> Context:
 def context_from_json(raw: str) -> Context:
     return glyph.scope.context_from_json(raw)
 
+def validate_logical_template_name(name: str) -> str:
+    return glyph.loader.validate_logical_template_name(name)
+
+def environment_with_loader(loader: Loader, options: EnvironmentOptions) -> Environment:
+    return glyph.environment.environment_with_loader(loader, options)
+
 def new_environment(loader: MemoryLoader, options: EnvironmentOptions) -> Environment:
     return glyph.environment.new_environment(loader, options)
 
 def default_environment(loader: MemoryLoader) -> Environment:
     return glyph.environment.default_environment(loader)
+
+def clear_cache(env: Environment) -> None:
+    glyph.environment.clear_cache(env)
 
 def compile_string(source: str, logical_name: str, env: Environment) -> Template:
     return glyph.environment.compile_string(source, logical_name, env)

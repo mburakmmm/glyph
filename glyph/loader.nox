@@ -1,5 +1,8 @@
-# Loader source record contract for Glyph.
-# Enforces AGENTS.md §11.1: separates logical_name and provenance from physical disk paths.
+# Loader contract, logical path validation, and composite loaders (ChoiceLoader, PrefixLoader).
+# Enforces AGENTS.md §11 and ADR-0005. Pure NOX, freestanding-safe.
+import nox.strings
+from glyph.errors import SourceSpan, GlyphLoadError, empty_span, redact_logical_name
+from glyph.errors import GLYPH_LOADER_NOT_FOUND, GLYPH_LOADER_OUTSIDE_ROOT
 from glyph.options import TrustTier
 
 class SourceRecord:
@@ -22,3 +25,145 @@ class SourceRecord:
         self.origin_id = origin_id
         self.fingerprint = fingerprint
         self.trust_tier = trust_tier
+
+# Deterministic non-cryptographic content fingerprint for cache keys and anonymized origin tags.
+def compute_fingerprint(content: str) -> str:
+    blen: int = nox.strings.byte_len(content)
+    h1: int = 2166136261
+    i: int = 0
+    while i < blen:
+        b: int = nox.strings.byte_at(content, i)
+        h1 = ((h1 ^ b) * 16777619) % 4294967296
+        i = i + 1
+    return "fnv1a:" + str(blen) + ":" + str(h1)
+
+def _has_percent_escape_hazard(lower_name: str) -> bool:
+    if nox.strings.contains(lower_name, "%2e"):
+        return True
+    if nox.strings.contains(lower_name, "%2f"):
+        return True
+    if nox.strings.contains(lower_name, "%5c"):
+        return True
+    if nox.strings.contains(lower_name, "%00"):
+        return True
+    return False
+
+# Validates logical template names before any loader lookup or filesystem join.
+# Rejects NUL bytes, leading slashes, backslashes, Windows drives, UNC prefixes, '.', '..', and encoded traversal.
+def validate_logical_template_name(name: str) -> str:
+    sp: SourceSpan = empty_span(redact_logical_name(name))
+    blen: int = nox.strings.byte_len(name)
+    if blen == 0:
+        raise GlyphLoadError(GLYPH_LOADER_OUTSIDE_ROOT, "template name must not be empty", sp, "provide a relative logical template name")
+    b0: int = nox.strings.byte_at(name, 0)
+    if b0 == 47 or b0 == 92:
+        raise GlyphLoadError(GLYPH_LOADER_OUTSIDE_ROOT, "absolute or UNC template paths are forbidden", sp, "use a relative logical template name")
+    i: int = 0
+    while i < blen:
+        b: int = nox.strings.byte_at(name, i)
+        if b == 0:
+            raise GlyphLoadError(GLYPH_LOADER_OUTSIDE_ROOT, "NUL byte in template path is forbidden", sp, "remove NUL bytes")
+        if b == 92:
+            raise GlyphLoadError(GLYPH_LOADER_OUTSIDE_ROOT, "backslash separator in template path is forbidden", sp, "use forward slashes '/'")
+        if b == 58:
+            raise GlyphLoadError(GLYPH_LOADER_OUTSIDE_ROOT, "drive or scheme colon ':' in template path is forbidden", sp, "use a relative logical template name")
+        i = i + 1
+    lower_name: str = nox.strings.lower(name)
+    if _has_percent_escape_hazard(lower_name):
+        raise GlyphLoadError(GLYPH_LOADER_OUTSIDE_ROOT, "percent-encoded traversal sequence is forbidden", sp, "use plain relative paths")
+    segs: list[str] = nox.strings.split(name, "/")
+    si: int = 0
+    while si < len(segs):
+        seg: str = segs[si]
+        if seg == "" or seg == "." or seg == "..":
+            raise GlyphLoadError(GLYPH_LOADER_OUTSIDE_ROOT, "invalid or traversal segment in template path", sp, "avoid '.', '..', empty segments, and trailing slashes")
+        si = si + 1
+    return name
+
+class Loader:
+    kind_name: str
+    load_fn: (str) -> SourceRecord
+
+    def __init__(self: Loader, kind_name: str, load_fn: (str) -> SourceRecord) -> None:
+        self.kind_name = kind_name
+        self.load_fn = load_fn
+
+    def load(self: Loader, logical_name: str) -> SourceRecord:
+        fn: (str) -> SourceRecord = self.load_fn
+        return fn(logical_name)
+
+# Tries loaders in order. Only falls back on GLYPH_LOADER_NOT_FOUND; security/outside-root errors abort immediately.
+class ChoiceLoader:
+    loaders: list[Loader]
+
+    def __init__(self: ChoiceLoader, loaders: list[Loader]) -> None:
+        self.loaders = loaders
+
+    def load(self: ChoiceLoader, logical_name: str) -> SourceRecord:
+        safe_name: str = validate_logical_template_name(logical_name)
+        i: int = 0
+        while i < len(self.loaders):
+            ldr: Loader = self.loaders[i]
+            try:
+                return ldr.load(safe_name)
+            except GlyphLoadError as le:
+                if le.code != GLYPH_LOADER_NOT_FOUND:
+                    raise le
+            i = i + 1
+        raise GlyphLoadError(
+            GLYPH_LOADER_NOT_FOUND,
+            "template '" + safe_name + "' not found in any configured loader",
+            empty_span(safe_name),
+            "check template name and loader order"
+        )
+
+    def as_loader(self: ChoiceLoader) -> Loader:
+        loaders: list[Loader] = self.loaders
+        def _load(name: str) -> SourceRecord:
+            ch: ChoiceLoader = ChoiceLoader(loaders)
+            return ch.load(name)
+        return Loader("choice", _load)
+
+# Routes template prefixes (e.g. "emails/") to isolated loaders without mixing trust zones.
+class PrefixLoader:
+    prefixes: list[str]
+    loaders: list[Loader]
+
+    def __init__(self: PrefixLoader, prefixes: list[str], loaders: list[Loader]) -> None:
+        self.prefixes = prefixes
+        self.loaders = loaders
+
+    def mount(self: PrefixLoader, prefix: str, loader: Loader) -> None:
+        ps: list[str] = self.prefixes
+        ls: list[Loader] = self.loaders
+        ps.append(prefix)
+        ls.append(loader)
+        self.prefixes = ps
+        self.loaders = ls
+
+    def load(self: PrefixLoader, logical_name: str) -> SourceRecord:
+        safe_name: str = validate_logical_template_name(logical_name)
+        i: int = 0
+        while i < len(self.prefixes):
+            pfx: str = self.prefixes[i]
+            if nox.strings.starts_with(safe_name, pfx):
+                sub: str = safe_name[len(pfx):len(safe_name)]
+                if len(sub) == 0:
+                    raise GlyphLoadError(GLYPH_LOADER_NOT_FOUND, "empty template name after prefix", empty_span(safe_name), "specify a template under the prefix")
+                ldr: Loader = self.loaders[i]
+                return ldr.load(sub)
+            i = i + 1
+        raise GlyphLoadError(
+            GLYPH_LOADER_NOT_FOUND,
+            "no loader prefix matched template '" + safe_name + "'",
+            empty_span(safe_name),
+            "check registered prefix mounts"
+        )
+
+    def as_loader(self: PrefixLoader) -> Loader:
+        prefixes: list[str] = self.prefixes
+        loaders: list[Loader] = self.loaders
+        def _load(name: str) -> SourceRecord:
+            pl: PrefixLoader = PrefixLoader(prefixes, loaders)
+            return pl.load(name)
+        return Loader("prefix", _load)

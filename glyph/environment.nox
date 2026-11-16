@@ -1,11 +1,12 @@
-# Environment and high-level compile / get_template / render / lint / inspect API.
-# Enforces AGENTS.md §16.1-16.3. Pure NOX, freestanding-safe.
-from glyph.errors import SourceSpan, GlyphError, empty_span
+# Environment, Loader integration, ParseCache/CompileCache, and render/lint/inspect API.
+# Enforces AGENTS.md §11, §12, §16 and ADR-0007. Pure NOX, freestanding-safe.
+import nox.strings
+from glyph.errors import SourceSpan, GlyphError, GlyphLoadError, empty_span, GLYPH_LOADER_NOT_FOUND
 from glyph.limits import BudgetTracker
 from glyph.token import Token
 from glyph.lexer import tokenize_with_budget
 from glyph.ast import TemplateAst
-from glyph.parser import parse_string, lint_tokens
+from glyph.parser import parse_tokens, parse_string, lint_tokens
 from glyph.validate import TemplateInfo, validate_ast
 from glyph.options import EnvironmentOptions, RenderOptions, TrustTier, html_safe_defaults, default_render_options, min_trust_tier
 from glyph.scope import Context
@@ -13,42 +14,59 @@ from glyph.writer import GlyphWriter, RenderResult
 from glyph.filters import FilterRegistry, default_filters
 from glyph.tests_registry import TestRegistry, default_tests
 from glyph.functions import FunctionRegistry, default_functions
-from glyph.loader import SourceRecord
-from glyph.loader_memory import MemoryLoader, compute_fingerprint
-from glyph.runtime import Template, execute_template
+from glyph.loader import SourceRecord, Loader, compute_fingerprint
+from glyph.loader_memory import MemoryLoader
+from glyph.runtime import Template, execute_template_with_resolver
+from glyph.cache import DepFingerprint, ParseCache, CompileCacheEntry, CompileCache
+from glyph.cache import build_parse_cache_key, build_compile_cache_key, default_compile_cache
 
 class Environment:
-    loader: MemoryLoader
+    loader: Loader
     options: EnvironmentOptions
     filters: FilterRegistry
     tests: TestRegistry
     functions: FunctionRegistry
+    parse_cache: ParseCache
+    compile_cache: CompileCache
 
     def __init__(
         self: Environment,
-        loader: MemoryLoader,
+        loader: Loader,
         options: EnvironmentOptions,
         filters: FilterRegistry,
         tests: TestRegistry,
-        functions: FunctionRegistry
+        functions: FunctionRegistry,
+        parse_cache: ParseCache,
+        compile_cache: CompileCache
     ) -> None:
         self.loader = loader
         self.options = options
         self.filters = filters
         self.tests = tests
         self.functions = functions
+        self.parse_cache = parse_cache
+        self.compile_cache = compile_cache
 
-def new_environment(loader: MemoryLoader, options: EnvironmentOptions) -> Environment:
+def environment_with_loader(loader: Loader, options: EnvironmentOptions) -> Environment:
     return Environment(
         loader,
         options,
         default_filters(options.allow_safe_filter),
         default_tests(),
-        default_functions()
+        default_functions(),
+        ParseCache(256),
+        default_compile_cache()
     )
 
+def new_environment(loader: MemoryLoader, options: EnvironmentOptions) -> Environment:
+    return environment_with_loader(loader.as_loader(), options)
+
 def default_environment(loader: MemoryLoader) -> Environment:
-    return new_environment(loader, html_safe_defaults())
+    return environment_with_loader(loader.as_loader(), html_safe_defaults())
+
+def clear_cache(env: Environment) -> None:
+    env.parse_cache.clear()
+    env.compile_cache.clear()
 
 def compile_string(source: str, logical_name: str, env: Environment) -> Template:
     tracker: BudgetTracker = BudgetTracker(env.options.default_budget)
@@ -57,13 +75,106 @@ def compile_string(source: str, logical_name: str, env: Environment) -> Template
     fp: str = compute_fingerprint(source)
     return Template(logical_name, ast, info, fp, env.options.trust_tier)
 
-def get_template(name: str, env: Environment) -> Template:
-    rec: SourceRecord = env.loader.load(name)
-    tracker: BudgetTracker = BudgetTracker(env.options.default_budget)
+def _deps_are_valid(deps: list[DepFingerprint], env: Environment) -> bool:
+    i: int = 0
+    while i < len(deps):
+        dep: DepFingerprint = deps[i]
+        if dep.fingerprint == "<missing>":
+            try:
+                _now: SourceRecord = env.loader.load(dep.logical_name)
+                return False
+            except GlyphLoadError as le:
+                if le.code != GLYPH_LOADER_NOT_FOUND:
+                    return False
+        else:
+            try:
+                cur: SourceRecord = env.loader.load(dep.logical_name)
+                if cur.origin_id != dep.origin_id or cur.fingerprint != dep.fingerprint:
+                    return False
+            except GlyphLoadError:
+                return False
+        i = i + 1
+    return True
+
+def _collect_static_deps(
+    names: list[str],
+    env: Environment,
+    visited: list[str],
+    out: list[DepFingerprint],
+    depth: int
+) -> None:
+    if depth >= env.options.default_budget.max_include_depth:
+        return
+    i: int = 0
+    while i < len(names):
+        dep_name: str = names[i]
+        already: bool = False
+        vi: int = 0
+        while vi < len(visited):
+            if visited[vi] == dep_name:
+                already = True
+            vi = vi + 1
+        if not already:
+            visited.append(dep_name)
+            try:
+                rec: SourceRecord = env.loader.load(dep_name)
+                out.append(DepFingerprint(dep_name, rec.origin_id, rec.fingerprint))
+                # Inspect child includes transitively if valid
+                try:
+                    sub_tr: BudgetTracker = BudgetTracker(env.options.default_budget)
+                    sub_ast: TemplateAst = _parse_with_cache(rec, env, sub_tr)
+                    sub_info: TemplateInfo = validate_ast(sub_ast, env.options.allow_dynamic_include)
+                    _collect_static_deps(sub_info.includes, env, visited, out, depth + 1)
+                except GlyphError:
+                    pass
+            except GlyphLoadError as le:
+                if le.code == GLYPH_LOADER_NOT_FOUND:
+                    out.append(DepFingerprint(dep_name, "", "<missing>"))
+        i = i + 1
+
+def _parse_with_cache(rec: SourceRecord, env: Environment, tracker: BudgetTracker) -> TemplateAst:
+    pkey: str = build_parse_cache_key(rec.origin_id, rec.fingerprint)
+    if env.parse_cache.has(pkey):
+        return env.parse_cache.get(pkey)
     ast: TemplateAst = parse_string(rec.content, rec.logical_name, tracker)
-    info: TemplateInfo = validate_ast(ast, env.options.allow_dynamic_include)
+    env.parse_cache.put(pkey, ast)
+    return ast
+
+def _get_template_with_tracker(name: str, env: Environment, tracker: BudgetTracker) -> Template:
+    rec: SourceRecord = env.loader.load(name)
     eff_trust: TrustTier = min_trust_tier(env.options.trust_tier, rec.trust_tier)
-    return Template(rec.logical_name, ast, info, rec.fingerprint, eff_trust)
+    ckey: str = build_compile_cache_key(
+        rec.origin_id,
+        rec.fingerprint,
+        env.options,
+        eff_trust,
+        env.filters.generation,
+        env.tests.generation,
+        env.functions.generation
+    )
+    if env.compile_cache.contains_fresh(ckey):
+        entry: CompileCacheEntry = env.compile_cache.get(ckey)
+        if _deps_are_valid(entry.deps, env):
+            env.compile_cache.record_hit()
+            return entry.template
+        env.compile_cache.invalidate_key(ckey)
+
+    env.compile_cache.record_miss()
+    ast: TemplateAst = _parse_with_cache(rec, env, tracker)
+    info: TemplateInfo = validate_ast(ast, env.options.allow_dynamic_include)
+
+    deps: list[DepFingerprint] = []
+    visited: list[str] = [rec.logical_name]
+    _collect_static_deps(info.includes, env, visited, deps, 0)
+
+    tpl: Template = Template(rec.logical_name, ast, info, rec.fingerprint, eff_trust)
+    new_entry: CompileCacheEntry = CompileCacheEntry(tpl, deps, nox.strings.byte_len(rec.content))
+    env.compile_cache.put(ckey, new_entry)
+    return tpl
+
+def get_template(name: str, env: Environment) -> Template:
+    tracker: BudgetTracker = BudgetTracker(env.options.default_budget)
+    return _get_template_with_tracker(name, env, tracker)
 
 def render_to_writer(
     template: Template,
@@ -72,7 +183,10 @@ def render_to_writer(
     options: RenderOptions,
     env: Environment
 ) -> RenderResult:
-    return execute_template(
+    def _resolve(inc_name: str, tr: BudgetTracker) -> Template:
+        return _get_template_with_tracker(inc_name, env, tr)
+
+    return execute_template_with_resolver(
         template,
         context.data,
         writer,
@@ -80,7 +194,10 @@ def render_to_writer(
         env.filters,
         env.tests,
         env.functions,
-        options
+        options,
+        env.options.allow_dynamic_include,
+        True,
+        _resolve
     )
 
 def render_with_options(

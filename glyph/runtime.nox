@@ -2,9 +2,9 @@
 # Enforces AGENTS.md §2, §5.2-5.3, §7.2, §8.3, §10.3: deterministic, bounded, fail-closed.
 import nox.strings
 from nox.collections import OrderedDict
-from glyph.errors import SourceSpan, GlyphTypeError, GlyphUndefinedError, GlyphRenderError, GlyphSecurityError
+from glyph.errors import SourceSpan, GlyphTypeError, GlyphUndefinedError, GlyphRenderError, GlyphSecurityError, GlyphLoadError
 from glyph.errors import GLYPH_EVAL_TYPE, GLYPH_EVAL_UNDEFINED, GLYPH_EVAL_DIV_ZERO, GLYPH_EVAL_OVERFLOW
-from glyph.errors import GLYPH_RENDER_ERROR, GLYPH_SECURITY_POLICY
+from glyph.errors import GLYPH_RENDER_ERROR, GLYPH_RENDER_CYCLE, GLYPH_SECURITY_POLICY, GLYPH_LOADER_NOT_FOUND
 from glyph.limits import BudgetTracker
 from glyph.value import Value, UndefinedPolicy, is_truthy, stringify, validate_float
 from glyph.value import map_get, list_get, is_forbidden_key, checked_add, checked_sub
@@ -13,6 +13,7 @@ from glyph.expressions import Expr, ExprKind, UnaryOp, BinaryOp, CallArg, MapEnt
 from glyph.ast import Stmt, StmtKind, IfBranch, TemplateAst
 from glyph.validate import TemplateInfo
 from glyph.options import RenderOptions, TrustTier, min_trust_tier
+from glyph.loader import validate_logical_template_name
 from glyph.scope import RenderScope, make_loop_metadata
 from glyph.writer import GlyphWriter, RenderResult
 from glyph.safety import render_value_for_mode
@@ -236,6 +237,10 @@ class _Evaluator:
     tests: TestRegistry
     functions: FunctionRegistry
     options: RenderOptions
+    active_templates: list[str]
+    allow_dynamic_include: bool
+    has_resolver: bool
+    resolve_fn: (str, BudgetTracker) -> Template
 
     def __init__(
         self: _Evaluator,
@@ -245,7 +250,11 @@ class _Evaluator:
         filters: FilterRegistry,
         tests: TestRegistry,
         functions: FunctionRegistry,
-        options: RenderOptions
+        options: RenderOptions,
+        active_templates: list[str],
+        allow_dynamic_include: bool,
+        has_resolver: bool,
+        resolve_fn: (str, BudgetTracker) -> Template
     ) -> None:
         self.scope = scope
         self.tracker = tracker
@@ -254,6 +263,10 @@ class _Evaluator:
         self.tests = tests
         self.functions = functions
         self.options = options
+        self.active_templates = active_templates
+        self.allow_dynamic_include = allow_dynamic_include
+        self.has_resolver = has_resolver
+        self.resolve_fn = resolve_fn
 
     def eval_expr(self: _Evaluator, expr: Expr) -> Value:
         self.tracker.consume_op(expr.span)
@@ -588,12 +601,14 @@ class _Evaluator:
                 case StmtKind.SSet(target, val_expr):
                     sval: Value = self.eval_expr(val_expr)
                     self.scope.set_local(target, sval, st.span)
+                case StmtKind.SInclude(tpl_expr, with_context, ignore_missing):
+                    self._exec_include(tpl_expr, with_context, ignore_missing, st.span)
                 case _:
                     raise GlyphRenderError(
                         GLYPH_RENDER_ERROR,
-                        "composition statements (include/extends/block/macro/import/call) require Phase 4-5 composition runtime",
+                        "composition statements (extends/block/macro/import/call) require Phase 5 composition runtime",
                         st.span,
-                        "use core statements in v0.1 MVP"
+                        "use core statements or include in v0.2"
                     )
             i = i + 1
 
@@ -654,7 +669,125 @@ class _Evaluator:
             case _:
                 raise GlyphTypeError(GLYPH_EVAL_TYPE, "for-loop iterable must be a list or map", span, "iterate over a list or map")
 
-def execute_template(
+    def _exec_include(
+        self: _Evaluator,
+        tpl_expr: Expr,
+        with_context: bool,
+        ignore_missing: bool,
+        span: SourceSpan
+    ) -> None:
+        is_literal: bool = False
+        match tpl_expr.kind:
+            case ExprKind.EStr(_):
+                is_literal = True
+            case _:
+                is_literal = False
+        if not is_literal:
+            if not self.allow_dynamic_include:
+                raise GlyphSecurityError(
+                    GLYPH_SECURITY_POLICY,
+                    "dynamic include requires allow_dynamic_include policy",
+                    span,
+                    "pass a literal template name string"
+                )
+            match self.options.trust_tier:
+                case TrustTier.Trusted:
+                    pass
+                case _:
+                    raise GlyphSecurityError(
+                        GLYPH_SECURITY_POLICY,
+                        "dynamic include is forbidden in restricted/untrusted mode",
+                        span,
+                        "pass a literal template name string"
+                    )
+
+        name_val: Value = _check_not_undef(self.eval_expr(tpl_expr), self.options.undefined_policy, span)
+        inc_raw: str = ""
+        match name_val:
+            case Value.VStr(s):
+                inc_raw = s
+            case _:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "include target must evaluate to a string", span, "pass a string template path")
+
+        inc_name: str = validate_logical_template_name(inc_raw)
+        if not self.has_resolver:
+            raise GlyphRenderError(GLYPH_RENDER_ERROR, "include is not available without a template resolver", span, "render via Environment")
+
+        ai: int = 0
+        while ai < len(self.active_templates):
+            if self.active_templates[ai] == inc_name:
+                raise GlyphRenderError(GLYPH_RENDER_CYCLE, "cyclic include detected for '" + inc_name + "'", span, "remove circular include")
+            ai = ai + 1
+
+        self.tracker.enter_include(span)
+        resolver: (str, BudgetTracker) -> Template = self.resolve_fn
+        found: bool = True
+        child_tpl: Template = Template("", TemplateAst("", [], False, ""), TemplateInfo("", [], [], [], [], [], False, ""), "", TrustTier.Untrusted)
+        try:
+            child_tpl = resolver(inc_name, self.tracker)
+        except GlyphLoadError as le:
+            if ignore_missing and le.code == GLYPH_LOADER_NOT_FOUND:
+                found = False
+            else:
+                self.tracker.exit_include()
+                raise le
+
+        if not found:
+            self.tracker.exit_include()
+            return
+
+        child_trust: TrustTier = min_trust_tier(self.options.trust_tier, child_tpl.trust_tier)
+        child_allow_safe: bool = self.filters.allow_safe
+        match child_trust:
+            case TrustTier.Trusted:
+                pass
+            case _:
+                child_allow_safe = False
+
+        child_filters: FilterRegistry = FilterRegistry(child_allow_safe)
+        child_filters.custom_names = self.filters.custom_names
+        child_filters.custom_fns = self.filters.custom_fns
+        child_filters.generation = self.filters.generation
+
+        child_opts: RenderOptions = RenderOptions(
+            self.options.output_mode,
+            self.options.autoescape,
+            self.options.undefined_policy,
+            child_trust,
+            self.options.budget,
+            self.options.locale
+        )
+        child_scope: RenderScope = RenderScope(OrderedDict[str, Value]())
+        if with_context:
+            child_scope = self.scope.clone_for_include()
+
+        child_active: list[str] = []
+        bi: int = 0
+        while bi < len(self.active_templates):
+            child_active.append(self.active_templates[bi])
+            bi = bi + 1
+        child_active.append(inc_name)
+
+        child_ev: _Evaluator = _Evaluator(
+            child_scope,
+            self.tracker,
+            self.writer,
+            child_filters,
+            self.tests,
+            self.functions,
+            child_opts,
+            child_active,
+            self.allow_dynamic_include,
+            self.has_resolver,
+            self.resolve_fn
+        )
+        child_ev.exec_stmts(child_tpl.ast.body)
+        self.tracker.exit_include()
+
+def _noop_resolve(name: str, _tr: BudgetTracker) -> Template:
+    raise GlyphRenderError(GLYPH_RENDER_ERROR, "no resolver configured for '" + name + "'", SourceSpan(name, 1, 1, 0, 0), "use Environment")
+
+def execute_template_with_resolver(
     tpl: Template,
     root_vars: OrderedDict[str, Value],
     writer: GlyphWriter,
@@ -662,7 +795,10 @@ def execute_template(
     filters: FilterRegistry,
     tests: TestRegistry,
     functions: FunctionRegistry,
-    options: RenderOptions
+    options: RenderOptions,
+    allow_dynamic_include: bool,
+    has_resolver: bool,
+    resolve_fn: (str, BudgetTracker) -> Template
 ) -> RenderResult:
     # Effective trust policy takes the most restrictive tier between template and render options.
     eff_trust: TrustTier = min_trust_tier(tpl.trust_tier, options.trust_tier)
@@ -678,8 +814,30 @@ def execute_template(
     eff_filters.custom_fns = filters.custom_fns
     eff_filters.generation = filters.generation
 
+    eff_opts: RenderOptions = RenderOptions(
+        options.output_mode,
+        options.autoescape,
+        options.undefined_policy,
+        eff_trust,
+        options.budget,
+        options.locale
+    )
+
     scope: RenderScope = RenderScope(root_vars)
-    ev: _Evaluator = _Evaluator(scope, tracker, writer, eff_filters, tests, functions, options)
+    active: list[str] = [tpl.logical_name]
+    ev: _Evaluator = _Evaluator(
+        scope,
+        tracker,
+        writer,
+        eff_filters,
+        tests,
+        functions,
+        eff_opts,
+        active,
+        allow_dynamic_include,
+        has_resolver,
+        resolve_fn
+    )
     ev.exec_stmts(tpl.ast.body)
     writer.flush()
     return RenderResult(
@@ -688,4 +846,28 @@ def execute_template(
         tracker.total_ops_used,
         tracker.loop_steps_used,
         True
+    )
+
+def execute_template(
+    tpl: Template,
+    root_vars: OrderedDict[str, Value],
+    writer: GlyphWriter,
+    tracker: BudgetTracker,
+    filters: FilterRegistry,
+    tests: TestRegistry,
+    functions: FunctionRegistry,
+    options: RenderOptions
+) -> RenderResult:
+    return execute_template_with_resolver(
+        tpl,
+        root_vars,
+        writer,
+        tracker,
+        filters,
+        tests,
+        functions,
+        options,
+        False,
+        False,
+        _noop_resolve
     )
