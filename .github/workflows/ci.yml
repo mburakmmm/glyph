@@ -160,7 +160,7 @@ jobs:
                     echo "==> Bisecting test_lexer_budgets_and_fuzz_smoke"
                     python3 -c '
                     import subprocess
-                    hdr = "\n".join(open("tests/lexer/lexer_test.nox").read().splitlines()[:111]) + "\n"
+                    hdr = "\n".join(open("tests/lexer/lexer_test.nox").read().splitlines()[:110]) + "\n"
                     def run_probe(name, lines):
                         open(".tmp_p.nox", "w").write(hdr + "\n".join(lines) + "\n")
                         c = subprocess.run(["noxc", "build", "-o", "/tmp/pbin", ".tmp_p.nox"], capture_output=True, text=True)
