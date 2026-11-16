@@ -94,13 +94,21 @@ jobs:
       - name: Check core modules (LLVM, QBE, freestanding, spawn lint)
         shell: bash
         run: |
-          for f in glyph/*.nox; do
+          for f in glyph/*.nox integrations/*/*.nox cli/*.nox; do
             echo "Checking $f"
             noxc check "$f"
             noxc check --backend qbe "$f"
             noxc check --strict-spawn-shared "$f"
           done
           noxc check --profile freestanding glyph/api.nox
+
+      - name: Build and smoke-test glyph CLI binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          noxc build -o dist/glyph-cli cli/main.nox
+          ./dist/glyph-cli version --format json
+          rm -rf dist
 
       - name: Run NOX test suite
         shell: bash

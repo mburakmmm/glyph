@@ -26,6 +26,7 @@
 | `noxc sbom` | **verified** | Emits deterministic CycloneDX 1.5 JSON SBOM from `nox.json`. |
 | `noxc sign check` | **verified** | Exits 0 on clean zero-dependency workspace. |
 | `nox.json` (`requires: []`) | **verified** | Zero-dependency manifest accepted by `noxc update` / `noxc fetch` / `noxc sbom`. |
+| `nox.json` `"bin"` field | **unavailable** (v2.1.186 caveat) | Probed `"bin"` string and object schemas (`{"entry":...}`, `{"name":...,"entry":...}`, `{"glyph":...}`) all trigger `InvalidManifest` alongside `"entry"` on `noxc 2.1.186`; CLI builds directly via `noxc build -o glyph cli/main.nox`. |
 
 ---
 
@@ -60,8 +61,9 @@
 | `nox.unicode` (`upper_tr`, `lower_tr`, `normalize`) | **verified** (hosted) / **unavailable** (freestanding) | Must remain isolated in optional/locale layer (`glyph/locale.nox`), never imported unconditionally by core if freestanding compatibility is required. |
 | `nox.regex` (`search`, `Match`) | **verified** | Supports bounded matching; byte-indexed spans; `rx_match != None` works cleanly. |
 | `nox.path` (`safe_join`, `PathError`) | **verified** (with host caveat) | Rejects `..` traversal; **caveat:** treats leading `/etc/passwd` as `<root>/etc/passwd` and includes physical path in `PathError.message`. Glyph `FilesystemLoader` must pre-reject `/`, `\`, drive letters, UNC, NUL, `%2e%2e` and redact error messages. |
-| `nox.fs` | **experimental** | Hosted filesystem I/O only; must stay confined to `loader_fs.nox` and never enter `wasm`/`freestanding` builds. |
+| `nox.fs` | **verified** (hosted) | `read_to_string`, `write_string_atomic`, `create_dir_all`, `remove_dir_all`, `canonicalize`/`safe_join` confined to `loader_fs.nox` and `cli/app.nox`; never imported in `glyph/api.nox` or `wasm32`/`freestanding`. |
+| `nox.os` / `nox.time` / `nox.log` | **verified** (hosted) | `nox.os.arg_count`/`arg`/`exit` and `nox.time.monotonic_ns` verified in `cli/`; stdlib `nox.log` documents `no stderr write primitive yet` (all `print` output goes to stdout). |
 | `nox.test` (`assert_eq_*`, `assert_true`, `TestSuite`) | **verified** | Works natively with `noxc test`. |
 | `nox.template` | **verified** (baseline only) | Separate stdlib simple string/block renderer; Glyph does **not** modify or silently wrap it. |
-| `nyx` (`>= 0.29.0`) | **planned** | Adapter contract to be verified in Phase 9 without importing `nyx` into `glyph/`. |
-| `aether` | **planned** | Content-negotiation adapter to be verified in Phase 9. |
+| `integrations/nyx` (`glyph_nyx`) | **verified** (adapter) | Opt-in SSR adapter (`render_view`, `render_view_stream`, CSP nonce, preflight) compiles & runs cleanly; core `glyph/` never imports `nyx` or `integrations/`. |
+| `integrations/aether` (`glyph_aether`) | **verified** (adapter) | Opt-in content-negotiation adapter (`text/html`, `application/xml`, `text/plain`) compiles & runs cleanly; core `glyph/` never imports `aether`. |

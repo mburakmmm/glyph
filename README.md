@@ -14,7 +14,7 @@
 
 ---
 
-> **Project Status:** **Phase 8 (`v0.6.0`) Complete** — Deterministic i18n (`TranslationCatalog`, `trans`/`plural`, `locale.nox`), output profiles (`Html`, `Text`, `Xml`, `Markdown`, `Json`, `EmailSubject`/`render_email_pair`), and streaming `GlyphWriter` (backpressure, cancellation, 16 MiB stress, byte parity) verified (`noxc test`: 13/13 suites passing on LLVM & QBE, freestanding & WASM smoke verified). Next up: Phase 9 (`v0.7.0` Nyx/Aether Integrations & `glyph` CLI — see [todo.md](todo.md) and [docs/roadmap.md](docs/roadmap.md)).
+> **Project Status:** **Phase 9 (`v0.7.0`) Complete** — Opt-in Nyx & Aether adapters (`integrations/nyx`, `integrations/aether`), structured JSON diagnostics (`glyph/diagnostics.nox`), hosted `glyph` CLI (`cli/main.nox`), and Vertical Slice #3 verified (`noxc test`: 14/14 suites passing on LLVM & QBE, freestanding, CLI binary & WASM smoke verified). Next up: Phase 10 (`v1.0.0` Hardening & Release Gate — see [todo.md](todo.md) and [docs/roadmap.md](docs/roadmap.md)).
 
 ---
 
@@ -98,7 +98,7 @@ noxc sbom . -o glyph.sbom.json
 | **Phase 6** | `v0.4.0` | Contextual escaping, URL/JS/CSS denial, `TrustedMarkup`, XSS corpus | Done |
 | **Phase 7** | `v0.5.0` | Full built-in filter/test registry, `HelperContext`, cost metering | Done |
 | **Phase 8** | `v0.6.0` | i18n/locale/plural, HTML/Text/XML/MD/JSON/Email modes, Streaming `Writer` | Done |
-| **Phase 9** | `v0.7.0` | `integrations/nyx`, `integrations/aether`, `glyph` CLI, JSON diagnostics | Planned |
+| **Phase 9** | `v0.7.0` | `integrations/nyx`, `integrations/aether`, `glyph` CLI, JSON diagnostics | Done |
 | **Phase 10** | `v1.0.0` **(STABLE)** | Fuzzing, race/stress, benchmarks, WASM verification, Release Gate | Planned |
 | **Phase 11** | `v1.1.0+` / `v2.0` | `with`/`filter` blocks, component/slot DSL, const-folding, LSP, AOT research | Planned |
 

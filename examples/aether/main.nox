@@ -1,0 +1,21 @@
+# Phase 9 Example: Aether Content-Negotiation Adapter (text/html, application/xml, text/plain).
+import glyph.api
+from glyph.api import MemoryLoader, Environment, Context
+import integrations.aether.glyph_aether
+from integrations.aether.glyph_aether import AetherResponse
+
+mem: MemoryLoader = MemoryLoader()
+mem.put("item.html", "<h1>{{ title }}</h1>")
+mem.put("item.xml", "<item><title>{{ title }}</title></item>")
+mem.put("item.txt", "ITEM: {{ title }}")
+
+env: Environment = glyph.api.default_environment(mem)
+ctx: Context = glyph.api.context_from_json('{"title":"Glyph & Aether <v0.7>"}')
+
+r_html: AetherResponse = integrations.aether.glyph_aether.render_negotiated("item", "text/html", ctx, env)
+r_xml: AetherResponse = integrations.aether.glyph_aether.render_negotiated("item", "application/xml", ctx, env)
+r_txt: AetherResponse = integrations.aether.glyph_aether.render_negotiated("item", "text/plain", ctx, env)
+
+print("HTML [" + r_html.content_type + "]: " + r_html.body)
+print("XML  [" + r_xml.content_type + "]: " + r_xml.body)
+print("TEXT [" + r_txt.content_type + "]: " + r_txt.body)

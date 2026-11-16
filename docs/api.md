@@ -1,6 +1,6 @@
 # Glyph Public API Reference (`docs/api.md`)
 
-> **Version:** `0.6.0` (Phase 8)  
+> **Version:** `0.7.0` (Phase 9)  
 > **Entry Module:** `import glyph.api`  
 > **Stability Legend:** `Stable` (contract frozen in SemVer), `Experimental` (v0.x shape subject to refinement before `v1.0`), `Internal` (implementation detail).
 
@@ -51,7 +51,14 @@
 - Full built-in catalog reference: [docs/filters.md](filters.md).
 - `ResourceBudget` (`default_budget()`, `restricted_budget()`)
 
-## 5. Error Hierarchy
+## 5. Diagnostics, Framework Adapters & CLI
+
+- `glyph/diagnostics.nox`: `format_error_human`, `format_error_json`, `format_template_info_json`, `format_template_info_human`, `exit_code_for_error` (`0 OK`, `2 usage`, `3 syntax`, `4 loader`, `5 security`, `6 resource`, `7 runtime`, `8 internal`).
+- `integrations/nyx/glyph_nyx.nox`: Opt-in `render_view` and preflight `render_view_stream` (see [docs/integration-nyx.md](integration-nyx.md)).
+- `integrations/aether/glyph_aether.nox`: Explicit `Accept` content-negotiation adapter (`text/html`, `application/xml`, `text/plain`; see [docs/integration-aether.md](integration-aether.md)).
+- `cli/main.nox` (`cli/app.nox`): Hosted `glyph` CLI (`check`, `lint`, `render`, `inspect`, `deps`, `bench`, `version`).
+
+## 6. Error Hierarchy
 
 All errors inherit `GlyphError(Exception)` and carry `code`, `category`, `logical_name` (redacted), `line`, `column`, `span_start_byte`, `span_end_byte`, `safe_hint`, `render_phase`:
 

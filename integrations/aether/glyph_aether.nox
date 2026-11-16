@@ -1,0 +1,82 @@
+# Explicit opt-in Aether HTTP content-negotiation adapter for Glyph (Phase 9).
+# Enforces AGENTS.md §17.2 & ADR-0010: negotiates `text/html`, `text/plain`, `application/xml`; directs JSON API payloads to `nox.json`.
+import nox.strings
+from nox.collections import OrderedDict
+import glyph.api
+from glyph.api import Environment, Template, Context, RenderOptions, OutputMode
+from glyph.api import GlyphExtensionError
+from glyph.errors import SourceSpan, GLYPH_EXTENSION_ERROR
+
+class AetherResponse:
+    status: int
+    content_type: str
+    headers: OrderedDict[str, str]
+    output_mode: OutputMode
+    body: str
+
+    def __init__(
+        self: AetherResponse,
+        status: int,
+        content_type: str,
+        headers: OrderedDict[str, str],
+        output_mode: OutputMode,
+        body: str
+    ) -> None:
+        self.status = status
+        self.content_type = content_type
+        self.headers = headers
+        self.output_mode = output_mode
+        self.body = body
+
+class MediaNegotiation:
+    content_type: str
+    output_mode: OutputMode
+    template_ext: str
+
+    def __init__(self: MediaNegotiation, content_type: str, output_mode: OutputMode, template_ext: str) -> None:
+        self.content_type = content_type
+        self.output_mode = output_mode
+        self.template_ext = template_ext
+
+def negotiate_media_type(accept_header: str) -> MediaNegotiation:
+    al: str = nox.strings.lower(nox.strings.trim(accept_header))
+    if len(al) == 0 or nox.strings.contains(al, "text/html") or nox.strings.contains(al, "*/*"):
+        return MediaNegotiation("text/html; charset=utf-8", OutputMode.Html, ".html")
+    if nox.strings.contains(al, "application/xml") or nox.strings.contains(al, "text/xml"):
+        return MediaNegotiation("application/xml; charset=utf-8", OutputMode.Xml, ".xml")
+    if nox.strings.contains(al, "text/plain"):
+        return MediaNegotiation("text/plain; charset=utf-8", OutputMode.Text, ".txt")
+    if nox.strings.contains(al, "application/json"):
+        raise GlyphExtensionError(
+            GLYPH_EXTENSION_ERROR,
+            "application/json API responses should use nox.json serializer rather than HTML/text template negotiation",
+            SourceSpan("<aether-adapter>", 1, 1, 0, 0),
+            "serialize JSON API responses via nox.json"
+        )
+    raise GlyphExtensionError(
+        GLYPH_EXTENSION_ERROR,
+        "unsupported Accept media type for Glyph Aether adapter",
+        SourceSpan("<aether-adapter>", 1, 1, 0, 0),
+        "request text/html, application/xml, or text/plain"
+    )
+
+# Renders `base_name + ext` using negotiated OutputMode (with explicit view_model only; never injects request/auth globals).
+def render_negotiated(
+    base_template_name: str,
+    accept_header: str,
+    view_model: Context,
+    env: Environment,
+    status: int = 200
+) -> AetherResponse:
+    neg: MediaNegotiation = negotiate_media_type(accept_header)
+    tpl_name: str = base_template_name + neg.template_ext
+    tpl: Template = glyph.api.get_template(tpl_name, env)
+    opts: RenderOptions = glyph.api.default_render_options(env.options)
+    opts.output_mode = neg.output_mode
+    opts.autoescape = (neg.output_mode == OutputMode.Html or neg.output_mode == OutputMode.Xml)
+    body: str = glyph.api.render_with_options(tpl, view_model, opts, env)
+    hdrs: OrderedDict[str, str] = OrderedDict[str, str]()
+    hdrs.set("Content-Type", neg.content_type)
+    hdrs.set("X-Content-Type-Options", "nosniff")
+    hdrs.set("Vary", "Accept")
+    return AetherResponse(status, neg.content_type, hdrs, neg.output_mode, body)

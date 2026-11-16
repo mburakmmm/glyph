@@ -1,0 +1,19 @@
+# Phase 9 Example: Opt-in Nyx SSR View Integration (CSP Nonce + Safe URL + Preflight Headers).
+import glyph.api
+from glyph.api import MemoryLoader, Environment, Context
+import integrations.nyx.glyph_nyx
+from integrations.nyx.glyph_nyx import NyxViewOptions, NyxViewResponse
+
+mem: MemoryLoader = MemoryLoader()
+mem.put(
+    "views/profile.html",
+    "<!doctype html><html><body><h1>{{ user.name }}</h1><a href=\"{{ user.site }}\">Site</a><script nonce=\"{{ csp_nonce }}\">const u = {{ user | tojson }};</script></body></html>"
+)
+env: Environment = glyph.api.default_environment(mem)
+vopts: NyxViewOptions = NyxViewOptions(200, "text/html; charset=utf-8", "nonce-abc123", "", "no-store")
+ctx: Context = glyph.api.context_from_json('{"user":{"name":"<Ada>","site":"https://nox-lang.dev"},"csp_nonce":"nonce-abc123"}')
+resp: NyxViewResponse = integrations.nyx.glyph_nyx.render_view("views/profile.html", ctx, env, vopts)
+
+print("STATUS=" + str(resp.status) + " CT=" + resp.content_type)
+print("CSP=" + resp.headers.get("Content-Security-Policy"))
+print("BODY=" + resp.body)

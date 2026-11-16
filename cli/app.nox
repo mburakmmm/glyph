@@ -1,0 +1,340 @@
+# Glyph CLI implementation (`run_cli_args`) — check, lint, render (JSON-only context), inspect, deps, bench, version.
+# Enforces AGENTS.md §2.12, §19.3, §20 and todo.md §9.3. Hosted CLI (uses nox.fs, nox.time, FilesystemLoader).
+import nox.fs
+import nox.json
+import nox.strings
+import nox.time
+from nox.fs import FsError
+import glyph.api
+from glyph.api import Environment, EnvironmentOptions, RenderOptions, Template, Context, TemplateInfo
+from glyph.api import OutputMode, TrustTier, UndefinedPolicy, GlyphError, GlyphLoadError, GlyphTypeError
+from glyph.errors import empty_span, GLYPH_LOADER_NOT_FOUND, GLYPH_EVAL_TYPE
+from glyph.loader import SourceRecord
+from glyph.loader_fs import FilesystemLoader
+from glyph.diagnostics import EXIT_OK, EXIT_USAGE, EXIT_INTERNAL
+from glyph.diagnostics import exit_code_for_error, format_error_human, format_error_json
+from glyph.diagnostics import format_template_info_json, format_template_info_human
+
+def _print_usage() -> None:
+    print("glyph " + glyph.api.engine_version() + " — NOX Advanced Template Engine CLI")
+    print("Usage:")
+    print("  glyph check [--root <dir>] [--format human|json] <template>")
+    print("  glyph lint [--root <dir>] [--format human|json] <template>")
+    print("  glyph render [--root <dir>] [--context <file.json> | --context-json <json>] [--mode html|text|xml|md|json|email_subject] [--trust trusted|restricted] [--locale <loc>] [--format human|json] [--out <file>] <template>")
+    print("  glyph inspect [--root <dir>] [--format human|json] <template>")
+    print("  glyph deps [--root <dir>] [--format human|json] <template>")
+    print("  glyph bench [--root <dir>] [--iterations <n>] [--context-json <json>] [--format human|json] <template>")
+    print("  glyph version [--format human|json]")
+    print("Exit codes: 0 OK, 2 usage, 3 syntax, 4 loader, 5 security, 6 resource, 7 runtime, 8 internal")
+
+def _emit_usage_err(msg: str, fmt: str) -> int:
+    if fmt == "json":
+        print('{"ok":false,"code":"GLYPH_CLI_USAGE","category":"usage","message":' + nox.json.dump_string(msg) + ',"redacted":true,"exit_code":2}')
+    else:
+        print("usage error: " + msg)
+        _print_usage()
+    return EXIT_USAGE
+
+def _emit_glyph_err(ge: GlyphError, fmt: str) -> int:
+    if fmt == "json":
+        print(format_error_json(ge))
+    else:
+        print(format_error_human(ge))
+    return exit_code_for_error(ge)
+
+def _parse_mode(mode_s: str) -> OutputMode:
+    ml: str = nox.strings.lower(mode_s)
+    if ml == "html":
+        return OutputMode.Html
+    if ml == "text":
+        return OutputMode.Text
+    if ml == "xml":
+        return OutputMode.Xml
+    if ml == "md" or ml == "markdown":
+        return OutputMode.Markdown
+    if ml == "json":
+        return OutputMode.Json
+    if ml == "email_subject":
+        return OutputMode.EmailSubject
+    raise GlyphTypeError(GLYPH_EVAL_TYPE, "unknown --mode '" + mode_s + "'", empty_span("<cli>"), "use html, text, xml, md, json, or email_subject")
+
+def _parse_trust(trust_s: str) -> TrustTier:
+    tl: str = nox.strings.lower(trust_s)
+    if tl == "trusted":
+        return TrustTier.Trusted
+    if tl == "restricted":
+        return TrustTier.Restricted
+    raise GlyphTypeError(GLYPH_EVAL_TYPE, "unknown --trust '" + trust_s + "'", empty_span("<cli>"), "use trusted or restricted")
+
+def _make_fs_env(root_dir: str, mode: OutputMode, trust: TrustTier, loc: str) -> Environment:
+    fs_loader: FilesystemLoader = FilesystemLoader(root_dir, trust)
+    ae: bool = (mode == OutputMode.Html or mode == OutputMode.Xml or mode == OutputMode.Json)
+    opts: EnvironmentOptions = EnvironmentOptions(
+        mode,
+        ae,
+        UndefinedPolicy.StrictUndefined,
+        trust,
+        False,
+        False,
+        glyph.api.default_budget(),
+        loc
+    )
+    return glyph.api.environment_with_loader(fs_loader.as_loader(), opts)
+
+def _collect_deps_dfs(tpl_name: str, env: Environment, seen: list[str], out: list[str], depth: int) -> None:
+    if depth >= 32:
+        return
+    tpl: Template = glyph.api.get_template(tpl_name, env)
+    info: TemplateInfo = glyph.api.inspect(tpl)
+    cand: list[str] = []
+    if info.has_extends and len(info.extends_target) > 0:
+        cand.append(info.extends_target)
+    i: int = 0
+    while i < len(info.includes):
+        cand.append(info.includes[i])
+        i = i + 1
+    j: int = 0
+    while j < len(info.imports):
+        cand.append(info.imports[j])
+        j = j + 1
+    k: int = 0
+    while k < len(cand):
+        d: str = cand[k]
+        found: bool = False
+        si: int = 0
+        while si < len(seen):
+            if seen[si] == d:
+                found = True
+            si = si + 1
+        if not found:
+            seen.append(d)
+            out.append(d)
+            _collect_deps_dfs(d, env, seen, out, depth + 1)
+        k = k + 1
+
+def run_cli_args(argv: list[str]) -> int:
+    argc: int = len(argv)
+    if argc < 2:
+        _print_usage()
+        return EXIT_USAGE
+
+    cmd: str = argv[1]
+    if cmd == "-h" or cmd == "--help" or cmd == "help":
+        _print_usage()
+        return EXIT_OK
+
+    root_dir: str = "."
+    fmt: str = "human"
+    ctx_file: str = ""
+    ctx_json: str = ""
+    mode_s: str = "html"
+    trust_s: str = "trusted"
+    locale_s: str = "en"
+    out_file: str = ""
+    iters: int = 50
+    target: str = ""
+
+    i: int = 2
+    while i < argc:
+        a: str = argv[i]
+        if a == "--root":
+            i = i + 1
+            if i >= argc:
+                return _emit_usage_err("missing value after --root", fmt)
+            root_dir = argv[i]
+        elif a == "--format":
+            i = i + 1
+            if i >= argc:
+                return _emit_usage_err("missing value after --format", fmt)
+            fmt = nox.strings.lower(argv[i])
+            if fmt != "human" and fmt != "json":
+                return _emit_usage_err("--format must be 'human' or 'json'", "human")
+        elif a == "--context":
+            i = i + 1
+            if i >= argc:
+                return _emit_usage_err("missing value after --context", fmt)
+            ctx_file = argv[i]
+        elif a == "--context-json":
+            i = i + 1
+            if i >= argc:
+                return _emit_usage_err("missing value after --context-json", fmt)
+            ctx_json = argv[i]
+        elif a == "--mode":
+            i = i + 1
+            if i >= argc:
+                return _emit_usage_err("missing value after --mode", fmt)
+            mode_s = argv[i]
+        elif a == "--trust":
+            i = i + 1
+            if i >= argc:
+                return _emit_usage_err("missing value after --trust", fmt)
+            trust_s = argv[i]
+        elif a == "--locale":
+            i = i + 1
+            if i >= argc:
+                return _emit_usage_err("missing value after --locale", fmt)
+            locale_s = argv[i]
+        elif a == "--out":
+            i = i + 1
+            if i >= argc:
+                return _emit_usage_err("missing value after --out", fmt)
+            out_file = argv[i]
+        elif a == "--iterations":
+            i = i + 1
+            if i >= argc:
+                return _emit_usage_err("missing value after --iterations", fmt)
+            try:
+                iters = int(argv[i])
+            except ValueError:
+                return _emit_usage_err("--iterations must be a positive integer", fmt)
+            if iters < 1 or iters > 100000:
+                return _emit_usage_err("--iterations must be 1..100000", fmt)
+        elif nox.strings.starts_with(a, "-"):
+            return _emit_usage_err("unknown flag '" + a + "'", fmt)
+        else:
+            if len(target) > 0:
+                return _emit_usage_err("unexpected extra argument '" + a + "'", fmt)
+            target = a
+        i = i + 1
+
+    if cmd == "version":
+        if fmt == "json":
+            print('{"ok":true,"glyph_version":' + nox.json.dump_string(glyph.api.engine_version()) + ',"min_nox_version":' + nox.json.dump_string(glyph.api.min_nox_version()) + '}')
+        else:
+            print("glyph " + glyph.api.engine_version() + " (min NOX " + glyph.api.min_nox_version() + ")")
+        return EXIT_OK
+
+    if len(target) == 0:
+        return _emit_usage_err("missing <template> argument for '" + cmd + "'", fmt)
+
+    try:
+        if cmd == "check":
+            env_c: Environment = _make_fs_env(root_dir, OutputMode.Html, TrustTier.Trusted, locale_s)
+            tpl_c: Template = glyph.api.get_template(target, env_c)
+            if fmt == "json":
+                print('{"ok":true,"command":"check","template":' + nox.json.dump_string(tpl_c.logical_name) + ',"fingerprint":' + nox.json.dump_string(tpl_c.fingerprint) + '}')
+            else:
+                print("ok: " + tpl_c.logical_name + " (" + tpl_c.fingerprint + ")")
+            return EXIT_OK
+
+        if cmd == "lint":
+            fs_l: FilesystemLoader = FilesystemLoader(root_dir, TrustTier.Trusted)
+            rec_l: SourceRecord = fs_l.load(target)
+            env_l: Environment = _make_fs_env(root_dir, OutputMode.Html, TrustTier.Trusted, locale_s)
+            errs: list[GlyphError] = glyph.api.lint(rec_l.content, rec_l.logical_name, env_l)
+            if len(errs) == 0:
+                if fmt == "json":
+                    print('{"ok":true,"command":"lint","template":' + nox.json.dump_string(rec_l.logical_name) + ',"diagnostics":[]}')
+                else:
+                    print("ok: 0 lint issues in " + rec_l.logical_name)
+                return EXIT_OK
+            if fmt == "json":
+                dparts: list[str] = []
+                di: int = 0
+                while di < len(errs):
+                    dparts.append(format_error_json(errs[di]))
+                    di = di + 1
+                print('{"ok":false,"command":"lint","diagnostics":[' + nox.strings.join(dparts, ",") + '],"redacted":true}')
+            else:
+                di2: int = 0
+                while di2 < len(errs):
+                    print(format_error_human(errs[di2]))
+                    di2 = di2 + 1
+            return exit_code_for_error(errs[0])
+
+        if cmd == "inspect":
+            env_i: Environment = _make_fs_env(root_dir, OutputMode.Html, TrustTier.Trusted, locale_s)
+            tpl_i: Template = glyph.api.get_template(target, env_i)
+            info_i: TemplateInfo = glyph.api.inspect(tpl_i)
+            if fmt == "json":
+                print('{"ok":true,"command":"inspect","info":' + format_template_info_json(info_i) + '}')
+            else:
+                print(format_template_info_human(info_i))
+            return EXIT_OK
+
+        if cmd == "deps":
+            env_d: Environment = _make_fs_env(root_dir, OutputMode.Html, TrustTier.Trusted, locale_s)
+            seen_d: list[str] = [target]
+            deps_d: list[str] = []
+            _collect_deps_dfs(target, env_d, seen_d, deps_d, 0)
+            if fmt == "json":
+                jparts: list[str] = []
+                ji: int = 0
+                while ji < len(deps_d):
+                    jparts.append(nox.json.dump_string(deps_d[ji]))
+                    ji = ji + 1
+                print('{"ok":true,"command":"deps","template":' + nox.json.dump_string(target) + ',"dependencies":[' + nox.strings.join(jparts, ",") + ']}')
+            else:
+                print("dependencies of " + target + ":")
+                di_h: int = 0
+                while di_h < len(deps_d):
+                    print("  - " + deps_d[di_h])
+                    di_h = di_h + 1
+            return EXIT_OK
+
+        if cmd == "render":
+            if len(ctx_file) > 0 and len(ctx_json) > 0:
+                return _emit_usage_err("specify either --context <file> or --context-json <json>, not both", fmt)
+            mode_r: OutputMode = _parse_mode(mode_s)
+            trust_r: TrustTier = _parse_trust(trust_s)
+            env_r: Environment = _make_fs_env(root_dir, mode_r, trust_r, locale_s)
+            tpl_r: Template = glyph.api.get_template(target, env_r)
+            ctx_r: Context = glyph.api.empty_context()
+            if len(ctx_file) > 0:
+                try:
+                    raw_cf: str = nox.fs.read_to_string(ctx_file)
+                    ctx_r = glyph.api.context_from_json(raw_cf)
+                except FsError:
+                    raise GlyphLoadError(GLYPH_LOADER_NOT_FOUND, "could not read context JSON file", empty_span("<context>"), "verify --context JSON file path")
+            elif len(ctx_json) > 0:
+                ctx_r = glyph.api.context_from_json(ctx_json)
+            opts_r: RenderOptions = glyph.api.default_render_options(env_r.options)
+            opts_r.locale = locale_s
+            rendered: str = glyph.api.render_with_options(tpl_r, ctx_r, opts_r, env_r)
+            if len(out_file) > 0:
+                try:
+                    nox.fs.write_string_atomic(out_file, rendered)
+                except FsError:
+                    raise GlyphLoadError(GLYPH_LOADER_NOT_FOUND, "could not write output file", empty_span("<out>"), "verify writable --out destination")
+                if fmt == "json":
+                    print('{"ok":true,"command":"render","template":' + nox.json.dump_string(tpl_r.logical_name) + ',"bytes_written":' + str(nox.strings.byte_len(rendered)) + '}')
+                else:
+                    print("wrote " + str(nox.strings.byte_len(rendered)) + " bytes to " + out_file)
+            else:
+                if fmt == "json":
+                    print('{"ok":true,"command":"render","template":' + nox.json.dump_string(tpl_r.logical_name) + ',"output":' + nox.json.dump_string(rendered) + ',"bytes_written":' + str(nox.strings.byte_len(rendered)) + '}')
+                else:
+                    print(rendered)
+            return EXIT_OK
+
+        if cmd == "bench":
+            env_b: Environment = _make_fs_env(root_dir, OutputMode.Html, TrustTier.Trusted, locale_s)
+            tpl_b: Template = glyph.api.get_template(target, env_b)
+            ctx_b: Context = glyph.api.empty_context()
+            if len(ctx_json) > 0:
+                ctx_b = glyph.api.context_from_json(ctx_json)
+            t0: int = nox.time.monotonic_ns()
+            bi: int = 0
+            last_bytes: int = 0
+            while bi < iters:
+                out_b: str = glyph.api.render(tpl_b, ctx_b, env_b)
+                last_bytes = nox.strings.byte_len(out_b)
+                bi = bi + 1
+            t1: int = nox.time.monotonic_ns()
+            elapsed_ns: int = t1 - t0
+            if fmt == "json":
+                print('{"ok":true,"command":"bench","template":' + nox.json.dump_string(tpl_b.logical_name) + ',"iterations":' + str(iters) + ',"elapsed_ns":' + str(elapsed_ns) + ',"bytes_per_render":' + str(last_bytes) + '}')
+            else:
+                elapsed_ms: int = elapsed_ns // 1000000
+                print("bench " + tpl_b.logical_name + ": " + str(iters) + " iters in " + str(elapsed_ms) + " ms (" + str(last_bytes) + " bytes/render)")
+            return EXIT_OK
+
+        return _emit_usage_err("unknown subcommand '" + cmd + "'", fmt)
+    except GlyphError as ge:
+        return _emit_glyph_err(ge, fmt)
+    except Exception:
+        if fmt == "json":
+            print('{"ok":false,"code":"GLYPH_INTERNAL","category":"internal","message":"unexpected internal CLI failure","redacted":true,"exit_code":8}')
+        else:
+            print("internal error: unexpected CLI failure")
+        return EXIT_INTERNAL

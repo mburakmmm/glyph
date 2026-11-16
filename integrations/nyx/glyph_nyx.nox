@@ -1,0 +1,148 @@
+# Opt-in Nyx SSR adapter for Glyph (Phase 9).
+# Enforces AGENTS.md §17.1 & ADR-0010: never alters `nyx.view.render`; HTTP Content-Type, CSP nonce, and streaming preflight are managed cleanly at the adapter boundary.
+import nox.strings
+from nox.collections import OrderedDict
+import glyph.api
+from glyph.api import Environment, Template, Context, RenderOptions, OutputMode
+from glyph.api import BudgetTracker, GlyphWriter, RenderResult, GlyphSecurityError
+from glyph.errors import SourceSpan, GLYPH_SECURITY_CONTEXT
+
+class NyxViewOptions:
+    status: int
+    content_type: str
+    csp_nonce: str
+    csp_policy: str
+    cache_control: str
+
+    def __init__(
+        self: NyxViewOptions,
+        status: int = 200,
+        content_type: str = "text/html; charset=utf-8",
+        csp_nonce: str = "",
+        csp_policy: str = "",
+        cache_control: str = "no-store"
+    ) -> None:
+        self.status = status
+        self.content_type = content_type
+        self.csp_nonce = csp_nonce
+        self.csp_policy = csp_policy
+        self.cache_control = cache_control
+
+class NyxViewResponse:
+    status: int
+    content_type: str
+    headers: OrderedDict[str, str]
+    csp_nonce: str
+    body: str
+    bytes_written: int
+    streamed: bool
+
+    def __init__(
+        self: NyxViewResponse,
+        status: int,
+        content_type: str,
+        headers: OrderedDict[str, str],
+        csp_nonce: str,
+        body: str,
+        bytes_written: int,
+        streamed: bool
+    ) -> None:
+        self.status = status
+        self.content_type = content_type
+        self.headers = headers
+        self.csp_nonce = csp_nonce
+        self.body = body
+        self.bytes_written = bytes_written
+        self.streamed = streamed
+
+def _validate_header_value(val: str, header_name: str) -> None:
+    blen: int = nox.strings.byte_len(val)
+    i: int = 0
+    while i < blen:
+        b: int = nox.strings.byte_at(val, i)
+        if b == 0 or b == 10 or b == 13:
+            raise GlyphSecurityError(
+                GLYPH_SECURITY_CONTEXT,
+                "CR/LF/NUL control characters forbidden in HTTP header '" + header_name + "'",
+                SourceSpan("<nyx-adapter>", 1, 1, 0, 0),
+                "pass single-line header/nonce values without newlines"
+            )
+        i = i + 1
+
+def _build_nyx_headers(vopts: NyxViewOptions) -> OrderedDict[str, str]:
+    _validate_header_value(vopts.content_type, "Content-Type")
+    _validate_header_value(vopts.csp_nonce, "CSP-Nonce")
+    _validate_header_value(vopts.csp_policy, "Content-Security-Policy")
+    _validate_header_value(vopts.cache_control, "Cache-Control")
+    hdrs: OrderedDict[str, str] = OrderedDict[str, str]()
+    hdrs.set("Content-Type", vopts.content_type)
+    hdrs.set("X-Content-Type-Options", "nosniff")
+    if len(vopts.cache_control) > 0:
+        hdrs.set("Cache-Control", vopts.cache_control)
+    if len(vopts.csp_policy) > 0:
+        hdrs.set("Content-Security-Policy", vopts.csp_policy)
+    elif len(vopts.csp_nonce) > 0:
+        hdrs.set("Content-Security-Policy", "default-src 'self'; script-src 'nonce-" + vopts.csp_nonce + "' 'strict-dynamic'; object-src 'none'; base-uri 'self'")
+    return hdrs
+
+def default_nyx_options() -> NyxViewOptions:
+    return NyxViewOptions(200, "text/html; charset=utf-8", "", "", "no-store")
+
+# Explicit opt-in Nyx SSR helper (renders full response before returning headers + HTML body).
+def render_view(
+    template_name: str,
+    view_model: Context,
+    env: Environment,
+    view_opts: NyxViewOptions
+) -> NyxViewResponse:
+    hdrs: OrderedDict[str, str] = _build_nyx_headers(view_opts)
+    tpl: Template = glyph.api.get_template(template_name, env)
+    r_opts: RenderOptions = glyph.api.default_render_options(env.options)
+    r_opts.output_mode = OutputMode.Html
+    r_opts.autoescape = True
+    body: str = glyph.api.render_with_options(tpl, view_model, r_opts, env)
+    return NyxViewResponse(
+        view_opts.status,
+        view_opts.content_type,
+        hdrs,
+        view_opts.csp_nonce,
+        body,
+        nox.strings.byte_len(body),
+        False
+    )
+
+# Streaming SSR preflight: validates headers + compiles template BEFORE opening sink stream.
+def render_view_stream(
+    template_name: str,
+    view_model: Context,
+    env: Environment,
+    view_opts: NyxViewOptions,
+    on_headers: (int, OrderedDict[str, str]) -> bool,
+    sink_fn: (str) -> bool,
+    cancel_fn: () -> bool,
+    flush_threshold_bytes: int
+) -> NyxViewResponse:
+    # Preflight compilation & header validation (if these fail, caller still handles status cleanly!)
+    hdrs: OrderedDict[str, str] = _build_nyx_headers(view_opts)
+    tpl: Template = glyph.api.get_template(template_name, env)
+    r_opts: RenderOptions = glyph.api.default_render_options(env.options)
+    r_opts.output_mode = OutputMode.Html
+    r_opts.autoescape = True
+
+    accepted: bool = on_headers(view_opts.status, hdrs)
+    if not accepted:
+        return NyxViewResponse(view_opts.status, view_opts.content_type, hdrs, view_opts.csp_nonce, "", 0, False)
+
+    tracker: BudgetTracker = BudgetTracker(r_opts.budget)
+    writer: GlyphWriter = glyph.api.streaming_writer(tracker, sink_fn, cancel_fn, flush_threshold_bytes)
+    res: RenderResult = glyph.api.render_to_writer(tpl, view_model, writer, r_opts, env)
+    writer.close()
+    return NyxViewResponse(
+        view_opts.status,
+        view_opts.content_type,
+        hdrs,
+        view_opts.csp_nonce,
+        "",
+        writer.bytes_written,
+        True
+    )

@@ -294,19 +294,19 @@ Her PoC derlenip `noxc check` + `noxc test` ile doğrulanmış ve sonucu `docs/c
 **Amaç:** Core'u kirletmeden framework adaptörlerini ve geliştirici CLI aracını (`glyph`) yayınlamak.
 
 ### 9.1. Karar Kaydı
-- [ ] `docs/adr/0010-nyx-adapter-and-migration-rules.md` (**ADR-0010**)
+- [x] `docs/adr/0010-nyx-adapter-and-migration-rules.md` (**ADR-0010**)
 
 ### 9.2. Framework Adaptörleri (`integrations/`)
-- [ ] `integrations/nyx/`: Opt-in `glyph_nyx.render_view(...)`; mevcut `nyx.view.render` davranışı değişmez; HTTP `Content-Type`, status, CSP nonce ve streaming preflight Nyx tarafında yönetilir.
-- [ ] `integrations/aether/`: `text/html`, `text/plain`, `application/xml` content-negotiation adaptörü (JSON API için `nox.json` kullanımı korunur).
-- [ ] `docs/integration-nyx.md`, `docs/integration-aether.md`, `examples/nyx/`, `examples/aether/`.
-- [ ] Doğrulama: `glyph/` çekirdeğinin `integrations/` veya `nyx`/`aether` import etmediğinin statik kontrolü.
+- [x] `integrations/nyx/`: Opt-in `glyph_nyx.render_view(...)` ve preflight `render_view_stream(...)`; mevcut `nyx.view.render` davranışı değişmez; HTTP `Content-Type`, status, CSP nonce ve streaming preflight Nyx adaptörü tarafında yönetilir.
+- [x] `integrations/aether/`: `text/html`, `text/plain`, `application/xml` content-negotiation adaptörü (JSON API için `nox.json` kullanımı korunur).
+- [x] `docs/integration-nyx.md`, `docs/integration-aether.md`, `examples/nyx/`, `examples/aether/`.
+- [x] Doğrulama: `glyph/` çekirdeğinin `integrations/` veya `nyx`/`aether` import etmediğinin statik kontrolü (`BOUNDARY_OK 33`).
 
 ### 9.3. Diagnostics ve CLI (`glyph/diagnostics.nox`, `cli/main.nox`)
-- [ ] `nox.json` `bin` desteği ve gerekiyorsa `Rune` uyumu doğrulaması.
-- [ ] Alt komutlar: `glyph check`, `glyph lint`, `glyph render` (sadece JSON `--context`), `glyph inspect`, `glyph deps`, `glyph bench`, `glyph version`.
-- [ ] `--format human|json`, stdout/stderr ayrımı, secret redaction uyarıları ve kararlı çıkış kodları (`0 OK`, `2 usage`, `3 syntax`, `4 loader`, `5 security`, `6 resource`, `7 runtime`, `8 internal`).
-- [ ] **Vertical Slice #3:** Malicious URL/context injection reddeden SSR view + Nyx adaptörü + streaming writer + CLI smoke testi (`tests/integration/`).
+- [x] `nox.json` `bin` uyumluluğu doğrulandı (`noxc 2.1.186` kütüphane `"entry"` yanında `"bin"` alanını `InvalidManifest` ile reddettiği belgelendi; CLI `noxc build -o glyph-cli cli/main.nox` ile derlenir).
+- [x] Alt komutlar: `glyph check`, `glyph lint`, `glyph render` (sadece JSON `--context` / `--context-json`), `glyph inspect`, `glyph deps`, `glyph bench`, `glyph version`.
+- [x] `--format human|json`, redacted JSON/human hata kanalı (`noxc 2.1.186` stdlib'de ayrı `stderr` ilkeli olmadığı için `--out` + stdout üzerinden belgelendi) ve kararlı çıkış kodları (`0 OK`, `2 usage`, `3 syntax`, `4 loader`, `5 security`, `6 resource`, `7 runtime`, `8 internal`).
+- [x] **Vertical Slice #3:** Malicious URL/context injection reddeden SSR view + Nyx adaptörü + streaming preflight/writer + Aether + CLI testi (`tests/integration/integration_and_cli_test.nox`).
 
 ---
 

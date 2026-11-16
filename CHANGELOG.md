@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-16
+
+### Added
+- `docs/adr/0010-nyx-adapter-and-migration-rules.md` (ADR-0010), `docs/integration-nyx.md`, and `docs/integration-aether.md`.
+- `integrations/nyx/glyph_nyx.nox` & `examples/nyx/main.nox`: Opt-in `render_view` and preflight `render_view_stream` (HTTP `Content-Type`, `X-Content-Type-Options: nosniff`, single-line validated CSP nonce, never patches `nyx.view.render`).
+- `integrations/aether/glyph_aether.nox` & `examples/aether/main.nox`: Explicit HTTP `Accept` content-negotiation adapter (`text/html`, `application/xml`, `text/plain`; directs `application/json` to `nox.json`).
+- `glyph/diagnostics.nox`, `cli/app.nox`, `cli/main.nox`: Structured human/JSON diagnostic formatting with physical path redaction, deterministic CLI exit codes (`0, 2, 3, 4, 5, 6, 7, 8`), and `glyph` CLI (`check`, `lint`, `render` with JSON-only context, `inspect`, `deps`, `bench`, `version`).
+- `tests/integration/integration_and_cli_test.nox` (Vertical Slice #3) and updated CI matrix in `.github/workflows/ci.yml` + `docs/compatibility.md` + `docs/api.md`.
+
 ## [0.6.0] - 2026-11-16
 
 ### Added

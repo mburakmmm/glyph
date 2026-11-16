@@ -1,0 +1,89 @@
+# Structured diagnostic formatting (human/JSON), CLI exit code mapping, and redaction helpers for Glyph (Phase 9).
+# Enforces AGENTS.md §2.12, §20, and CLI contract: no context secrets or physical disk paths exposed. Pure NOX, freestanding-safe.
+import nox.json
+import nox.strings
+from glyph.errors import GlyphError, GlyphSyntaxError, GlyphLoadError, GlyphSecurityError, GlyphLimitError
+from glyph.validate import TemplateInfo
+
+EXIT_OK: int = 0
+EXIT_USAGE: int = 2
+EXIT_SYNTAX: int = 3
+EXIT_LOADER: int = 4
+EXIT_SECURITY: int = 5
+EXIT_RESOURCE: int = 6
+EXIT_RUNTIME: int = 7
+EXIT_INTERNAL: int = 8
+
+def exit_code_for_error(err: GlyphError) -> int:
+    if err.category == "syntax":
+        return EXIT_SYNTAX
+    if err.category == "loader" or err.category == "load":
+        return EXIT_LOADER
+    if err.category == "security":
+        return EXIT_SECURITY
+    if err.category == "limit":
+        return EXIT_RESOURCE
+    if err.category == "undefined" or err.category == "type" or err.category == "eval" or err.category == "render" or err.category == "extension" or err.category == "cancelled":
+        return EXIT_RUNTIME
+    return EXIT_INTERNAL
+
+def format_error_human(err: GlyphError) -> str:
+    loc: str = err.logical_name + ":" + str(err.line) + ":" + str(err.column)
+    head: str = "error[" + err.code + "] (" + err.category + "/" + err.render_phase + ") at " + loc + ": " + err.message
+    if len(err.safe_hint) > 0:
+        return head + "\n  hint: " + err.safe_hint
+    return head
+
+def format_error_json(err: GlyphError) -> str:
+    return (
+        '{"ok":false'
+        + ',"code":' + nox.json.dump_string(err.code)
+        + ',"category":' + nox.json.dump_string(err.category)
+        + ',"render_phase":' + nox.json.dump_string(err.render_phase)
+        + ',"logical_name":' + nox.json.dump_string(err.logical_name)
+        + ',"line":' + str(err.line)
+        + ',"column":' + str(err.column)
+        + ',"span_start_byte":' + str(err.span_start_byte)
+        + ',"span_end_byte":' + str(err.span_end_byte)
+        + ',"message":' + nox.json.dump_string(err.message)
+        + ',"safe_hint":' + nox.json.dump_string(err.safe_hint)
+        + ',"redacted":true'
+        + ',"exit_code":' + str(exit_code_for_error(err))
+        + '}'
+    )
+
+def _json_str_array(items: list[str]) -> str:
+    parts: list[str] = []
+    i: int = 0
+    while i < len(items):
+        parts.append(nox.json.dump_string(items[i]))
+        i = i + 1
+    return "[" + nox.strings.join(parts, ",") + "]"
+
+def format_template_info_json(info: TemplateInfo) -> str:
+    ext_flag: str = "false"
+    if info.has_extends:
+        ext_flag = "true"
+    return (
+        '{"logical_name":' + nox.json.dump_string(info.logical_name)
+        + ',"has_extends":' + ext_flag
+        + ',"extends_target":' + nox.json.dump_string(info.extends_target)
+        + ',"referenced_vars":' + _json_str_array(info.referenced_vars)
+        + ',"blocks":' + _json_str_array(info.blocks)
+        + ',"includes":' + _json_str_array(info.includes)
+        + ',"macros":' + _json_str_array(info.macros)
+        + ',"imports":' + _json_str_array(info.imports)
+        + '}'
+    )
+
+def format_template_info_human(info: TemplateInfo) -> str:
+    lines: list[str] = []
+    lines.append("template: " + info.logical_name)
+    if info.has_extends:
+        lines.append("extends:  " + info.extends_target)
+    lines.append("vars:     " + nox.strings.join(info.referenced_vars, ", "))
+    lines.append("blocks:   " + nox.strings.join(info.blocks, ", "))
+    lines.append("includes: " + nox.strings.join(info.includes, ", "))
+    lines.append("macros:   " + nox.strings.join(info.macros, ", "))
+    lines.append("imports:  " + nox.strings.join(info.imports, ", "))
+    return nox.strings.join(lines, "\n")

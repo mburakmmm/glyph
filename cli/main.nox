@@ -1,0 +1,14 @@
+# Executable entrypoint for the `glyph` CLI tool.
+import nox.os
+import cli.app
+
+def _collect_os_argv() -> list[str]:
+    argc: int = nox.os.arg_count()
+    args: list[str] = []
+    i: int = 0
+    while i < argc:
+        args.append(nox.os.arg(i))
+        i = i + 1
+    return args
+
+nox.os.exit(cli.app.run_cli_args(_collect_os_argv()))

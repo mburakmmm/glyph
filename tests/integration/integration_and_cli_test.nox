@@ -1,0 +1,216 @@
+# Phase 9 Integration & Vertical Slice #3 Tests: Nyx SSR, Aether Negotiation, Diagnostics, and Glyph CLI.
+import nox.test
+import nox.fs
+import nox.json
+import nox.strings
+from nox.collections import OrderedDict
+import glyph.api
+import cli.app
+from glyph.api import MemoryLoader, Environment, Context, OutputMode
+from glyph.api import GlyphSecurityError, GlyphSyntaxError, GlyphLoadError, GlyphLimitError, GlyphExtensionError
+from glyph.errors import empty_span, GLYPH_SECURITY_CONTEXT, GLYPH_EXTENSION_ERROR
+from glyph.diagnostics import exit_code_for_error, format_error_json, format_error_human
+from glyph.diagnostics import EXIT_SYNTAX, EXIT_LOADER, EXIT_SECURITY, EXIT_RESOURCE
+import integrations.nyx.glyph_nyx
+from integrations.nyx.glyph_nyx import NyxViewOptions, NyxViewResponse
+import integrations.aether.glyph_aether
+from integrations.aether.glyph_aether import AetherResponse
+
+def _assert_t(cond: bool, label: str, extra: str = "") -> None:
+    if not cond:
+        print("BOOL_FAIL [" + label + "] extra=[" + extra + "]")
+    nox.test.assert_true(cond, label)
+
+def _assert_i(got: int, exp: int, label: str, extra: str = "") -> None:
+    if got != exp:
+        print("INT_MISMATCH [" + label + "] got=" + str(got) + " exp=" + str(exp) + " extra=[" + extra + "]")
+    nox.test.assert_eq_int(got, exp, label)
+
+def _assert_s(got: str, exp: str, label: str) -> None:
+    if got != exp:
+        print("MISMATCH [" + label + "] got=[" + got + "] expected=[" + exp + "]")
+    nox.test.assert_eq_str(got, exp, label)
+
+class _NyxStreamState:
+    headers_called: int
+    status_seen: int
+    chunks: list[str]
+    allow_headers: bool
+
+    def __init__(self: _NyxStreamState, allow_headers: bool) -> None:
+        self.headers_called = 0
+        self.status_seen = 0
+        empty_c: list[str] = []
+        self.chunks = empty_c
+        self.allow_headers = allow_headers
+
+    def on_hdrs(self: _NyxStreamState, status: int, _hdrs: OrderedDict[str, str]) -> bool:
+        self.headers_called = self.headers_called + 1
+        self.status_seen = status
+        return self.allow_headers
+
+    def push_chunk(self: _NyxStreamState, batch: str) -> bool:
+        c: list[str] = self.chunks
+        c.append(batch)
+        self.chunks = c
+        return True
+
+def _nyx_no_cancel() -> bool:
+    return False
+
+def test_nyx_ssr_vertical_slice_and_streaming_preflight() -> None:
+    mem: MemoryLoader = MemoryLoader()
+    mem.put(
+        "ssr/dashboard.html",
+        "<main><h1>{{ user.name }}</h1><a href=\"{{ user.url }}\">Profile</a><script nonce=\"{{ nonce }}\">const cfg = {{ user | tojson }};</script></main>"
+    )
+    mem.put("ssr/broken.html", "<div>{% if missing_end %}")
+    env: Environment = glyph.api.default_environment(mem)
+    vopts: NyxViewOptions = NyxViewOptions(200, "text/html; charset=utf-8", "rndnonce42", "", "no-store")
+
+    # 1. Valid SSR view with CSP nonce, HTML escaping, and safe |tojson
+    ctx_ok: Context = glyph.api.context_from_json('{"user":{"name":"<Ada>","url":"https://nox-lang.dev"},"nonce":"rndnonce42"}')
+    resp: NyxViewResponse = integrations.nyx.glyph_nyx.render_view("ssr/dashboard.html", ctx_ok, env, vopts)
+    _assert_i(resp.status, 200, "Nyx status 200")
+    _assert_s(resp.headers.get("X-Content-Type-Options"), "nosniff", "nosniff header present")
+    _assert_t(nox.strings.contains(resp.headers.get("Content-Security-Policy"), "'nonce-rndnonce42'"), "CSP nonce header present", resp.headers.get("Content-Security-Policy"))
+    _assert_t(nox.strings.contains(resp.body, "<h1>&lt;Ada&gt;</h1>"), "Nyx SSR body escapes HTML", resp.body)
+
+    # 2. Malicious javascript: URL rejected fail-closed before returning HTTP response
+    ctx_evil: Context = glyph.api.context_from_json('{"user":{"name":"Eve","url":"javascript:alert(1)"},"nonce":"rndnonce42"}')
+    evil_code: str = ""
+    try:
+        _bad: NyxViewResponse = integrations.nyx.glyph_nyx.render_view("ssr/dashboard.html", ctx_evil, env, vopts)
+    except GlyphSecurityError as se:
+        evil_code = se.code
+    _assert_s(evil_code, GLYPH_SECURITY_CONTEXT, "Nyx SSR rejects malicious javascript: URL injection")
+
+    # 3. CR/LF injection inside CSP nonce denied
+    bad_vopts: NyxViewOptions = NyxViewOptions(200, "text/html", "abc\r\nX-Evil: 1", "", "no-store")
+    hdr_code: str = ""
+    try:
+        _bad2: NyxViewResponse = integrations.nyx.glyph_nyx.render_view("ssr/dashboard.html", ctx_ok, env, bad_vopts)
+    except GlyphSecurityError as se2:
+        hdr_code = se2.code
+    _assert_s(hdr_code, GLYPH_SECURITY_CONTEXT, "Nyx rejects CR/LF header injection in CSP nonce")
+
+    # 4. Streaming preflight: invalid template fails BEFORE invoking on_headers
+    st_fail: _NyxStreamState = _NyxStreamState(True)
+    def _on_h1(status: int, hdrs: OrderedDict[str, str]) -> bool:
+        return st_fail.on_hdrs(status, hdrs)
+    def _sink1(batch: str) -> bool:
+        return st_fail.push_chunk(batch)
+
+    syn_caught: bool = False
+    try:
+        _r_fail: NyxViewResponse = integrations.nyx.glyph_nyx.render_view_stream(
+            "ssr/broken.html", ctx_ok, env, vopts, _on_h1, _sink1, _nyx_no_cancel, 64
+        )
+    except GlyphSyntaxError:
+        syn_caught = True
+    _assert_t(syn_caught, "broken template rejected in preflight")
+    _assert_i(st_fail.headers_called, 0, "streaming preflight aborts before headers sent")
+
+    # 5. Streaming preflight happy path matches buffered body byte-for-byte
+    st_ok: _NyxStreamState = _NyxStreamState(True)
+    def _on_h2(status: int, hdrs: OrderedDict[str, str]) -> bool:
+        return st_ok.on_hdrs(status, hdrs)
+    def _sink2(batch: str) -> bool:
+        return st_ok.push_chunk(batch)
+    s_resp: NyxViewResponse = integrations.nyx.glyph_nyx.render_view_stream(
+        "ssr/dashboard.html", ctx_ok, env, vopts, _on_h2, _sink2, _nyx_no_cancel, 32
+    )
+    _assert_i(st_ok.headers_called, 1, "headers sent once")
+    _assert_t(s_resp.streamed, "response marked streamed")
+    _assert_s(nox.strings.join(st_ok.chunks, ""), resp.body, "streamed Nyx SSR matches buffered body")
+
+def test_aether_negotiation_and_diagnostics() -> None:
+    mem: MemoryLoader = MemoryLoader()
+    mem.put("view.html", "<p>{{ name }}</p>")
+    mem.put("view.xml", "<view><name>{{ name }}</name></view>")
+    mem.put("view.txt", "NAME: {{ name }}")
+    env: Environment = glyph.api.default_environment(mem)
+    ctx: Context = glyph.api.context_from_json('{"name":"<Ada&Bob>"}')
+
+    rh: AetherResponse = integrations.aether.glyph_aether.render_negotiated("view", "text/html,application/xhtml+xml", ctx, env)
+    _assert_s(rh.content_type, "text/html; charset=utf-8", "Aether HTML CT")
+    _assert_s(rh.body, "<p>&lt;Ada&amp;Bob&gt;</p>", "Aether HTML body")
+
+    rx: AetherResponse = integrations.aether.glyph_aether.render_negotiated("view", "application/xml", ctx, env)
+    _assert_s(rx.content_type, "application/xml; charset=utf-8", "Aether XML CT")
+    _assert_s(rx.body, "<view><name>&lt;Ada&amp;Bob&gt;</name></view>", "Aether XML body")
+
+    rt: AetherResponse = integrations.aether.glyph_aether.render_negotiated("view", "text/plain", ctx, env)
+    _assert_s(rt.content_type, "text/plain; charset=utf-8", "Aether Text CT")
+    _assert_s(rt.body, "NAME: <Ada&Bob>", "Aether Text body")
+
+    # application/json rejected in Aether template adapter (use nox.json!)
+    json_code: str = ""
+    try:
+        _rj: AetherResponse = integrations.aether.glyph_aether.render_negotiated("view", "application/json", ctx, env)
+    except GlyphExtensionError as ee:
+        json_code = ee.code
+    _assert_s(json_code, GLYPH_EXTENSION_ERROR, "Aether directs application/json to nox.json")
+
+    # Diagnostics exit code mapping & path redaction in JSON
+    se: GlyphSyntaxError = GlyphSyntaxError("GLYPH_SYNTAX_UNCLOSED_TAG", "unclosed tag", empty_span("/var/secrets/private.html"), "close tag")
+    _assert_i(exit_code_for_error(se), EXIT_SYNTAX, "syntax -> exit 3")
+    le: GlyphLoadError = GlyphLoadError("GLYPH_LOADER_NOT_FOUND", "not found", empty_span("p.html"), "check")
+    _assert_i(exit_code_for_error(le), EXIT_LOADER, "load -> exit 4")
+    sec_e: GlyphSecurityError = GlyphSecurityError(GLYPH_SECURITY_CONTEXT, "unsafe", empty_span("p.html"), "fix")
+    _assert_i(exit_code_for_error(sec_e), EXIT_SECURITY, "security -> exit 5")
+    lim_e: GlyphLimitError = GlyphLimitError("GLYPH_LIMIT_TOTAL_OPS", "ops", empty_span("p.html"), "shrink")
+    _assert_i(exit_code_for_error(lim_e), EXIT_RESOURCE, "limit -> exit 6")
+    diag_json: str = format_error_json(se)
+    _assert_t(not nox.strings.contains(diag_json, "/var/secrets"), "diagnostic JSON never leaks physical disk path", diag_json)
+    dj: JsonValue = nox.json.parse(diag_json)
+    _assert_s(nox.json.as_string(nox.json.get(dj, "code")), "GLYPH_SYNTAX_UNCLOSED_TAG", "diagnostic JSON valid")
+
+def test_cli_binary_subcommands_and_exit_codes() -> None:
+    tmp_dir: str = ".glyph_cli_test_scratch"
+    if nox.fs.exists(tmp_dir):
+        nox.fs.remove_dir_all(tmp_dir)
+    nox.fs.create_dir_all(tmp_dir + "/tpls")
+
+    nox.fs.write_string(tmp_dir + "/tpls/base.html", "<html>{% block body %}base{% endblock %}</html>")
+    nox.fs.write_string(tmp_dir + "/tpls/page.html", "{% extends 'base.html' %}{% block body %}<a href=\"{{ u }}\">{{ msg }}</a>{% endblock %}")
+    nox.fs.write_string(tmp_dir + "/tpls/bad_syntax.html", "{{ unclosed")
+    nox.fs.write_string(tmp_dir + "/ctx.json", '{"u":"https://example.com","msg":"<Hi>"}')
+
+    _assert_i(cli.app.run_cli_args(["glyph", "version", "--format", "json"]), 0, "cli version exits 0")
+    _assert_i(cli.app.run_cli_args(["glyph", "check", "--root", tmp_dir + "/tpls", "page.html"]), 0, "cli check exits 0")
+    _assert_i(cli.app.run_cli_args(["glyph", "lint", "--root", tmp_dir + "/tpls", "--format", "json", "bad_syntax.html"]), 3, "cli lint exits 3 on syntax error")
+    _assert_i(cli.app.run_cli_args(["glyph", "inspect", "--root", tmp_dir + "/tpls", "--format", "json", "page.html"]), 0, "cli inspect exits 0")
+    _assert_i(cli.app.run_cli_args(["glyph", "deps", "--root", tmp_dir + "/tpls", "--format", "json", "page.html"]), 0, "cli deps exits 0")
+
+    out_html_path: str = tmp_dir + "/rendered.html"
+    _assert_i(
+        cli.app.run_cli_args(["glyph", "render", "--root", tmp_dir + "/tpls", "--context", tmp_dir + "/ctx.json", "--out", out_html_path, "page.html"]),
+        0,
+        "cli render --out exits 0"
+    )
+    rendered_disk: str = nox.fs.read_to_string(out_html_path)
+    _assert_s(rendered_disk, '<html><a href="https://example.com">&lt;Hi&gt;</a></html>', "cli render wrote exact escaped HTML to --out")
+
+    _assert_i(
+        cli.app.run_cli_args(["glyph", "render", "--root", tmp_dir + "/tpls", "--context-json", '{"u":"javascript:1","msg":"x"}', "--format", "json", "page.html"]),
+        5,
+        "cli render rejects malicious URL with exit code 5"
+    )
+    _assert_i(
+        cli.app.run_cli_args(["glyph", "check", "--root", tmp_dir + "/tpls", "../ctx.json"]),
+        4,
+        "cli traversal rejected with loader exit code 4"
+    )
+    _assert_i(cli.app.run_cli_args(["glyph", "unknown_cmd"]), 2, "cli unknown command exits 2")
+    _assert_i(
+        cli.app.run_cli_args(["glyph", "bench", "--root", tmp_dir + "/tpls", "--iterations", "5", "--context-json", '{"u":"https://example.com","msg":"hi"}', "--format", "json", "page.html"]),
+        0,
+        "cli bench exits 0"
+    )
+
+    nox.fs.remove_dir_all(tmp_dir)
+
+test_nyx_ssr_vertical_slice_and_streaming_preflight()
+test_aether_negotiation_and_diagnostics()
+test_cli_binary_subcommands_and_exit_codes()
