@@ -42,6 +42,8 @@
 | `.append()` on member fields | **unavailable** | Requires local copy-append-assign (`xs = self.items; xs.append(v); self.items = xs`). |
 | Empty list literal `[]` | **verified** | Allowed when explicitly type-annotated (`items: list[T] = []`). |
 | Function overloading | **unavailable** | Separate typed function names are required. |
+| Parenthesized `from m import (...)` | **unavailable** | Use comma-separated imports per line (`from m import A, B`). |
+| Top-level `while` + `try/except` heap locals | **experimental** (caveat) | Observed `0xC0000005` exit cleanup crash when running `while` + `try/except` with list allocations at module top-level; execute loops inside `def` functions. |
 
 ---
 

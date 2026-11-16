@@ -1,0 +1,117 @@
+# Token definitions for Glyph lexer and parser.
+# Pure NOX, freestanding-safe.
+from glyph.errors import SourceSpan
+
+enum TokenKind:
+    TText
+    TExprStart
+    TExprEnd
+    TStmtStart
+    TStmtEnd
+    TIdent
+    TString
+    TInt
+    TFloat
+    TPlus
+    TMinus
+    TStar
+    TSlash
+    TSlashSlash
+    TPercent
+    TEqEq
+    TNotEq
+    TLt
+    TLtEq
+    TGt
+    TGtEq
+    TAssign
+    TPipe
+    TDot
+    TComma
+    TColon
+    TLParen
+    TRParen
+    TLBracket
+    TRBracket
+    TLBrace
+    TRBrace
+    TEof
+
+class Token:
+    kind: TokenKind
+    text: str
+    span: SourceSpan
+
+    def __init__(self: Token, kind: TokenKind, text: str, span: SourceSpan) -> None:
+        self.kind = kind
+        self.text = text
+        self.span = span
+
+def token_kind_name(k: TokenKind) -> str:
+    match k:
+        case TokenKind.TText:
+            return "TEXT"
+        case TokenKind.TExprStart:
+            return "EXPR_START"
+        case TokenKind.TExprEnd:
+            return "EXPR_END"
+        case TokenKind.TStmtStart:
+            return "STMT_START"
+        case TokenKind.TStmtEnd:
+            return "STMT_END"
+        case TokenKind.TIdent:
+            return "IDENT"
+        case TokenKind.TString:
+            return "STRING"
+        case TokenKind.TInt:
+            return "INT"
+        case TokenKind.TFloat:
+            return "FLOAT"
+        case TokenKind.TPlus:
+            return "PLUS"
+        case TokenKind.TMinus:
+            return "MINUS"
+        case TokenKind.TStar:
+            return "STAR"
+        case TokenKind.TSlash:
+            return "SLASH"
+        case TokenKind.TSlashSlash:
+            return "SLASH_SLASH"
+        case TokenKind.TPercent:
+            return "PERCENT"
+        case TokenKind.TEqEq:
+            return "EQ_EQ"
+        case TokenKind.TNotEq:
+            return "NOT_EQ"
+        case TokenKind.TLt:
+            return "LT"
+        case TokenKind.TLtEq:
+            return "LT_EQ"
+        case TokenKind.TGt:
+            return "GT"
+        case TokenKind.TGtEq:
+            return "GT_EQ"
+        case TokenKind.TAssign:
+            return "ASSIGN"
+        case TokenKind.TPipe:
+            return "PIPE"
+        case TokenKind.TDot:
+            return "DOT"
+        case TokenKind.TComma:
+            return "COMMA"
+        case TokenKind.TColon:
+            return "COLON"
+        case TokenKind.TLParen:
+            return "LPAREN"
+        case TokenKind.TRParen:
+            return "RPAREN"
+        case TokenKind.TLBracket:
+            return "LBRACKET"
+        case TokenKind.TRBracket:
+            return "RBRACKET"
+        case TokenKind.TLBrace:
+            return "LBRACE"
+        case TokenKind.TRBrace:
+            return "RBRACE"
+        case TokenKind.TEof:
+            return "EOF"

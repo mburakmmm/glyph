@@ -1,0 +1,554 @@
+# O(n) UTF-8-aware lexer for Glyph templates.
+# Enforces AGENTS.md §6.2: tracks byte and codepoint offsets, validates UTF-8,
+# handles whitespace trimming, comments, raw blocks, string escapes, and ResourceBudget limits.
+import nox.strings
+from glyph.errors import SourceSpan, GlyphSyntaxError
+from glyph.errors import GLYPH_SYNTAX_INVALID_UTF8, GLYPH_SYNTAX_UNCLOSED_EXPR, GLYPH_SYNTAX_UNCLOSED_TAG
+from glyph.errors import GLYPH_SYNTAX_UNCLOSED_COMMENT, GLYPH_SYNTAX_UNCLOSED_RAW, GLYPH_SYNTAX_NESTED_RAW
+from glyph.errors import GLYPH_SYNTAX_UNCLOSED_STRING, GLYPH_SYNTAX_INVALID_ESCAPE
+from glyph.errors import GLYPH_SYNTAX_INVALID_NUMBER, GLYPH_SYNTAX_INVALID_CHAR
+from glyph.limits import BudgetTracker, ResourceBudget, default_budget
+from glyph.token import Token, TokenKind
+
+def _is_ws(b: int) -> bool:
+    return b == 32 or b == 9 or b == 10 or b == 13
+
+def _is_digit(b: int) -> bool:
+    return b >= 48 and b <= 57
+
+def _is_ident_start(b: int) -> bool:
+    if b >= 65 and b <= 90:
+        return True
+    if b >= 97 and b <= 122:
+        return True
+    return b == 95
+
+def _is_ident_cont(b: int) -> bool:
+    return _is_ident_start(b) or _is_digit(b)
+
+def _is_cont_byte(b: int) -> bool:
+    return b >= 128 and b <= 191
+
+class _Scanner:
+    src: str
+    logical_name: str
+    total_bytes: int
+    byte_pos: int
+    cp_pos: int
+    line: int
+    col: int
+
+    def __init__(self: _Scanner, src: str, logical_name: str) -> None:
+        self.src = src
+        self.logical_name = logical_name
+        self.total_bytes = nox.strings.byte_len(src)
+        self.byte_pos = 0
+        self.cp_pos = 0
+        self.line = 1
+        self.col = 1
+
+    def at_end(self: _Scanner) -> bool:
+        return self.byte_pos >= self.total_bytes
+
+    def peek_byte(self: _Scanner, offset: int) -> int:
+        idx: int = self.byte_pos + offset
+        if idx < 0 or idx >= self.total_bytes:
+            return -1
+        return nox.strings.byte_at(self.src, idx)
+
+    def span_here(self: _Scanner) -> SourceSpan:
+        return SourceSpan(self.logical_name, self.line, self.col, self.byte_pos, self.byte_pos)
+
+    def _utf8_width(self: _Scanner) -> int:
+        b0: int = nox.strings.byte_at(self.src, self.byte_pos)
+        if b0 < 128:
+            return 1
+        if b0 >= 194 and b0 <= 223:
+            if self.byte_pos + 1 >= self.total_bytes:
+                raise GlyphSyntaxError(GLYPH_SYNTAX_INVALID_UTF8, "truncated UTF-8 sequence", self.span_here(), "ensure valid UTF-8 source")
+            b1: int = nox.strings.byte_at(self.src, self.byte_pos + 1)
+            if not _is_cont_byte(b1):
+                raise GlyphSyntaxError(GLYPH_SYNTAX_INVALID_UTF8, "invalid UTF-8 continuation byte", self.span_here(), "ensure valid UTF-8 source")
+            return 2
+        if b0 >= 224 and b0 <= 239:
+            if self.byte_pos + 2 >= self.total_bytes:
+                raise GlyphSyntaxError(GLYPH_SYNTAX_INVALID_UTF8, "truncated UTF-8 sequence", self.span_here(), "ensure valid UTF-8 source")
+            b1_3: int = nox.strings.byte_at(self.src, self.byte_pos + 1)
+            b2_3: int = nox.strings.byte_at(self.src, self.byte_pos + 2)
+            if not _is_cont_byte(b1_3) or not _is_cont_byte(b2_3):
+                raise GlyphSyntaxError(GLYPH_SYNTAX_INVALID_UTF8, "invalid UTF-8 continuation byte", self.span_here(), "ensure valid UTF-8 source")
+            if b0 == 224 and b1_3 < 160:
+                raise GlyphSyntaxError(GLYPH_SYNTAX_INVALID_UTF8, "overlong UTF-8 sequence", self.span_here(), "ensure valid UTF-8 source")
+            if b0 == 237 and b1_3 > 159:
+                raise GlyphSyntaxError(GLYPH_SYNTAX_INVALID_UTF8, "UTF-16 surrogate codepoint is invalid in UTF-8", self.span_here(), "ensure valid UTF-8 source")
+            return 3
+        if b0 >= 240 and b0 <= 244:
+            if self.byte_pos + 3 >= self.total_bytes:
+                raise GlyphSyntaxError(GLYPH_SYNTAX_INVALID_UTF8, "truncated UTF-8 sequence", self.span_here(), "ensure valid UTF-8 source")
+            b1_4: int = nox.strings.byte_at(self.src, self.byte_pos + 1)
+            b2_4: int = nox.strings.byte_at(self.src, self.byte_pos + 2)
+            b3_4: int = nox.strings.byte_at(self.src, self.byte_pos + 3)
+            if not _is_cont_byte(b1_4) or not _is_cont_byte(b2_4) or not _is_cont_byte(b3_4):
+                raise GlyphSyntaxError(GLYPH_SYNTAX_INVALID_UTF8, "invalid UTF-8 continuation byte", self.span_here(), "ensure valid UTF-8 source")
+            if b0 == 240 and b1_4 < 144:
+                raise GlyphSyntaxError(GLYPH_SYNTAX_INVALID_UTF8, "overlong UTF-8 sequence", self.span_here(), "ensure valid UTF-8 source")
+            if b0 == 244 and b1_4 > 143:
+                raise GlyphSyntaxError(GLYPH_SYNTAX_INVALID_UTF8, "UTF-8 codepoint out of Unicode range", self.span_here(), "ensure valid UTF-8 source")
+            return 4
+        raise GlyphSyntaxError(GLYPH_SYNTAX_INVALID_UTF8, "invalid UTF-8 leading byte", self.span_here(), "ensure valid UTF-8 source")
+
+    def advance_cp(self: _Scanner) -> None:
+        if self.at_end():
+            return
+        b0: int = nox.strings.byte_at(self.src, self.byte_pos)
+        if b0 == 13:
+            if self.byte_pos + 1 < self.total_bytes and nox.strings.byte_at(self.src, self.byte_pos + 1) == 10:
+                self.byte_pos = self.byte_pos + 2
+                self.cp_pos = self.cp_pos + 2
+            else:
+                self.byte_pos = self.byte_pos + 1
+                self.cp_pos = self.cp_pos + 1
+            self.line = self.line + 1
+            self.col = 1
+            return
+        if b0 == 10:
+            self.byte_pos = self.byte_pos + 1
+            self.cp_pos = self.cp_pos + 1
+            self.line = self.line + 1
+            self.col = 1
+            return
+        w: int = self._utf8_width()
+        self.byte_pos = self.byte_pos + w
+        self.cp_pos = self.cp_pos + 1
+        self.col = self.col + 1
+
+    def advance_n_ascii(self: _Scanner, n: int) -> None:
+        i: int = 0
+        while i < n and not self.at_end():
+            self.advance_cp()
+            i = i + 1
+
+    def skip_ws(self: _Scanner) -> None:
+        while not self.at_end() and _is_ws(self.peek_byte(0)):
+            self.advance_cp()
+
+def _emit(tokens: list[Token], kind: TokenKind, text: str, span: SourceSpan, tracker: BudgetTracker) -> None:
+    tracker.check_token_bytes(nox.strings.byte_len(text), span)
+    tracker.consume_token(span)
+    tokens.append(Token(kind, text, span))
+
+# Trims trailing ASCII whitespace from the immediately preceding TText token (if present).
+def _trim_prev_text(tokens: list[Token]) -> None:
+    n: int = len(tokens)
+    if n == 0:
+        return
+    last: Token = tokens[n - 1]
+    match last.kind:
+        case TokenKind.TText:
+            s: str = last.text
+            blen: int = nox.strings.byte_len(s)
+            trim_bytes: int = 0
+            while trim_bytes < blen and _is_ws(nox.strings.byte_at(s, blen - 1 - trim_bytes)):
+                trim_bytes = trim_bytes + 1
+            if trim_bytes == 0:
+                return
+            if trim_bytes == blen:
+                _dropped: Token = tokens.pop()
+                return
+            cp_len: int = len(s)
+            new_text: str = s[0:cp_len - trim_bytes]
+            new_span: SourceSpan = SourceSpan(
+                last.span.logical_name,
+                last.span.line,
+                last.span.column,
+                last.span.byte_start,
+                last.span.byte_end - trim_bytes
+            )
+            tokens[n - 1] = Token(TokenKind.TText, new_text, new_span)
+        case _:
+            return
+
+# Checks whether the current position `{%(-?)` is strictly `{%(-?) <word> (-?)%}`.
+# Returns: -1 if not matching <word>; 0 if matching without close trim; 1 if matching with `-%}`.
+def _match_stmt_word(sc: _Scanner, word: str) -> int:
+    if sc.peek_byte(0) != 123 or sc.peek_byte(1) != 37:
+        return -1
+    off: int = 2
+    if sc.peek_byte(off) == 45:
+        off = off + 1
+    while sc.peek_byte(off) >= 0 and _is_ws(sc.peek_byte(off)):
+        off = off + 1
+    wlen: int = nox.strings.byte_len(word)
+    wi: int = 0
+    while wi < wlen:
+        if sc.peek_byte(off + wi) != nox.strings.byte_at(word, wi):
+            return -1
+        wi = wi + 1
+    off = off + wlen
+    # Ensure word boundary before whitespace or closing delimiter
+    nxt: int = sc.peek_byte(off)
+    if _is_ident_cont(nxt):
+        return -1
+    while sc.peek_byte(off) >= 0 and _is_ws(sc.peek_byte(off)):
+        off = off + 1
+    if sc.peek_byte(off) == 45 and sc.peek_byte(off + 1) == 37 and sc.peek_byte(off + 2) == 125:
+        return 1
+    if sc.peek_byte(off) == 37 and sc.peek_byte(off + 1) == 125:
+        return 0
+    return -1
+
+def _advance_stmt_word_end(sc: _Scanner) -> None:
+    # Advances past `{%(-?) ... (-?)%}` knowing it matched `_match_stmt_word`.
+    sc.advance_n_ascii(2)
+    if sc.peek_byte(0) == 45:
+        sc.advance_cp()
+    done: bool = False
+    while not sc.at_end() and not done:
+        if sc.peek_byte(0) == 45 and sc.peek_byte(1) == 37 and sc.peek_byte(2) == 125:
+            sc.advance_n_ascii(3)
+            done = True
+        elif sc.peek_byte(0) == 37 and sc.peek_byte(1) == 125:
+            sc.advance_n_ascii(2)
+            done = True
+        else:
+            sc.advance_cp()
+
+def _scan_comment(sc: _Scanner) -> bool:
+    open_span: SourceSpan = sc.span_here()
+    sc.advance_n_ascii(2)
+    if sc.peek_byte(0) == 45:
+        sc.advance_cp()
+    while not sc.at_end():
+        if sc.peek_byte(0) == 45 and sc.peek_byte(1) == 35 and sc.peek_byte(2) == 125:
+            sc.advance_n_ascii(3)
+            return True
+        if sc.peek_byte(0) == 35 and sc.peek_byte(1) == 125:
+            sc.advance_n_ascii(2)
+            return False
+        sc.advance_cp()
+    raise GlyphSyntaxError(GLYPH_SYNTAX_UNCLOSED_COMMENT, "unclosed comment block '{#'", open_span, "close the comment with '#}'")
+
+def _scan_raw_block(sc: _Scanner, tokens: list[Token], tracker: BudgetTracker) -> bool:
+    open_span: SourceSpan = sc.span_here()
+    if sc.peek_byte(2) == 45:
+        _trim_prev_text(tokens)
+    close_trim_open: int = _match_stmt_word(sc, "raw")
+    _advance_stmt_word_end(sc)
+    if close_trim_open == 1:
+        sc.skip_ws()
+    body_line: int = sc.line
+    body_col: int = sc.col
+    body_bstart: int = sc.byte_pos
+    body_cstart: int = sc.cp_pos
+    while not sc.at_end():
+        if sc.peek_byte(0) == 123 and sc.peek_byte(1) == 37:
+            nested_raw: int = _match_stmt_word(sc, "raw")
+            if nested_raw >= 0:
+                raise GlyphSyntaxError(GLYPH_SYNTAX_NESTED_RAW, "nested '{% raw %}' block is not permitted", sc.span_here(), "close the outer raw block with '{% endraw %}' first")
+            end_raw: int = _match_stmt_word(sc, "endraw")
+            if end_raw >= 0:
+                body_bend: int = sc.byte_pos
+                body_cend: int = sc.cp_pos
+                raw_text: str = sc.src[body_cstart:body_cend]
+                if body_cend > body_cstart:
+                    span: SourceSpan = SourceSpan(sc.logical_name, body_line, body_col, body_bstart, body_bend)
+                    _emit(tokens, TokenKind.TText, raw_text, span, tracker)
+                if sc.peek_byte(2) == 45:
+                    _trim_prev_text(tokens)
+                _advance_stmt_word_end(sc)
+                return end_raw == 1
+        sc.advance_cp()
+    raise GlyphSyntaxError(GLYPH_SYNTAX_UNCLOSED_RAW, "unclosed '{% raw %}' block", open_span, "close the raw block with '{% endraw %}'")
+
+def _scan_string(sc: _Scanner, quote_byte: int, tracker: BudgetTracker) -> Token:
+    start_span: SourceSpan = sc.span_here()
+    bstart: int = sc.byte_pos
+    sc.advance_cp()
+    parts: list[str] = []
+    seg_cp_start: int = sc.cp_pos
+    closed: bool = False
+    while not sc.at_end() and not closed:
+        b: int = sc.peek_byte(0)
+        if b == quote_byte:
+            if sc.cp_pos > seg_cp_start:
+                parts.append(sc.src[seg_cp_start:sc.cp_pos])
+            sc.advance_cp()
+            closed = True
+        elif b == 92:
+            if sc.cp_pos > seg_cp_start:
+                parts.append(sc.src[seg_cp_start:sc.cp_pos])
+            esc_span: SourceSpan = sc.span_here()
+            sc.advance_cp()
+            if sc.at_end():
+                raise GlyphSyntaxError(GLYPH_SYNTAX_UNCLOSED_STRING, "unclosed string literal", start_span, "terminate the string literal")
+            eb: int = sc.peek_byte(0)
+            if eb == 34:
+                parts.append("\"")
+            elif eb == 39:
+                parts.append("'")
+            elif eb == 92:
+                parts.append("\\")
+            elif eb == 110:
+                parts.append("\n")
+            elif eb == 116:
+                parts.append("\t")
+            elif eb == 114:
+                parts.append(nox.strings.char_from_byte(13))
+            else:
+                raise GlyphSyntaxError(GLYPH_SYNTAX_INVALID_ESCAPE, "unsupported string escape sequence", esc_span, "use \\\", \\', \\\\, \\n, \\t, or \\r")
+            sc.advance_cp()
+            seg_cp_start = sc.cp_pos
+        else:
+            sc.advance_cp()
+    if not closed:
+        raise GlyphSyntaxError(GLYPH_SYNTAX_UNCLOSED_STRING, "unclosed string literal", start_span, "terminate the string literal")
+    decoded: str = nox.strings.join(parts, "")
+    full_span: SourceSpan = SourceSpan(sc.logical_name, start_span.line, start_span.column, bstart, sc.byte_pos)
+    tracker.check_token_bytes(nox.strings.byte_len(decoded), full_span)
+    return Token(TokenKind.TString, decoded, full_span)
+
+def _scan_number(sc: _Scanner, tracker: BudgetTracker) -> Token:
+    start_line: int = sc.line
+    start_col: int = sc.col
+    bstart: int = sc.byte_pos
+    cstart: int = sc.cp_pos
+    is_float: bool = False
+    while not sc.at_end() and _is_digit(sc.peek_byte(0)):
+        sc.advance_cp()
+    if sc.peek_byte(0) == 46 and _is_digit(sc.peek_byte(1)):
+        is_float = True
+        sc.advance_cp()
+        while not sc.at_end() and _is_digit(sc.peek_byte(0)):
+            sc.advance_cp()
+    eb: int = sc.peek_byte(0)
+    if eb == 101 or eb == 69:
+        is_float = True
+        sc.advance_cp()
+        sb: int = sc.peek_byte(0)
+        if sb == 43 or sb == 45:
+            sc.advance_cp()
+        if not _is_digit(sc.peek_byte(0)):
+            err_span: SourceSpan = SourceSpan(sc.logical_name, start_line, start_col, bstart, sc.byte_pos)
+            raise GlyphSyntaxError(GLYPH_SYNTAX_INVALID_NUMBER, "invalid exponent in number literal", err_span, "provide digits after exponent")
+        while not sc.at_end() and _is_digit(sc.peek_byte(0)):
+            sc.advance_cp()
+    lexeme: str = sc.src[cstart:sc.cp_pos]
+    span: SourceSpan = SourceSpan(sc.logical_name, start_line, start_col, bstart, sc.byte_pos)
+    tracker.check_token_bytes(nox.strings.byte_len(lexeme), span)
+    if is_float:
+        return Token(TokenKind.TFloat, lexeme, span)
+    return Token(TokenKind.TInt, lexeme, span)
+
+def _scan_ident(sc: _Scanner, tracker: BudgetTracker) -> Token:
+    start_line: int = sc.line
+    start_col: int = sc.col
+    bstart: int = sc.byte_pos
+    cstart: int = sc.cp_pos
+    sc.advance_cp()
+    while not sc.at_end() and _is_ident_cont(sc.peek_byte(0)):
+        sc.advance_cp()
+    lexeme: str = sc.src[cstart:sc.cp_pos]
+    span: SourceSpan = SourceSpan(sc.logical_name, start_line, start_col, bstart, sc.byte_pos)
+    tracker.check_token_bytes(nox.strings.byte_len(lexeme), span)
+    return Token(TokenKind.TIdent, lexeme, span)
+
+def _scan_tag_body(sc: _Scanner, tokens: list[Token], is_expr: bool, open_span: SourceSpan, tracker: BudgetTracker) -> bool:
+    closed: bool = False
+    trim_after: bool = False
+    while not sc.at_end() and not closed:
+        sc.skip_ws()
+        if sc.at_end():
+            if is_expr:
+                raise GlyphSyntaxError(GLYPH_SYNTAX_UNCLOSED_EXPR, "unclosed expression '{{'", open_span, "close expression with '}}'")
+            raise GlyphSyntaxError(GLYPH_SYNTAX_UNCLOSED_TAG, "unclosed statement '{%'", open_span, "close statement with '%}'")
+        b0: int = sc.peek_byte(0)
+        b1: int = sc.peek_byte(1)
+        b2: int = sc.peek_byte(2)
+        if is_expr and b0 == 45 and b1 == 125 and b2 == 125:
+            end_span: SourceSpan = SourceSpan(sc.logical_name, sc.line, sc.col, sc.byte_pos, sc.byte_pos + 3)
+            sc.advance_n_ascii(3)
+            _emit(tokens, TokenKind.TExprEnd, "-}}", end_span, tracker)
+            trim_after = True
+            closed = True
+        elif is_expr and b0 == 125 and b1 == 125:
+            end_span2: SourceSpan = SourceSpan(sc.logical_name, sc.line, sc.col, sc.byte_pos, sc.byte_pos + 2)
+            sc.advance_n_ascii(2)
+            _emit(tokens, TokenKind.TExprEnd, "}}", end_span2, tracker)
+            closed = True
+        elif (not is_expr) and b0 == 45 and b1 == 37 and b2 == 125:
+            end_span3: SourceSpan = SourceSpan(sc.logical_name, sc.line, sc.col, sc.byte_pos, sc.byte_pos + 3)
+            sc.advance_n_ascii(3)
+            _emit(tokens, TokenKind.TStmtEnd, "-%}", end_span3, tracker)
+            trim_after = True
+            closed = True
+        elif (not is_expr) and b0 == 37 and b1 == 125:
+            end_span4: SourceSpan = SourceSpan(sc.logical_name, sc.line, sc.col, sc.byte_pos, sc.byte_pos + 2)
+            sc.advance_n_ascii(2)
+            _emit(tokens, TokenKind.TStmtEnd, "%}", end_span4, tracker)
+            closed = True
+        elif b0 == 34 or b0 == 39:
+            str_tok: Token = _scan_string(sc, b0, tracker)
+            tracker.consume_token(str_tok.span)
+            tokens.append(str_tok)
+        elif _is_digit(b0):
+            num_tok: Token = _scan_number(sc, tracker)
+            tracker.consume_token(num_tok.span)
+            tokens.append(num_tok)
+        elif _is_ident_start(b0):
+            id_tok: Token = _scan_ident(sc, tracker)
+            tracker.consume_token(id_tok.span)
+            tokens.append(id_tok)
+        else:
+            op_line: int = sc.line
+            op_col: int = sc.col
+            op_bstart: int = sc.byte_pos
+            if b0 == 61 and b1 == 61:
+                sc.advance_n_ascii(2)
+                _emit(tokens, TokenKind.TEqEq, "==", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos), tracker)
+            elif b0 == 33 and b1 == 61:
+                sc.advance_n_ascii(2)
+                _emit(tokens, TokenKind.TNotEq, "!=", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos), tracker)
+            elif b0 == 60 and b1 == 61:
+                sc.advance_n_ascii(2)
+                _emit(tokens, TokenKind.TLtEq, "<=", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos), tracker)
+            elif b0 == 62 and b1 == 61:
+                sc.advance_n_ascii(2)
+                _emit(tokens, TokenKind.TGtEq, ">=", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos), tracker)
+            elif b0 == 47 and b1 == 47:
+                sc.advance_n_ascii(2)
+                _emit(tokens, TokenKind.TSlashSlash, "//", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos), tracker)
+            elif b0 == 43:
+                sc.advance_cp()
+                _emit(tokens, TokenKind.TPlus, "+", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos), tracker)
+            elif b0 == 45:
+                sc.advance_cp()
+                _emit(tokens, TokenKind.TMinus, "-", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos), tracker)
+            elif b0 == 42:
+                sc.advance_cp()
+                _emit(tokens, TokenKind.TStar, "*", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos), tracker)
+            elif b0 == 47:
+                sc.advance_cp()
+                _emit(tokens, TokenKind.TSlash, "/", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos), tracker)
+            elif b0 == 37:
+                sc.advance_cp()
+                _emit(tokens, TokenKind.TPercent, "%", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos), tracker)
+            elif b0 == 60:
+                sc.advance_cp()
+                _emit(tokens, TokenKind.TLt, "<", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos), tracker)
+            elif b0 == 62:
+                sc.advance_cp()
+                _emit(tokens, TokenKind.TGt, ">", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos), tracker)
+            elif b0 == 61:
+                sc.advance_cp()
+                _emit(tokens, TokenKind.TAssign, "=", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos), tracker)
+            elif b0 == 124:
+                sc.advance_cp()
+                _emit(tokens, TokenKind.TPipe, "|", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos), tracker)
+            elif b0 == 46:
+                sc.advance_cp()
+                _emit(tokens, TokenKind.TDot, ".", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos), tracker)
+            elif b0 == 44:
+                sc.advance_cp()
+                _emit(tokens, TokenKind.TComma, ",", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos), tracker)
+            elif b0 == 58:
+                sc.advance_cp()
+                _emit(tokens, TokenKind.TColon, ":", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos), tracker)
+            elif b0 == 40:
+                sc.advance_cp()
+                _emit(tokens, TokenKind.TLParen, "(", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos), tracker)
+            elif b0 == 41:
+                sc.advance_cp()
+                _emit(tokens, TokenKind.TRParen, ")", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos), tracker)
+            elif b0 == 91:
+                sc.advance_cp()
+                _emit(tokens, TokenKind.TLBracket, "[", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos), tracker)
+            elif b0 == 93:
+                sc.advance_cp()
+                _emit(tokens, TokenKind.TRBracket, "]", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos), tracker)
+            elif b0 == 123:
+                sc.advance_cp()
+                _emit(tokens, TokenKind.TLBrace, "{", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos), tracker)
+            elif b0 == 125:
+                sc.advance_cp()
+                _emit(tokens, TokenKind.TRBrace, "}", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos), tracker)
+            else:
+                raise GlyphSyntaxError(GLYPH_SYNTAX_INVALID_CHAR, "unexpected character in template tag", SourceSpan(sc.logical_name, op_line, op_col, op_bstart, sc.byte_pos + 1), "remove or quote unexpected character")
+    if not closed:
+        if is_expr:
+            raise GlyphSyntaxError(GLYPH_SYNTAX_UNCLOSED_EXPR, "unclosed expression '{{'", open_span, "close expression with '}}'")
+        raise GlyphSyntaxError(GLYPH_SYNTAX_UNCLOSED_TAG, "unclosed statement '{%'", open_span, "close statement with '%}'")
+    return trim_after
+
+def tokenize_with_budget(src: str, logical_name: str, tracker: BudgetTracker) -> list[Token]:
+    sc: _Scanner = _Scanner(src, logical_name)
+    tracker.check_source_bytes(sc.total_bytes, SourceSpan(logical_name, 1, 1, 0, 0))
+    tokens: list[Token] = []
+    trim_next_leading: bool = False
+
+    while not sc.at_end():
+        if trim_next_leading:
+            sc.skip_ws()
+            trim_next_leading = False
+        if not sc.at_end():
+            b0: int = sc.peek_byte(0)
+            b1: int = sc.peek_byte(1)
+            if b0 == 123 and (b1 == 123 or b1 == 37 or b1 == 35):
+                if b1 == 35:
+                    if sc.peek_byte(2) == 45:
+                        _trim_prev_text(tokens)
+                    trim_next_leading = _scan_comment(sc)
+                elif b1 == 37 and _match_stmt_word(sc, "raw") >= 0:
+                    trim_next_leading = _scan_raw_block(sc, tokens, tracker)
+                elif b1 == 123:
+                    open_span: SourceSpan = sc.span_here()
+                    bstart: int = sc.byte_pos
+                    sc.advance_n_ascii(2)
+                    has_trim: bool = sc.peek_byte(0) == 45
+                    if has_trim:
+                        sc.advance_cp()
+                        _trim_prev_text(tokens)
+                    delim_str: str = "{{"
+                    if has_trim:
+                        delim_str = "{{-"
+                    full_open: SourceSpan = SourceSpan(sc.logical_name, open_span.line, open_span.column, bstart, sc.byte_pos)
+                    _emit(tokens, TokenKind.TExprStart, delim_str, full_open, tracker)
+                    trim_next_leading = _scan_tag_body(sc, tokens, True, full_open, tracker)
+                else:
+                    open_span_s: SourceSpan = sc.span_here()
+                    bstart_s: int = sc.byte_pos
+                    sc.advance_n_ascii(2)
+                    has_trim_s: bool = sc.peek_byte(0) == 45
+                    if has_trim_s:
+                        sc.advance_cp()
+                        _trim_prev_text(tokens)
+                    delim_str_s: str = "{%"
+                    if has_trim_s:
+                        delim_str_s = "{%-"
+                    full_open_s: SourceSpan = SourceSpan(sc.logical_name, open_span_s.line, open_span_s.column, bstart_s, sc.byte_pos)
+                    _emit(tokens, TokenKind.TStmtStart, delim_str_s, full_open_s, tracker)
+                    trim_next_leading = _scan_tag_body(sc, tokens, False, full_open_s, tracker)
+            else:
+                text_line: int = sc.line
+                text_col: int = sc.col
+                text_bstart: int = sc.byte_pos
+                text_cstart: int = sc.cp_pos
+                in_text: bool = True
+                while not sc.at_end() and in_text:
+                    tb0: int = sc.peek_byte(0)
+                    tb1: int = sc.peek_byte(1)
+                    if tb0 == 123 and (tb1 == 123 or tb1 == 37 or tb1 == 35):
+                        in_text = False
+                    else:
+                        sc.advance_cp()
+                if sc.cp_pos > text_cstart:
+                    text_str: str = sc.src[text_cstart:sc.cp_pos]
+                    text_span: SourceSpan = SourceSpan(sc.logical_name, text_line, text_col, text_bstart, sc.byte_pos)
+                    _emit(tokens, TokenKind.TText, text_str, text_span, tracker)
+
+    eof_span: SourceSpan = SourceSpan(sc.logical_name, sc.line, sc.col, sc.byte_pos, sc.byte_pos)
+    _emit(tokens, TokenKind.TEof, "", eof_span, tracker)
+    return tokens
+
+def tokenize(src: str, logical_name: str) -> list[Token]:
+    tracker: BudgetTracker = BudgetTracker(default_budget())
+    return tokenize_with_budget(src, logical_name, tracker)

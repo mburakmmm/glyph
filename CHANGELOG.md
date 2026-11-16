@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.2-core-lexer] - 2026-11-16
+
+### Added
+- `glyph/errors.nox`: Typed `GlyphError` hierarchy (`GlyphSyntaxError`, `GlyphUndefinedError`, `GlyphTypeError`, `GlyphSecurityError`, `GlyphLoadError`, `GlyphLimitError`, `GlyphRenderError`, `GlyphExtensionError`, `GlyphCancelledError`), `SourceSpan`, `RelatedSpan`, stable error codes, and path redaction (`redact_logical_name`, `format_public_error`).
+- `glyph/limits.nox`: `ResourceBudget` (`default_budget()`, `restricted_budget()`) and shared non-resettable `BudgetTracker`.
+- `glyph/value.nox`: Tagged-union `Value` (`VNull`, `VUndefined`, `VBool`, `VInt`, `VFloat`, `VStr`, `VList`, `VMap`, `VTrustedMarkup`, `VCallable`), `JsonValue` conversion preserving 64-bit integers, strict truthiness/stringify rules, reflection key blocking (`__class__`, `__dict__`, `constructor`, `prototype`), NaN/Inf rejection, and overflow-checked integer arithmetic.
+- `glyph/token.nox` and `glyph/lexer.nox`: O(n) single-pass UTF-8-validating lexer with byte/codepoint `SourceSpan` tracking, whitespace trimming (`{{-`, `-}}`, `{%-`, `-%}`, `{#-`, `-#}`), comments, `{% raw %}...{% endraw %}` (nested raw rejected), string escapes, and `ResourceBudget` enforcement.
+- Phase 1 tests: `tests/value/value_test.nox` and `tests/lexer/lexer_test.nox` (including 200-case deterministic fuzz smoke).
+
 ## [0.0.1-audit] - 2026-11-16
 
 ### Added

@@ -1,0 +1,258 @@
+# Typed error hierarchy, SourceSpan, and redaction utilities for Glyph.
+# Enforces AGENTS.md §2.12 and §20: no context values, secrets, or physical disk paths in errors.
+import nox.strings
+
+# Stable machine-readable error codes
+GLYPH_SYNTAX_INVALID_UTF8: str = "GLYPH_SYNTAX_INVALID_UTF8"
+GLYPH_SYNTAX_UNCLOSED_EXPR: str = "GLYPH_SYNTAX_UNCLOSED_EXPR"
+GLYPH_SYNTAX_UNCLOSED_TAG: str = "GLYPH_SYNTAX_UNCLOSED_TAG"
+GLYPH_SYNTAX_UNCLOSED_COMMENT: str = "GLYPH_SYNTAX_UNCLOSED_COMMENT"
+GLYPH_SYNTAX_UNCLOSED_RAW: str = "GLYPH_SYNTAX_UNCLOSED_RAW"
+GLYPH_SYNTAX_NESTED_RAW: str = "GLYPH_SYNTAX_NESTED_RAW"
+GLYPH_SYNTAX_UNCLOSED_STRING: str = "GLYPH_SYNTAX_UNCLOSED_STRING"
+GLYPH_SYNTAX_INVALID_ESCAPE: str = "GLYPH_SYNTAX_INVALID_ESCAPE"
+GLYPH_SYNTAX_INVALID_NUMBER: str = "GLYPH_SYNTAX_INVALID_NUMBER"
+GLYPH_SYNTAX_INVALID_CHAR: str = "GLYPH_SYNTAX_INVALID_CHAR"
+GLYPH_SYNTAX_UNEXPECTED_TOKEN: str = "GLYPH_SYNTAX_UNEXPECTED_TOKEN"
+GLYPH_SYNTAX_UNCLOSED_BLOCK: str = "GLYPH_SYNTAX_UNCLOSED_BLOCK"
+
+GLYPH_LIMIT_SOURCE_BYTES: str = "GLYPH_LIMIT_SOURCE_BYTES"
+GLYPH_LIMIT_TOKENS: str = "GLYPH_LIMIT_TOKENS"
+GLYPH_LIMIT_TOKEN_BYTES: str = "GLYPH_LIMIT_TOKEN_BYTES"
+GLYPH_LIMIT_AST_NODES: str = "GLYPH_LIMIT_AST_NODES"
+GLYPH_LIMIT_EXPR_DEPTH: str = "GLYPH_LIMIT_EXPR_DEPTH"
+GLYPH_LIMIT_INCLUDE_DEPTH: str = "GLYPH_LIMIT_INCLUDE_DEPTH"
+GLYPH_LIMIT_MACRO_DEPTH: str = "GLYPH_LIMIT_MACRO_DEPTH"
+GLYPH_LIMIT_LOOP_STEPS: str = "GLYPH_LIMIT_LOOP_STEPS"
+GLYPH_LIMIT_OUTPUT_BYTES: str = "GLYPH_LIMIT_OUTPUT_BYTES"
+GLYPH_LIMIT_TOTAL_OPS: str = "GLYPH_LIMIT_TOTAL_OPS"
+
+GLYPH_EVAL_UNDEFINED: str = "GLYPH_EVAL_UNDEFINED"
+GLYPH_EVAL_TYPE: str = "GLYPH_EVAL_TYPE"
+GLYPH_EVAL_OVERFLOW: str = "GLYPH_EVAL_OVERFLOW"
+GLYPH_EVAL_DIV_ZERO: str = "GLYPH_EVAL_DIV_ZERO"
+GLYPH_EVAL_OUT_OF_RANGE: str = "GLYPH_EVAL_OUT_OF_RANGE"
+
+GLYPH_SECURITY_REFLECTION: str = "GLYPH_SECURITY_REFLECTION"
+GLYPH_SECURITY_CONTEXT: str = "GLYPH_SECURITY_CONTEXT"
+GLYPH_SECURITY_POLICY: str = "GLYPH_SECURITY_POLICY"
+
+GLYPH_LOADER_NOT_FOUND: str = "GLYPH_LOADER_NOT_FOUND"
+GLYPH_LOADER_OUTSIDE_ROOT: str = "GLYPH_LOADER_OUTSIDE_ROOT"
+
+GLYPH_RENDER_ERROR: str = "GLYPH_RENDER_ERROR"
+GLYPH_EXTENSION_ERROR: str = "GLYPH_EXTENSION_ERROR"
+GLYPH_CANCELLED: str = "GLYPH_CANCELLED"
+
+class SourceSpan:
+    logical_name: str
+    line: int
+    column: int
+    byte_start: int
+    byte_end: int
+
+    def __init__(self: SourceSpan, logical_name: str, line: int, column: int, byte_start: int, byte_end: int) -> None:
+        self.logical_name = redact_logical_name(logical_name)
+        self.line = line
+        self.column = column
+        self.byte_start = byte_start
+        self.byte_end = byte_end
+
+class RelatedSpan:
+    logical_name: str
+    line: int
+    column: int
+    label: str
+
+    def __init__(self: RelatedSpan, logical_name: str, line: int, column: int, label: str) -> None:
+        self.logical_name = redact_logical_name(logical_name)
+        self.line = line
+        self.column = column
+        self.label = label
+
+def empty_span(logical_name: str) -> SourceSpan:
+    return SourceSpan(logical_name, 1, 1, 0, 0)
+
+# Redacts physical paths or empty names into a safe logical template identifier.
+def redact_logical_name(name: str) -> str:
+    if len(name) == 0:
+        return "<inline>"
+    # Reject drive prefixes (e.g. C:\...) or UNC/absolute roots from leaking into error spans
+    b0: int = nox.strings.byte_at(name, 0)
+    if b0 == 47 or b0 == 92:
+        return "<redacted>"
+    if nox.strings.byte_len(name) >= 2 and nox.strings.byte_at(name, 1) == 58:
+        return "<redacted>"
+    return name
+
+class GlyphError(Exception):
+    code: str
+    category: str
+    logical_name: str
+    line: int
+    column: int
+    span_start_byte: int
+    span_end_byte: int
+    safe_hint: str
+    render_phase: str
+    related_spans: list[RelatedSpan]
+
+    def __init__(
+        self: GlyphError,
+        code: str,
+        category: str,
+        msg: str,
+        span: SourceSpan,
+        safe_hint: str,
+        render_phase: str
+    ) -> None:
+        self.code = code
+        self.category = category
+        self.message = msg
+        self.logical_name = span.logical_name
+        self.line = span.line
+        self.column = span.column
+        self.span_start_byte = span.byte_start
+        self.span_end_byte = span.byte_end
+        self.safe_hint = safe_hint
+        self.render_phase = render_phase
+        empty_rel: list[RelatedSpan] = []
+        self.related_spans = empty_rel
+
+class GlyphSyntaxError(GlyphError):
+    def __init__(self: GlyphSyntaxError, code: str, msg: str, span: SourceSpan, safe_hint: str) -> None:
+        self.code = code
+        self.category = "syntax"
+        self.message = msg
+        self.logical_name = span.logical_name
+        self.line = span.line
+        self.column = span.column
+        self.span_start_byte = span.byte_start
+        self.span_end_byte = span.byte_end
+        self.safe_hint = safe_hint
+        self.render_phase = "lex_parse"
+        empty_rel: list[RelatedSpan] = []
+        self.related_spans = empty_rel
+
+class GlyphUndefinedError(GlyphError):
+    def __init__(self: GlyphUndefinedError, code: str, msg: str, span: SourceSpan, safe_hint: str) -> None:
+        self.code = code
+        self.category = "undefined"
+        self.message = msg
+        self.logical_name = span.logical_name
+        self.line = span.line
+        self.column = span.column
+        self.span_start_byte = span.byte_start
+        self.span_end_byte = span.byte_end
+        self.safe_hint = safe_hint
+        self.render_phase = "eval"
+        empty_rel: list[RelatedSpan] = []
+        self.related_spans = empty_rel
+
+class GlyphTypeError(GlyphError):
+    def __init__(self: GlyphTypeError, code: str, msg: str, span: SourceSpan, safe_hint: str) -> None:
+        self.code = code
+        self.category = "type"
+        self.message = msg
+        self.logical_name = span.logical_name
+        self.line = span.line
+        self.column = span.column
+        self.span_start_byte = span.byte_start
+        self.span_end_byte = span.byte_end
+        self.safe_hint = safe_hint
+        self.render_phase = "eval"
+        empty_rel: list[RelatedSpan] = []
+        self.related_spans = empty_rel
+
+class GlyphSecurityError(GlyphError):
+    def __init__(self: GlyphSecurityError, code: str, msg: str, span: SourceSpan, safe_hint: str) -> None:
+        self.code = code
+        self.category = "security"
+        self.message = msg
+        self.logical_name = span.logical_name
+        self.line = span.line
+        self.column = span.column
+        self.span_start_byte = span.byte_start
+        self.span_end_byte = span.byte_end
+        self.safe_hint = safe_hint
+        self.render_phase = "policy"
+        empty_rel: list[RelatedSpan] = []
+        self.related_spans = empty_rel
+
+class GlyphLoadError(GlyphError):
+    def __init__(self: GlyphLoadError, code: str, msg: str, span: SourceSpan, safe_hint: str) -> None:
+        self.code = code
+        self.category = "loader"
+        self.message = msg
+        self.logical_name = span.logical_name
+        self.line = span.line
+        self.column = span.column
+        self.span_start_byte = span.byte_start
+        self.span_end_byte = span.byte_end
+        self.safe_hint = safe_hint
+        self.render_phase = "load"
+        empty_rel: list[RelatedSpan] = []
+        self.related_spans = empty_rel
+
+class GlyphLimitError(GlyphError):
+    def __init__(self: GlyphLimitError, code: str, msg: str, span: SourceSpan, safe_hint: str) -> None:
+        self.code = code
+        self.category = "limit"
+        self.message = msg
+        self.logical_name = span.logical_name
+        self.line = span.line
+        self.column = span.column
+        self.span_start_byte = span.byte_start
+        self.span_end_byte = span.byte_end
+        self.safe_hint = safe_hint
+        self.render_phase = "budget"
+        empty_rel: list[RelatedSpan] = []
+        self.related_spans = empty_rel
+
+class GlyphRenderError(GlyphError):
+    def __init__(self: GlyphRenderError, code: str, msg: str, span: SourceSpan, safe_hint: str) -> None:
+        self.code = code
+        self.category = "render"
+        self.message = msg
+        self.logical_name = span.logical_name
+        self.line = span.line
+        self.column = span.column
+        self.span_start_byte = span.byte_start
+        self.span_end_byte = span.byte_end
+        self.safe_hint = safe_hint
+        self.render_phase = "render"
+        empty_rel: list[RelatedSpan] = []
+        self.related_spans = empty_rel
+
+class GlyphExtensionError(GlyphError):
+    def __init__(self: GlyphExtensionError, code: str, msg: str, span: SourceSpan, safe_hint: str) -> None:
+        self.code = code
+        self.category = "extension"
+        self.message = msg
+        self.logical_name = span.logical_name
+        self.line = span.line
+        self.column = span.column
+        self.span_start_byte = span.byte_start
+        self.span_end_byte = span.byte_end
+        self.safe_hint = safe_hint
+        self.render_phase = "registry"
+        empty_rel: list[RelatedSpan] = []
+        self.related_spans = empty_rel
+
+class GlyphCancelledError(GlyphError):
+    def __init__(self: GlyphCancelledError, code: str, msg: str, span: SourceSpan, safe_hint: str) -> None:
+        self.code = code
+        self.category = "cancelled"
+        self.message = msg
+        self.logical_name = span.logical_name
+        self.line = span.line
+        self.column = span.column
+        self.span_start_byte = span.byte_start
+        self.span_end_byte = span.byte_end
+        self.safe_hint = safe_hint
+        self.render_phase = "render"
+        empty_rel: list[RelatedSpan] = []
+        self.related_spans = empty_rel
+
+def format_public_error(err: GlyphError) -> str:
+    return "[" + err.code + "] " + err.logical_name + ":" + str(err.line) + ":" + str(err.column) + ": " + err.message

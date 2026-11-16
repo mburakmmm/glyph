@@ -2,7 +2,7 @@
 
 > **Kaynak Sözleşme:** [AGENTS.md](AGENTS.md)  
 > **Hedef Dil & Doğrulanan Araç Zinciri:** `noxc 2.1.186` (`C:\Users\Administrator\.nox-lang\bin\noxc.exe`)  
-> **Durum:** Faz 0 (`v0.0.1-audit`) tamamlandı — Faz 1 (`v0.0.2-core-lexer`) sıradaki iş.  
+> **Durum:** Faz 1 (`v0.0.2-core-lexer`) tamamlandı — Faz 2 (`v0.0.3-parser-ast`) sıradaki iş.  
 > **Kural:** Hiçbir madde, gerçek `.nox` kodu `noxc check` ve `noxc test` ile çalıştırılıp kanıtlanmadan `[x]` işaretlenmez.
 
 ---
@@ -22,7 +22,7 @@
 | Faz | Hedef Sürüm | Odak | Durum |
 |---|---|---|---|
 | Faz 0 | `v0.0.1-audit` | NOX 2.x capability audit, PoC'lar, repo iskeleti, ADR-0001 | `[x]` Tamamlandı |
-| Faz 1 | `v0.0.2-core-lexer` | Typed `Value`, `SourceSpan`, `Errors`, `ResourceBudget`, `Lexer` | `[ ]` Başlanmadı |
+| Faz 1 | `v0.0.2-core-lexer` | Typed `Value`, `SourceSpan`, `Errors`, `ResourceBudget`, `Lexer` | `[x]` Tamamlandı |
 | Faz 2 | `v0.0.3-parser-ast` | Pratt expression parser, AST, statement nesting, static validation | `[ ]` Başlanmadı |
 | Faz 3 | `v0.1.0` **(MVP)** | AST interpreter, Writer, default HTML escape, limits, `MemoryLoader`, Slice #1 | `[ ]` Başlanmadı |
 | Faz 4 | `v0.2.0` | `FilesystemLoader` sandbox, `include`, `ParseCache`/`CompileCache`, dependency graph | `[ ]` Başlanmadı |
@@ -70,27 +70,27 @@ Her PoC derlenip `noxc check` + `noxc test` ile doğrulanmış ve sonucu `docs/c
 **Amaç:** Template motorunun deterministik veri modelini, hata/span altyapısını, kaynak bütçesi iskeletini ve O(n) güvenli tarayıcısını üretmek.
 
 ### 1.1. Çekirdek Tipler ve Bütçe (`glyph/version.nox`, `errors.nox`, `limits.nox`)
-- [ ] `glyph/version.nox`: Engine sürüm sabitleri (`GLYPH_VERSION` — cache key bileşeni).
-- [ ] `glyph/errors.nox`: `SourceSpan` (`logical_name`, `line`, `column`, `byte_start`, `byte_end`), `RelatedSpan`, stable error kodları (`GLYPH_SYNTAX_*`, `GLYPH_EVAL_*`, `GLYPH_SECURITY_*`, `GLYPH_LIMIT_*`, `GLYPH_LOADER_*`, `GLYPH_RENDER_*`), `GlyphError` tipleri ve redaction politikası (context değeri/secret/absolute path sızıntısı yok).
-- [ ] `glyph/limits.nox`: `ResourceBudget` ve `BudgetTracker` (`max_source_bytes`, `max_tokens`, `max_ast_nodes`, `max_include_depth`, `max_macro_depth`, `max_expr_depth`, `max_loop_steps`, `max_output_bytes`, `max_total_ops`, opsiyonel explicit wall-clock). Alt render'da paylaşılan ve resetlenemeyen bütçe sözleşmesi.
+- [x] `glyph/version.nox`: Engine sürüm sabitleri (`GLYPH_VERSION = "0.0.2-core-lexer"`).
+- [x] `glyph/errors.nox`: `SourceSpan` (`logical_name`, `line`, `column`, `byte_start`, `byte_end`), `RelatedSpan`, stable error kodları (`GLYPH_SYNTAX_*`, `GLYPH_EVAL_*`, `GLYPH_SECURITY_*`, `GLYPH_LIMIT_*`, `GLYPH_LOADER_*`, `GLYPH_RENDER_*`), `GlyphError` tipleri ve redaction politikası (`redact_logical_name`, `format_public_error`).
+- [x] `glyph/limits.nox`: `ResourceBudget` (`default_budget()`, `restricted_budget()`) ve alt render'da resetlenemeyen paylaşılan `BudgetTracker`.
 
 ### 1.2. Tipli Value Modeli (`glyph/value.nox`)
-- [ ] `Value` varyantları: `Null`, `Undefined` (ayrı tür, `Null` değildir), `Bool`, `Int`, `Float`, `String`, `List`, `Map` (deterministik sıralama politikası), `TrustedMarkup` (bağlam etiketli), `Callable` (yalnızca registry referansı).
-- [ ] `JsonValue -> Value` dönüşümü (`as_int` / `number_text` hassasiyet korumalı; JSON'dan gelen veri asla `TrustedMarkup` olmaz).
-- [ ] Açık `stringify`, `truthiness` tablosu (`null`, `false`, `0`, `""`, `[]`, `{}`), `StrictUndefined` vs `LenientUndefined`, taşma/NaN/Infinity kuralları.
-- [ ] Güvenlik kuralı: `__class__`, `__dict__` vb. reflection lookup yok; yalnızca explicit map alanı erişimi.
+- [x] `Value` varyantları: `VNull`, `VUndefined`, `VBool`, `VInt`, `VFloat`, `VStr`, `VList`, `VMap` (`OrderedDict`), `VTrustedMarkup` (bağlam etiketli), `VCallable`.
+- [x] `JsonValue -> Value` dönüşümü (`from_json` / `from_json_str`, `as_int` / `number_text` hassasiyet korumalı, JSON asla `VTrustedMarkup` olmaz).
+- [x] Açık `stringify`, `truthiness` tablosu, `StrictUndefined` vs `LenientUndefined`, NaN/Infinity reddi ve overflow-checked tamsayı aritmetiği.
+- [x] Güvenlik kuralı: `__*`, `constructor`, `prototype` lookup reddi (`GlyphSecurityError`).
 
 ### 1.3. Token ve Lexer (`glyph/token.nox`, `glyph/lexer.nox`)
-- [ ] Delimiter tarama: `{{ ... }}`, `{% ... %}`, `{# ... #}`, `{% raw %}...{% endraw %}`.
-- [ ] Whitespace trim kontrolleri: `{{-`, `-}}`, `{%-`, `-%}` (`\r\n`, `\n`, `\t` ve desteklenen Unicode whitespace).
-- [ ] String literal, escape dizileri (`\"`, `\'`, `\\`, `\n`, `\t`), int/float literaller, operatör ve anahtar sözcük tokenları.
-- [ ] String/comment/raw içinde yanlış delimiter algılamama; nested `raw` politikası; kötü biçimli UTF-8 reddi; kapanmayan delimiter'da kesin line/col hata raporu.
-- [ ] O(n) tek geçişli tarama (tekrarlı string birleştirme yok) + `max_source_bytes` / `max_tokens` / token uzunluğu limitleri.
+- [x] Delimiter tarama: `{{ ... }}`, `{% ... %}`, `{# ... #}`, `{% raw %}...{% endraw %}`.
+- [x] Whitespace trim kontrolleri: `{{-`, `-}}`, `{%-`, `-%}`, `{#-`, `-#}` (CRLF ve Unicode line/col takibi ile).
+- [x] String literal, escape dizileri (`\"`, `\'`, `\\`, `\n`, `\t`, `\r`), int/float literaller, operatör ve noktalama tokenları.
+- [x] String/comment/raw içinde yanlış delimiter algılamama; nested `raw` reddi; RFC 3629 UTF-8 doğrulaması; kapanmayan delimiter'da kesin line/col hata raporu.
+- [x] O(n) tek geçişli tarama + `max_source_bytes` / `max_tokens` / `max_token_bytes` limitleri.
 
 ### 1.4. Faz 1 Testleri ve Kabul
-- [ ] `tests/value/` birim ve edge-case testleri (JSON -> Value, NaN/Inf, large int, truthiness, `Undefined != Null`).
-- [ ] `tests/lexer/` deterministik token golden fixture'ları, CRLF/UTF-8 byte-line-col testleri, string içi `}}` çarpışma testleri, malformed UTF-8 & kapanmayan blok negatif testleri.
-- [ ] Sınırlandırılmış rastgele byte dizileriyle lexer fuzz-smoke testi (panic/hang/OOM yok).
+- [x] `tests/value/value_test.nox`: JSON -> Value, NaN/Inf, 64-bit int, truthiness, `Undefined != Null`, reflection reddi, overflow ve budget testleri.
+- [x] `tests/lexer/lexer_test.nox`: Token/span golden kontrolleri, CRLF/UTF-8 byte-line-col testleri, string içi `}}` çarpışma testleri, malformed UTF-8 & kapanmayan blok negatif testleri.
+- [x] 200 deterministik rastgele girdiyle lexer fuzz-smoke testi (`tests/lexer/lexer_test.nox`).
 
 ---
 

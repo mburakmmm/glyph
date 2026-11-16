@@ -1,7 +1,7 @@
-# Glyph version metadata (Phase 0 audit baseline).
-# Keep core free of framework imports and hosted-only modules so freestanding/WASM checks stay valid.
+# Glyph version metadata (Phase 1: Core & Lexer).
+# Pure NOX, freestanding-compatible (no hosted-only imports).
 
-GLYPH_VERSION: str = "0.0.1-audit"
+GLYPH_VERSION: str = "0.0.2-core-lexer"
 GLYPH_MIN_NOX_VERSION: str = "2.1.186"
 
 def version() -> str:

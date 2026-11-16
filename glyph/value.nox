@@ -1,0 +1,293 @@
+# Typed template Value model, JSON conversion, truthiness, stringify, and safe checked math.
+# Enforces AGENTS.md §5 and ADR-0001. Freestanding-safe (no nox.fs / nox.unicode).
+import nox.json
+import nox.strings
+from nox.json import JsonError
+from nox.collections import OrderedDict
+from glyph.errors import SourceSpan, GlyphTypeError, GlyphUndefinedError, GlyphSecurityError
+from glyph.errors import GLYPH_EVAL_TYPE, GLYPH_EVAL_UNDEFINED, GLYPH_EVAL_OVERFLOW
+from glyph.errors import GLYPH_EVAL_DIV_ZERO, GLYPH_EVAL_OUT_OF_RANGE, GLYPH_SECURITY_REFLECTION
+
+enum MarkupContext:
+    SafeHtml
+    SafeAttr
+    SafeUrl
+    SafeJs
+
+enum UndefinedPolicy:
+    StrictUndefined
+    LenientUndefined
+
+enum Value:
+    VNull
+    VUndefined(name: str)
+    VBool(b: bool)
+    VInt(i: int)
+    VFloat(f: float)
+    VStr(s: str)
+    VList(items: list[Value])
+    VMap(entries: OrderedDict[str, Value])
+    VTrustedMarkup(content: str, ctx: MarkupContext)
+    VCallable(name: str)
+
+def is_nan(f: float) -> bool:
+    return f != f
+
+def is_inf(f: float) -> bool:
+    if f != f:
+        return False
+    return (f - f) != 0.0
+
+def validate_float(f: float, span: SourceSpan) -> float:
+    if is_nan(f) or is_inf(f):
+        raise GlyphTypeError(
+            GLYPH_EVAL_TYPE,
+            "non-finite float (NaN or Infinity) is not permitted",
+            span,
+            "ensure numeric expressions produce finite floats"
+        )
+    return f
+
+def empty_map() -> Value:
+    entries: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    return Value.VMap(entries)
+
+def empty_list() -> Value:
+    items: list[Value] = []
+    return Value.VList(items)
+
+def is_forbidden_key(key: str) -> bool:
+    if len(key) >= 2 and nox.strings.starts_with(key, "__"):
+        return True
+    if key == "constructor" or key == "prototype":
+        return True
+    return False
+
+def map_get(entries: OrderedDict[str, Value], key: str, span: SourceSpan) -> Value:
+    if is_forbidden_key(key):
+        raise GlyphSecurityError(
+            GLYPH_SECURITY_REFLECTION,
+            "access to restricted metadata key is denied",
+            span,
+            "only plain data fields may be accessed"
+        )
+    if entries.contains(key):
+        return entries.get(key)
+    return Value.VUndefined(key)
+
+def list_get(items: list[Value], idx: int, span: SourceSpan) -> Value:
+    n: int = len(items)
+    pos: int = idx
+    if pos < 0:
+        pos = n + pos
+    if pos < 0 or pos >= n:
+        raise GlyphTypeError(
+            GLYPH_EVAL_OUT_OF_RANGE,
+            "list index out of range",
+            span,
+            "check list bounds before indexing"
+        )
+    return items[pos]
+
+def is_truthy(v: Value, policy: UndefinedPolicy, span: SourceSpan) -> bool:
+    match v:
+        case Value.VNull:
+            return False
+        case Value.VUndefined(name):
+            match policy:
+                case UndefinedPolicy.StrictUndefined:
+                    raise GlyphUndefinedError(
+                        GLYPH_EVAL_UNDEFINED,
+                        "undefined variable '" + name + "'",
+                        span,
+                        "define the variable or provide a |default filter"
+                    )
+                case UndefinedPolicy.LenientUndefined:
+                    return False
+        case Value.VBool(b):
+            return b
+        case Value.VInt(i):
+            return i != 0
+        case Value.VFloat(f):
+            validate_float(f, span)
+            return f != 0.0
+        case Value.VStr(s):
+            return len(s) > 0
+        case Value.VList(items):
+            return len(items) > 0
+        case Value.VMap(entries):
+            return entries.size() > 0
+        case Value.VTrustedMarkup(content, _):
+            return len(content) > 0
+        case Value.VCallable(_):
+            return True
+
+def stringify(v: Value, policy: UndefinedPolicy, span: SourceSpan) -> str:
+    match v:
+        case Value.VNull:
+            return ""
+        case Value.VUndefined(name):
+            match policy:
+                case UndefinedPolicy.StrictUndefined:
+                    raise GlyphUndefinedError(
+                        GLYPH_EVAL_UNDEFINED,
+                        "undefined variable '" + name + "'",
+                        span,
+                        "define the variable or use |default"
+                    )
+                case UndefinedPolicy.LenientUndefined:
+                    return ""
+        case Value.VBool(b):
+            if b:
+                return "true"
+            return "false"
+        case Value.VInt(i):
+            return str(i)
+        case Value.VFloat(f):
+            validate_float(f, span)
+            return str(f)
+        case Value.VStr(s):
+            return s
+        case Value.VTrustedMarkup(content, _):
+            return content
+        case Value.VList(_):
+            raise GlyphTypeError(
+                GLYPH_EVAL_TYPE,
+                "cannot stringify list directly without a filter (e.g. |join or |tojson)",
+                span,
+                "use |join(', ') or |tojson"
+            )
+        case Value.VMap(_):
+            raise GlyphTypeError(
+                GLYPH_EVAL_TYPE,
+                "cannot stringify map directly without a filter (e.g. |tojson)",
+                span,
+                "access a field or use |tojson"
+            )
+        case Value.VCallable(_):
+            raise GlyphTypeError(
+                GLYPH_EVAL_TYPE,
+                "cannot stringify callable helper directly",
+                span,
+                "invoke the helper with ()"
+            )
+
+def _is_int_json_text(txt: str) -> bool:
+    if len(txt) == 0:
+        return False
+    if nox.strings.contains(txt, ".") or nox.strings.contains(txt, "e") or nox.strings.contains(txt, "E"):
+        return False
+    return True
+
+# Converts a JsonValue tree into Glyph Value.
+# Preserves 64-bit integer precision via number_text/as_int; never promotes JSON data to TrustedMarkup.
+def from_json(jv: JsonValue, span: SourceSpan) -> Value:
+    if nox.json.is_null(jv):
+        return Value.VNull
+    if nox.json.is_bool(jv):
+        return Value.VBool(nox.json.as_bool(jv))
+    if nox.json.is_number(jv):
+        txt: str = nox.json.number_text(jv)
+        if _is_int_json_text(txt):
+            try:
+                iv: int = nox.json.as_int(jv)
+                return Value.VInt(iv)
+            except JsonError:
+                raise GlyphTypeError(
+                    GLYPH_EVAL_OVERFLOW,
+                    "JSON integer exceeds 64-bit signed integer range",
+                    span,
+                    "pass oversized integers as strings"
+                )
+        fv: float = nox.json.as_number(jv)
+        validate_float(fv, span)
+        return Value.VFloat(fv)
+    if nox.json.is_string(jv):
+        return Value.VStr(nox.json.as_string(jv))
+    if nox.json.is_array(jv):
+        n: int = nox.json.array_len(jv)
+        out: list[Value] = []
+        i: int = 0
+        while i < n:
+            out.append(from_json(nox.json.array_get(jv, i), span))
+            i = i + 1
+        return Value.VList(out)
+    if nox.json.is_object(jv):
+        n_obj: int = nox.json.object_len(jv)
+        entries: OrderedDict[str, Value] = OrderedDict[str, Value]()
+        j: int = 0
+        while j < n_obj:
+            k: str = nox.json.object_key(jv, j)
+            if not is_forbidden_key(k):
+                entries.set(k, from_json(nox.json.object_value(jv, j), span))
+            j = j + 1
+        return Value.VMap(entries)
+    raise GlyphTypeError(
+        GLYPH_EVAL_TYPE,
+        "unsupported JSON value kind",
+        span,
+        "provide valid JSON data"
+    )
+
+def from_json_str(raw: str, span: SourceSpan) -> Value:
+    try:
+        jv: JsonValue = nox.json.parse(raw)
+        return from_json(jv, span)
+    except JsonError:
+        raise GlyphTypeError(
+            GLYPH_EVAL_TYPE,
+            "invalid JSON payload",
+            span,
+            "check JSON syntax"
+        )
+
+# Signed 64-bit integer bounds for overflow checks
+INT64_MAX: int = 9223372036854775807
+INT64_MIN: int = -9223372036854775807 - 1
+
+def checked_add(a: int, b: int, span: SourceSpan) -> int:
+    if b > 0 and a > INT64_MAX - b:
+        raise GlyphTypeError(GLYPH_EVAL_OVERFLOW, "integer addition overflow", span, "use smaller integers")
+    if b < 0 and a < INT64_MIN - b:
+        raise GlyphTypeError(GLYPH_EVAL_OVERFLOW, "integer addition underflow", span, "use larger integers")
+    return a + b
+
+def checked_sub(a: int, b: int, span: SourceSpan) -> int:
+    if b < 0 and a > INT64_MAX + b:
+        raise GlyphTypeError(GLYPH_EVAL_OVERFLOW, "integer subtraction overflow", span, "use smaller integers")
+    if b > 0 and a < INT64_MIN + b:
+        raise GlyphTypeError(GLYPH_EVAL_OVERFLOW, "integer subtraction underflow", span, "use larger integers")
+    return a - b
+
+def checked_mul(a: int, b: int, span: SourceSpan) -> int:
+    if a == 0 or b == 0:
+        return 0
+    if a > 0:
+        if b > 0:
+            if a > INT64_MAX // b:
+                raise GlyphTypeError(GLYPH_EVAL_OVERFLOW, "integer multiplication overflow", span, "use smaller integers")
+        else:
+            if b < INT64_MIN // a:
+                raise GlyphTypeError(GLYPH_EVAL_OVERFLOW, "integer multiplication underflow", span, "use smaller integers")
+    else:
+        if b > 0:
+            if a < INT64_MIN // b:
+                raise GlyphTypeError(GLYPH_EVAL_OVERFLOW, "integer multiplication underflow", span, "use smaller integers")
+        else:
+            if a < INT64_MAX // b:
+                raise GlyphTypeError(GLYPH_EVAL_OVERFLOW, "integer multiplication overflow", span, "use smaller integers")
+    return a * b
+
+def checked_floordiv(a: int, b: int, span: SourceSpan) -> int:
+    if b == 0:
+        raise GlyphTypeError(GLYPH_EVAL_DIV_ZERO, "integer division by zero", span, "ensure divisor is non-zero")
+    if a == INT64_MIN and b == -1:
+        raise GlyphTypeError(GLYPH_EVAL_OVERFLOW, "integer division overflow", span, "avoid INT64_MIN // -1")
+    return a // b
+
+def checked_mod(a: int, b: int, span: SourceSpan) -> int:
+    if b == 0:
+        raise GlyphTypeError(GLYPH_EVAL_DIV_ZERO, "integer modulo by zero", span, "ensure divisor is non-zero")
+    if a == INT64_MIN and b == -1:
+        return 0
+    return a % b

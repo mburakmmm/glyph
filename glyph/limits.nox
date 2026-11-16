@@ -1,0 +1,210 @@
+# ResourceBudget configuration and shared non-resettable BudgetTracker.
+# Enforces AGENTS.md §2.9 and §8.5 across compilation and rendering.
+from glyph.errors import SourceSpan, GlyphLimitError
+from glyph.errors import GLYPH_LIMIT_SOURCE_BYTES, GLYPH_LIMIT_TOKENS, GLYPH_LIMIT_TOKEN_BYTES
+from glyph.errors import GLYPH_LIMIT_AST_NODES, GLYPH_LIMIT_INCLUDE_DEPTH, GLYPH_LIMIT_MACRO_DEPTH
+from glyph.errors import GLYPH_LIMIT_EXPR_DEPTH, GLYPH_LIMIT_LOOP_STEPS, GLYPH_LIMIT_OUTPUT_BYTES, GLYPH_LIMIT_TOTAL_OPS
+
+class ResourceBudget:
+    max_source_bytes: int
+    max_tokens: int
+    max_token_bytes: int
+    max_ast_nodes: int
+    max_include_depth: int
+    max_macro_depth: int
+    max_expr_depth: int
+    max_loop_steps: int
+    max_output_bytes: int
+    max_total_ops: int
+
+    def __init__(
+        self: ResourceBudget,
+        max_source_bytes: int,
+        max_tokens: int,
+        max_token_bytes: int,
+        max_ast_nodes: int,
+        max_include_depth: int,
+        max_macro_depth: int,
+        max_expr_depth: int,
+        max_loop_steps: int,
+        max_output_bytes: int,
+        max_total_ops: int
+    ) -> None:
+        self.max_source_bytes = max_source_bytes
+        self.max_tokens = max_tokens
+        self.max_token_bytes = max_token_bytes
+        self.max_ast_nodes = max_ast_nodes
+        self.max_include_depth = max_include_depth
+        self.max_macro_depth = max_macro_depth
+        self.max_expr_depth = max_expr_depth
+        self.max_loop_steps = max_loop_steps
+        self.max_output_bytes = max_output_bytes
+        self.max_total_ops = max_total_ops
+
+def default_budget() -> ResourceBudget:
+    return ResourceBudget(
+        1048576,   # 1 MiB source bytes
+        100000,    # max tokens
+        65536,     # 64 KiB single token bytes
+        100000,    # max AST nodes
+        32,        # include depth
+        32,        # macro recursion depth
+        64,        # expression depth
+        1000000,   # loop steps
+        16777216,  # 16 MiB output bytes
+        5000000    # total operations
+    )
+
+def restricted_budget() -> ResourceBudget:
+    return ResourceBudget(
+        131072,    # 128 KiB source bytes
+        16384,     # max tokens
+        8192,      # 8 KiB single token bytes
+        16384,     # max AST nodes
+        8,         # include depth
+        8,         # macro recursion depth
+        24,        # expression depth
+        10000,     # loop steps
+        1048576,   # 1 MiB output bytes
+        100000     # total operations
+    )
+
+# Shared, monotonic budget tracker (never reset by child renders or macros).
+class BudgetTracker:
+    budget: ResourceBudget
+    tokens_used: int
+    ast_nodes_used: int
+    include_depth: int
+    macro_depth: int
+    expr_depth: int
+    loop_steps_used: int
+    output_bytes_used: int
+    total_ops_used: int
+
+    def __init__(self: BudgetTracker, budget: ResourceBudget) -> None:
+        self.budget = budget
+        self.tokens_used = 0
+        self.ast_nodes_used = 0
+        self.include_depth = 0
+        self.macro_depth = 0
+        self.expr_depth = 0
+        self.loop_steps_used = 0
+        self.output_bytes_used = 0
+        self.total_ops_used = 0
+
+    def check_source_bytes(self: BudgetTracker, byte_len: int, span: SourceSpan) -> None:
+        if byte_len < 0 or byte_len > self.budget.max_source_bytes:
+            raise GlyphLimitError(
+                GLYPH_LIMIT_SOURCE_BYTES,
+                "template source exceeds max_source_bytes limit (" + str(self.budget.max_source_bytes) + ")",
+                span,
+                "split or shrink template source"
+            )
+
+    def check_token_bytes(self: BudgetTracker, byte_len: int, span: SourceSpan) -> None:
+        if byte_len > self.budget.max_token_bytes:
+            raise GlyphLimitError(
+                GLYPH_LIMIT_TOKEN_BYTES,
+                "token exceeds max_token_bytes limit (" + str(self.budget.max_token_bytes) + ")",
+                span,
+                "reduce single token or literal size"
+            )
+
+    def consume_token(self: BudgetTracker, span: SourceSpan) -> None:
+        self.tokens_used = self.tokens_used + 1
+        if self.tokens_used > self.budget.max_tokens:
+            raise GlyphLimitError(
+                GLYPH_LIMIT_TOKENS,
+                "template exceeds max_tokens limit (" + str(self.budget.max_tokens) + ")",
+                span,
+                "simplify template or increase token budget"
+            )
+
+    def consume_ast_node(self: BudgetTracker, span: SourceSpan) -> None:
+        self.ast_nodes_used = self.ast_nodes_used + 1
+        if self.ast_nodes_used > self.budget.max_ast_nodes:
+            raise GlyphLimitError(
+                GLYPH_LIMIT_AST_NODES,
+                "template exceeds max_ast_nodes limit (" + str(self.budget.max_ast_nodes) + ")",
+                span,
+                "reduce template complexity"
+            )
+
+    def enter_include(self: BudgetTracker, span: SourceSpan) -> None:
+        self.include_depth = self.include_depth + 1
+        if self.include_depth > self.budget.max_include_depth:
+            raise GlyphLimitError(
+                GLYPH_LIMIT_INCLUDE_DEPTH,
+                "include depth exceeds max_include_depth limit (" + str(self.budget.max_include_depth) + ")",
+                span,
+                "check for recursive or overly deep includes"
+            )
+
+    def exit_include(self: BudgetTracker) -> None:
+        if self.include_depth > 0:
+            self.include_depth = self.include_depth - 1
+
+    def enter_macro(self: BudgetTracker, span: SourceSpan) -> None:
+        self.macro_depth = self.macro_depth + 1
+        if self.macro_depth > self.budget.max_macro_depth:
+            raise GlyphLimitError(
+                GLYPH_LIMIT_MACRO_DEPTH,
+                "macro recursion exceeds max_macro_depth limit (" + str(self.budget.max_macro_depth) + ")",
+                span,
+                "check recursive macro termination"
+            )
+
+    def exit_macro(self: BudgetTracker) -> None:
+        if self.macro_depth > 0:
+            self.macro_depth = self.macro_depth - 1
+
+    def enter_expr(self: BudgetTracker, span: SourceSpan) -> None:
+        self.expr_depth = self.expr_depth + 1
+        if self.expr_depth > self.budget.max_expr_depth:
+            raise GlyphLimitError(
+                GLYPH_LIMIT_EXPR_DEPTH,
+                "expression nesting exceeds max_expr_depth limit (" + str(self.budget.max_expr_depth) + ")",
+                span,
+                "reduce nested parentheses or operations"
+            )
+
+    def exit_expr(self: BudgetTracker) -> None:
+        if self.expr_depth > 0:
+            self.expr_depth = self.expr_depth - 1
+
+    def consume_loop_step(self: BudgetTracker, span: SourceSpan) -> None:
+        self.loop_steps_used = self.loop_steps_used + 1
+        if self.loop_steps_used > self.budget.max_loop_steps:
+            raise GlyphLimitError(
+                GLYPH_LIMIT_LOOP_STEPS,
+                "loop iteration budget exceeded (" + str(self.budget.max_loop_steps) + ")",
+                span,
+                "reduce collection size or loop count"
+            )
+
+    def consume_output_bytes(self: BudgetTracker, byte_len: int, span: SourceSpan) -> None:
+        if byte_len < 0:
+            raise GlyphLimitError(
+                GLYPH_LIMIT_OUTPUT_BYTES,
+                "invalid negative output byte count",
+                span,
+                "check writer input"
+            )
+        if byte_len > self.budget.max_output_bytes - self.output_bytes_used:
+            raise GlyphLimitError(
+                GLYPH_LIMIT_OUTPUT_BYTES,
+                "output exceeds max_output_bytes limit (" + str(self.budget.max_output_bytes) + ")",
+                span,
+                "reduce rendered output size or raise budget"
+            )
+        self.output_bytes_used = self.output_bytes_used + byte_len
+
+    def consume_op(self: BudgetTracker, span: SourceSpan) -> None:
+        self.total_ops_used = self.total_ops_used + 1
+        if self.total_ops_used > self.budget.max_total_ops:
+            raise GlyphLimitError(
+                GLYPH_LIMIT_TOTAL_OPS,
+                "total operation budget exceeded (" + str(self.budget.max_total_ops) + ")",
+                span,
+                "simplify template evaluation"
+            )

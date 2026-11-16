@@ -1,0 +1,166 @@
+# Phase 1 Lexer Test Suite: tokens, spans, UTF-8, trims, raw, escapes, errors, and fuzz smoke
+import nox.test
+import nox.strings
+from glyph.errors import GlyphSyntaxError, GlyphLimitError
+from glyph.errors import GLYPH_SYNTAX_INVALID_UTF8, GLYPH_SYNTAX_UNCLOSED_EXPR, GLYPH_SYNTAX_UNCLOSED_TAG
+from glyph.errors import GLYPH_SYNTAX_UNCLOSED_COMMENT, GLYPH_SYNTAX_UNCLOSED_RAW, GLYPH_SYNTAX_NESTED_RAW
+from glyph.errors import GLYPH_SYNTAX_UNCLOSED_STRING, GLYPH_SYNTAX_INVALID_ESCAPE, GLYPH_SYNTAX_INVALID_NUMBER
+from glyph.errors import GLYPH_LIMIT_SOURCE_BYTES, GLYPH_LIMIT_TOKENS
+from glyph.limits import ResourceBudget, BudgetTracker
+from glyph.token import Token, TokenKind, token_kind_name
+from glyph.lexer import tokenize, tokenize_with_budget
+
+def assert_lex_error(src: str, expected_code: str, label: str) -> None:
+    got: str = ""
+    try:
+        _toks: list[Token] = tokenize(src, "neg.html")
+    except GlyphSyntaxError as se:
+        got = se.code
+    nox.test.assert_eq_str(got, expected_code, label)
+
+def test_basic_tokens() -> None:
+    t1: list[Token] = tokenize("<h1>{{ title }}</h1>{# ignore #}{% if ok %}yes{% endif %}", "basic.html")
+    nox.test.assert_eq_str(token_kind_name(t1[0].kind), "TEXT", "t1[0] TEXT")
+    nox.test.assert_eq_str(t1[0].text, "<h1>", "t1[0] text")
+    nox.test.assert_eq_str(token_kind_name(t1[1].kind), "EXPR_START", "t1[1] EXPR_START")
+    nox.test.assert_eq_str(token_kind_name(t1[2].kind), "IDENT", "t1[2] IDENT")
+    nox.test.assert_eq_str(t1[2].text, "title", "t1[2] title")
+    nox.test.assert_eq_str(token_kind_name(t1[3].kind), "EXPR_END", "t1[3] EXPR_END")
+    nox.test.assert_eq_str(t1[4].text, "</h1>", "t1[4] text after comment")
+    nox.test.assert_eq_str(token_kind_name(t1[5].kind), "STMT_START", "t1[5] STMT_START")
+    nox.test.assert_eq_str(t1[6].text, "if", "t1[6] if")
+    nox.test.assert_eq_str(t1[7].text, "ok", "t1[7] ok")
+    nox.test.assert_eq_str(token_kind_name(t1[8].kind), "STMT_END", "t1[8] STMT_END")
+    nox.test.assert_eq_str(t1[9].text, "yes", "t1[9] yes")
+    nox.test.assert_eq_str(token_kind_name(t1[len(t1) - 1].kind), "EOF", "EOF token")
+
+def test_strings_and_escapes() -> None:
+    cr: str = nox.strings.char_from_byte(13)
+    t2: list[Token] = tokenize("{{ \"a }} \\\"b\\\" \\n\\t\\r\\\\\" }}{% set x = 'c %} d' %}", "str.html")
+    nox.test.assert_eq_str(token_kind_name(t2[1].kind), "STRING", "string token")
+    nox.test.assert_eq_str(t2[1].text, "a }} \"b\" \n\t" + cr + "\\", "decoded escapes + }} inside string")
+    nox.test.assert_eq_str(t2[7].text, "c %} d", "%} inside single-quoted string")
+
+def test_minus_vs_trim() -> None:
+    t3: list[Token] = tokenize("{{ -1 }} {{- 1 -}} {{ x-1 }}", "minus.html")
+    nox.test.assert_eq_str(t3[0].text, "{{", "plain open before space -1")
+    nox.test.assert_eq_str(token_kind_name(t3[1].kind), "MINUS", "unary minus token")
+    nox.test.assert_eq_str(t3[2].text, "1", "int 1")
+    nox.test.assert_eq_str(t3[4].text, "{{-", "trim open")
+    nox.test.assert_eq_str(t3[5].text, "1", "trimmed 1")
+    nox.test.assert_eq_str(t3[6].text, "-}}", "trim close")
+    nox.test.assert_eq_str(t3[8].text, "x", "x")
+    nox.test.assert_eq_str(token_kind_name(t3[9].kind), "MINUS", "binary minus")
+    nox.test.assert_eq_str(t3[10].text, "1", "1")
+
+def test_whitespace_trim_and_raw() -> None:
+    cr: str = nox.strings.char_from_byte(13)
+    crlf: str = cr + "\n"
+    t4: list[Token] = tokenize("hello  " + crlf + "{%- if x -%}" + crlf + "  world   {#- c -#}   !", "trim.html")
+    nox.test.assert_eq_str(t4[0].text, "hello", "trimmed trailing crlf/spaces before {%-")
+    nox.test.assert_eq_str(t4[5].text, "world", "trimmed leading crlf/spaces after -%} and trailing before {#-")
+    nox.test.assert_eq_str(t4[6].text, "!", "trimmed leading spaces after -#}")
+
+    t4b: list[Token] = tokenize("   {{- x }}", "trim_empty.html")
+    nox.test.assert_eq_str(token_kind_name(t4b[0].kind), "EXPR_START", "empty TText dropped")
+
+    t5: list[Token] = tokenize("A  {%- raw -%}\n  {{ not_parsed }} {# c #}  {%- endraw -%}  B", "raw.html")
+    nox.test.assert_eq_str(t5[0].text, "A", "A trimmed")
+    nox.test.assert_eq_str(token_kind_name(t5[1].kind), "TEXT", "raw body is TEXT")
+    nox.test.assert_eq_str(t5[1].text, "{{ not_parsed }} {# c #}", "raw body preserved and trimmed")
+    nox.test.assert_eq_str(t5[2].text, "B", "B trimmed")
+
+def test_numbers_and_utf8_spans() -> None:
+    t6: list[Token] = tokenize("{{ 42 + 3.14 + 1e5 + 2.5e-2 + 1.foo }}", "num.html")
+    nox.test.assert_eq_str(token_kind_name(t6[1].kind), "INT", "42 INT")
+    nox.test.assert_eq_str(token_kind_name(t6[3].kind), "FLOAT", "3.14 FLOAT")
+    nox.test.assert_eq_str(token_kind_name(t6[5].kind), "FLOAT", "1e5 FLOAT")
+    nox.test.assert_eq_str(token_kind_name(t6[7].kind), "FLOAT", "2.5e-2 FLOAT")
+    nox.test.assert_eq_str(token_kind_name(t6[9].kind), "INT", "1 in 1.foo is INT")
+    nox.test.assert_eq_str(token_kind_name(t6[10].kind), "DOT", "dot after 1")
+    nox.test.assert_eq_str(t6[11].text, "foo", "foo after dot")
+
+    cr: str = nox.strings.char_from_byte(13)
+    crlf: str = cr + "\n"
+    utf8_tpl: str = "\u011f" + crlf + "a{{ x }}"
+    t7: list[Token] = tokenize(utf8_tpl, "utf8.html")
+    nox.test.assert_eq_int(t7[1].span.line, 2, "utf8+crlf line 2")
+    nox.test.assert_eq_int(t7[1].span.column, 2, "utf8+crlf col 2")
+    nox.test.assert_eq_int(t7[1].span.byte_start, 5, "utf8+crlf byte_start 5")
+    nox.test.assert_eq_int(t7[1].span.byte_end, 7, "utf8+crlf byte_end 7")
+
+def test_syntax_and_utf8_errors() -> None:
+    assert_lex_error("hi {{ x", GLYPH_SYNTAX_UNCLOSED_EXPR, "unclosed {{")
+    assert_lex_error("hi {% if x", GLYPH_SYNTAX_UNCLOSED_TAG, "unclosed {%")
+    assert_lex_error("hi {# comment", GLYPH_SYNTAX_UNCLOSED_COMMENT, "unclosed {#")
+    assert_lex_error("{% raw %}abc", GLYPH_SYNTAX_UNCLOSED_RAW, "unclosed raw")
+    assert_lex_error("{% raw %}{% raw %}{% endraw %}", GLYPH_SYNTAX_NESTED_RAW, "nested raw")
+    assert_lex_error("{{ \"abc }}", GLYPH_SYNTAX_UNCLOSED_STRING, "unclosed string")
+    assert_lex_error("{{ \"\\q\" }}", GLYPH_SYNTAX_INVALID_ESCAPE, "invalid escape")
+    assert_lex_error("{{ 1e }}", GLYPH_SYNTAX_INVALID_NUMBER, "invalid exponent")
+
+    bad_utf8_1: str = nox.strings.char_from_byte(128)
+    assert_lex_error(bad_utf8_1, GLYPH_SYNTAX_INVALID_UTF8, "orphan continuation byte")
+    bad_utf8_overlong: str = nox.strings.char_from_byte(192) + nox.strings.char_from_byte(175)
+    assert_lex_error(bad_utf8_overlong, GLYPH_SYNTAX_INVALID_UTF8, "overlong 2-byte UTF-8")
+    bad_utf8_surrogate: str = nox.strings.char_from_byte(237) + nox.strings.char_from_byte(160) + nox.strings.char_from_byte(128)
+    assert_lex_error(bad_utf8_surrogate, GLYPH_SYNTAX_INVALID_UTF8, "UTF-16 surrogate in UTF-8")
+    bad_utf8_trunc: str = nox.strings.char_from_byte(226) + nox.strings.char_from_byte(130)
+    assert_lex_error(bad_utf8_trunc, GLYPH_SYNTAX_INVALID_UTF8, "truncated 3-byte UTF-8")
+
+def test_lexer_budgets_and_fuzz_smoke() -> None:
+    src_lim_budget: ResourceBudget = ResourceBudget(5, 100, 100, 100, 8, 8, 16, 100, 100, 100)
+    src_lim_hit: bool = False
+    try:
+        _lt1: list[Token] = tokenize_with_budget("123456", "lim.html", BudgetTracker(src_lim_budget))
+    except GlyphLimitError as le:
+        src_lim_hit = (le.code == GLYPH_LIMIT_SOURCE_BYTES)
+    nox.test.assert_true(src_lim_hit, "lexer max_source_bytes enforced")
+
+    tok_lim_budget: ResourceBudget = ResourceBudget(1000, 3, 100, 100, 8, 8, 16, 100, 100, 100)
+    tok_lim_hit: bool = False
+    try:
+        _lt2: list[Token] = tokenize_with_budget("{{ a + b + c }}", "lim.html", BudgetTracker(tok_lim_budget))
+    except GlyphLimitError as le2:
+        tok_lim_hit = (le2.code == GLYPH_LIMIT_TOKENS)
+    nox.test.assert_true(tok_lim_hit, "lexer max_tokens enforced")
+
+    alphabet: list[str] = [
+        "{", "}", "%", "#", "-", "\"", "'", "\\", " ", "\n", "a", "1", ".", "+",
+        nox.strings.char_from_byte(0),
+        nox.strings.char_from_byte(13),
+        nox.strings.char_from_byte(195),
+        nox.strings.char_from_byte(167),
+        nox.strings.char_from_byte(255)
+    ]
+    seed: int = 1337
+    fuzz_case: int = 0
+    fuzz_completed: int = 0
+    fuzz_budget: ResourceBudget = ResourceBudget(1024, 256, 256, 256, 4, 4, 8, 256, 1024, 1024)
+    while fuzz_case < 200:
+        parts: list[str] = []
+        k: int = 0
+        str_len: int = (fuzz_case % 24) + 1
+        while k < str_len:
+            seed = (seed * 1103515245 + 12345) % 2147483647
+            idx: int = seed % len(alphabet)
+            parts.append(alphabet[idx])
+            k = k + 1
+        sample: str = nox.strings.join(parts, "")
+        try:
+            _ft: list[Token] = tokenize_with_budget(sample, "fuzz.html", BudgetTracker(fuzz_budget))
+        except GlyphSyntaxError:
+            pass
+        except GlyphLimitError:
+            pass
+        fuzz_completed = fuzz_completed + 1
+        fuzz_case = fuzz_case + 1
+    nox.test.assert_eq_int(fuzz_completed, 200, "200 deterministic fuzz-smoke samples completed safely")
+
+test_basic_tokens()
+test_strings_and_escapes()
+test_minus_vs_trim()
+test_whitespace_trim_and_raw()
+test_numbers_and_utf8_spans()
+test_syntax_and_utf8_errors()
+test_lexer_budgets_and_fuzz_smoke()

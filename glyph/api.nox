@@ -1,17 +1,15 @@
 # Public entry point for Glyph (`import glyph.api`).
-# Phase 0 baseline: exposes version helpers and verifies the tagged-union `Value` representation.
-from nox.collections import OrderedDict
+# Re-exports core Phase 1 types and lexer entrypoints. Freestanding-safe.
 import glyph.version
-
-enum Value:
-    VNull
-    VUndefined
-    VBool(b: bool)
-    VInt(i: int)
-    VFloat(f: float)
-    VStr(s: str)
-    VList(items: list[Value])
-    VMap(entries: OrderedDict[str, Value])
+from glyph.errors import SourceSpan, RelatedSpan, empty_span, format_public_error
+from glyph.errors import GlyphError, GlyphSyntaxError, GlyphUndefinedError, GlyphTypeError
+from glyph.errors import GlyphSecurityError, GlyphLoadError, GlyphLimitError
+from glyph.errors import GlyphRenderError, GlyphExtensionError, GlyphCancelledError
+from glyph.limits import ResourceBudget, BudgetTracker, default_budget, restricted_budget
+from glyph.value import Value, MarkupContext, UndefinedPolicy, from_json, from_json_str
+from glyph.value import is_truthy, stringify, map_get, list_get
+from glyph.token import Token, TokenKind, token_kind_name
+from glyph.lexer import tokenize, tokenize_with_budget
 
 def engine_version() -> str:
     return glyph.version.version()

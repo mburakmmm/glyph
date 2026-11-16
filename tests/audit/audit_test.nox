@@ -31,14 +31,14 @@ def _make_filter(suffix: str) -> (str) -> str:
     return apply_suffix
 
 # 1. Core package import & version
-nox.test.assert_eq_str(glyph.api.engine_version(), "0.0.1-audit", "engine version")
+nox.test.assert_eq_str(glyph.api.engine_version(), "0.0.2-core-lexer", "engine version")
 nox.test.assert_eq_str(glyph.api.min_nox_version(), "2.1.186", "min nox version")
 
 # 2. Enum Value + OrderedDict + list[Value] + match exhaustiveness
 entries: OrderedDict[str, Value] = OrderedDict[str, Value]()
 entries.set("name", Value.VStr("<Ada>"))
 entries.set("count", Value.VInt(42))
-items: list[Value] = [Value.VBool(True), Value.VNull, Value.VUndefined]
+items: list[Value] = [Value.VBool(True), Value.VNull, Value.VUndefined("missing")]
 entries.set("flags", Value.VList(items))
 root_val: Value = Value.VMap(entries)
 

@@ -1,0 +1,169 @@
+# Phase 1 Value, JSON Conversion, Checked Math, Error Redaction, and Budget Tests
+import nox.test
+import nox.strings
+from nox.collections import OrderedDict
+import glyph.errors
+from glyph.errors import SourceSpan, GlyphError, GlyphUndefinedError, GlyphTypeError
+from glyph.errors import GlyphSecurityError, GlyphLimitError, empty_span, redact_logical_name, format_public_error
+from glyph.errors import GLYPH_EVAL_UNDEFINED, GLYPH_EVAL_TYPE, GLYPH_EVAL_OVERFLOW
+from glyph.errors import GLYPH_EVAL_DIV_ZERO, GLYPH_EVAL_OUT_OF_RANGE, GLYPH_SECURITY_REFLECTION
+from glyph.errors import GLYPH_LIMIT_SOURCE_BYTES, GLYPH_LIMIT_LOOP_STEPS, GLYPH_LIMIT_OUTPUT_BYTES
+from glyph.limits import ResourceBudget, BudgetTracker, default_budget, restricted_budget
+import glyph.value
+from glyph.value import Value, MarkupContext, UndefinedPolicy, from_json_str, is_truthy, stringify
+from glyph.value import map_get, list_get, checked_add, checked_sub, checked_mul, checked_floordiv, checked_mod
+from glyph.value import INT64_MAX, INT64_MIN
+
+sp: SourceSpan = SourceSpan("pages/home.html", 3, 5, 20, 24)
+
+# 1. Truthiness table
+nox.test.assert_true(not is_truthy(Value.VNull, UndefinedPolicy.StrictUndefined, sp), "null falsy")
+nox.test.assert_true(not is_truthy(Value.VBool(False), UndefinedPolicy.StrictUndefined, sp), "false falsy")
+nox.test.assert_true(is_truthy(Value.VBool(True), UndefinedPolicy.StrictUndefined, sp), "true truthy")
+nox.test.assert_true(not is_truthy(Value.VInt(0), UndefinedPolicy.StrictUndefined, sp), "0 falsy")
+nox.test.assert_true(is_truthy(Value.VInt(-7), UndefinedPolicy.StrictUndefined, sp), "-7 truthy")
+nox.test.assert_true(not is_truthy(Value.VFloat(0.0), UndefinedPolicy.StrictUndefined, sp), "0.0 falsy")
+nox.test.assert_true(is_truthy(Value.VFloat(0.5), UndefinedPolicy.StrictUndefined, sp), "0.5 truthy")
+nox.test.assert_true(not is_truthy(Value.VStr(""), UndefinedPolicy.StrictUndefined, sp), "empty str falsy")
+nox.test.assert_true(is_truthy(Value.VStr("0"), UndefinedPolicy.StrictUndefined, sp), "'0' str truthy")
+nox.test.assert_true(not is_truthy(glyph.value.empty_list(), UndefinedPolicy.StrictUndefined, sp), "empty list falsy")
+nox.test.assert_true(not is_truthy(glyph.value.empty_map(), UndefinedPolicy.StrictUndefined, sp), "empty map falsy")
+nox.test.assert_true(not is_truthy(Value.VUndefined("missing"), UndefinedPolicy.LenientUndefined, sp), "lenient undefined falsy")
+
+# 2. StrictUndefined raises GlyphUndefinedError (Undefined != Null)
+undef_raised: bool = False
+try:
+    _t: bool = is_truthy(Value.VUndefined("secret_key"), UndefinedPolicy.StrictUndefined, sp)
+except GlyphUndefinedError as ue:
+    undef_raised = (ue.code == GLYPH_EVAL_UNDEFINED)
+nox.test.assert_true(undef_raised, "StrictUndefined raises GLYPH_EVAL_UNDEFINED")
+
+# 3. Non-finite float rejection (NaN and Infinity)
+nan_rejected: bool = False
+try:
+    _nb: bool = is_truthy(Value.VFloat(0.0 / 0.0), UndefinedPolicy.StrictUndefined, sp)
+except GlyphTypeError as te:
+    nan_rejected = (te.code == GLYPH_EVAL_TYPE)
+nox.test.assert_true(nan_rejected, "NaN float rejected")
+
+inf_rejected: bool = False
+try:
+    _is: str = stringify(Value.VFloat(1.0 / 0.0), UndefinedPolicy.StrictUndefined, sp)
+except GlyphTypeError as te2:
+    inf_rejected = (te2.code == GLYPH_EVAL_TYPE)
+nox.test.assert_true(inf_rejected, "Inf float rejected")
+
+# 4. Stringify rules (no Python repr on list/map/callable)
+nox.test.assert_eq_str(stringify(Value.VNull, UndefinedPolicy.StrictUndefined, sp), "", "stringify null")
+nox.test.assert_eq_str(stringify(Value.VBool(True), UndefinedPolicy.StrictUndefined, sp), "true", "stringify true")
+nox.test.assert_eq_str(stringify(Value.VBool(False), UndefinedPolicy.StrictUndefined, sp), "false", "stringify false")
+nox.test.assert_eq_str(stringify(Value.VInt(42), UndefinedPolicy.StrictUndefined, sp), "42", "stringify int")
+
+list_str_err: bool = False
+try:
+    _ls: str = stringify(glyph.value.empty_list(), UndefinedPolicy.StrictUndefined, sp)
+except GlyphTypeError as te3:
+    list_str_err = (te3.code == GLYPH_EVAL_TYPE)
+nox.test.assert_true(list_str_err, "direct list stringify fails closed")
+
+# 5. JsonValue -> Value conversion & precision & security filtering
+jval: Value = from_json_str('{"big":9007199254740993,"pi":3.5,"ok":true,"__class__":"evil","items":[10,20]}', sp)
+match jval:
+    case Value.VMap(m):
+        match map_get(m, "big", sp):
+            case Value.VInt(bi):
+                nox.test.assert_eq_int(bi, 9007199254740993, "64-bit JSON int preserved")
+            case _:
+                nox.test.assert_true(False, "expected VInt for big")
+        match map_get(m, "items", sp):
+            case Value.VList(xs):
+                match list_get(xs, -1, sp):
+                    case Value.VInt(last_i):
+                        nox.test.assert_eq_int(last_i, 20, "negative index -1")
+                    case _:
+                        nox.test.assert_true(False, "expected VInt at -1")
+            case _:
+                nox.test.assert_true(False, "expected VList")
+    case _:
+        nox.test.assert_true(False, "expected VMap")
+
+# Reflection key access denied even if queried directly
+refl_denied: bool = False
+empty_entries: OrderedDict[str, Value] = OrderedDict[str, Value]()
+try:
+    _bad_v: Value = map_get(empty_entries, "__class__", sp)
+except GlyphSecurityError as se:
+    refl_denied = (se.code == GLYPH_SECURITY_REFLECTION)
+nox.test.assert_true(refl_denied, "__class__ lookup denied")
+
+proto_denied: bool = False
+try:
+    _bad_v2: Value = map_get(empty_entries, "prototype", sp)
+except GlyphSecurityError as se2:
+    proto_denied = (se2.code == GLYPH_SECURITY_REFLECTION)
+nox.test.assert_true(proto_denied, "prototype lookup denied")
+
+# Out of range list index
+oob_err: bool = False
+try:
+    _oob: Value = list_get([Value.VInt(1)], 5, sp)
+except GlyphTypeError as te4:
+    oob_err = (te4.code == GLYPH_EVAL_OUT_OF_RANGE)
+nox.test.assert_true(oob_err, "out of range list index")
+
+# 6. Checked integer arithmetic
+nox.test.assert_eq_int(checked_add(10, 32, sp), 42, "checked_add")
+nox.test.assert_eq_int(checked_sub(50, 8, sp), 42, "checked_sub")
+nox.test.assert_eq_int(checked_mul(6, 7, sp), 42, "checked_mul")
+nox.test.assert_eq_int(checked_floordiv(85, 2, sp), 42, "checked_floordiv")
+nox.test.assert_eq_int(checked_mod(47, 5, sp), 2, "checked_mod")
+
+add_ovf: bool = False
+try:
+    _ov: int = checked_add(INT64_MAX, 1, sp)
+except GlyphTypeError as te5:
+    add_ovf = (te5.code == GLYPH_EVAL_OVERFLOW)
+nox.test.assert_true(add_ovf, "INT64_MAX + 1 overflow caught")
+
+mul_ovf: bool = False
+try:
+    _mv: int = checked_mul(INT64_MAX, 2, sp)
+except GlyphTypeError as te6:
+    mul_ovf = (te6.code == GLYPH_EVAL_OVERFLOW)
+nox.test.assert_true(mul_ovf, "INT64_MAX * 2 overflow caught")
+
+div_zero: bool = False
+try:
+    _dz: int = checked_floordiv(10, 0, sp)
+except GlyphTypeError as te7:
+    div_zero = (te7.code == GLYPH_EVAL_DIV_ZERO)
+nox.test.assert_true(div_zero, "division by zero caught")
+
+# 7. Error redaction & ResourceBudget
+nox.test.assert_eq_str(redact_logical_name("C:\\Users\\secret\\a.html"), "<redacted>", "windows path redacted")
+nox.test.assert_eq_str(redact_logical_name("/etc/passwd"), "<redacted>", "unix absolute path redacted")
+nox.test.assert_eq_str(redact_logical_name(""), "<inline>", "empty name -> <inline>")
+nox.test.assert_eq_str(redact_logical_name("pages/home.html"), "pages/home.html", "logical path preserved")
+
+b_win: SourceSpan = SourceSpan("C:\\secret\\tpl.html", 2, 4, 10, 12)
+err_obj: GlyphError = GlyphTypeError(GLYPH_EVAL_TYPE, "type mismatch", b_win, "hint")
+nox.test.assert_eq_str(format_public_error(err_obj), "[GLYPH_EVAL_TYPE] <redacted>:2:4: type mismatch", "public error redacted")
+
+tight: ResourceBudget = ResourceBudget(16, 10, 8, 10, 2, 2, 4, 3, 5, 10)
+tr: BudgetTracker = BudgetTracker(tight)
+tr.consume_loop_step(sp)
+tr.consume_loop_step(sp)
+tr.consume_loop_step(sp)
+loop_lim: bool = False
+try:
+    tr.consume_loop_step(sp)
+except GlyphLimitError as le:
+    loop_lim = (le.code == GLYPH_LIMIT_LOOP_STEPS)
+nox.test.assert_true(loop_lim, "loop step budget enforced")
+
+out_lim: bool = False
+try:
+    tr.consume_output_bytes(6, sp)
+except GlyphLimitError as le2:
+    out_lim = (le2.code == GLYPH_LIMIT_OUTPUT_BYTES)
+nox.test.assert_true(out_lim, "output bytes budget enforced")
