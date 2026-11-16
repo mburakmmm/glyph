@@ -139,7 +139,7 @@ Verified against **`noxc 2.1.186`** across:
 |---|---|---|
 | **Linux x86_64** | `ubuntu-latest` | LLVM, QBE, `--strict-spawn-shared`, CLI build, 14/14 `noxc test`, examples, SBOM |
 | **Linux ARM64** | `ubuntu-24.04-arm` | LLVM, QBE, `--strict-spawn-shared`, CLI build, 14/14 `noxc test`, examples |
-| **macOS ARM64** | `macos-14` | LLVM, QBE, `--strict-spawn-shared`, CLI build, 14/14 `noxc test`, examples |
+| **macOS ARM64** | `macos-latest` | LLVM, QBE, `--strict-spawn-shared`, CLI build, 14/14 `noxc test`, examples |
 | **Windows x86_64** | `windows-latest` | LLVM, QBE, `--strict-spawn-shared`, CLI build, 14/14 `noxc test`, examples |
 | **WebAssembly** | `wasm32-freestanding` | `noxc build --target wasm32-freestanding` on `glyph/api.nox` & `audit_consumer` |
 

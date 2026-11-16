@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  NOX_VERSION: "2.1.186"
+  NOX_VERSION: "v2.1.186"
 
 jobs:
   policy-and-boundaries:
@@ -67,7 +67,7 @@ jobs:
           - label: Linux ARM64
             os: ubuntu-24.04-arm
           - label: macOS ARM64
-            os: macos-14
+            os: macos-latest
           - label: Windows x86_64
             os: windows-latest
     runs-on: ${{ matrix.os }}
@@ -79,23 +79,36 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          curl -fsSL https://noxlang.com/install.sh | sh
+          curl -fsSL https://noxlang.com/install.sh | bash
           echo "$HOME/.nox-lang/bin" >> "$GITHUB_PATH"
 
       - name: Install NOX toolchain (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          if (-not (Get-Command gcc -ErrorAction SilentlyContinue)) {
+            if (Test-Path "C:\msys64\mingw64\bin\gcc.exe") {
+              "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            } else {
+              choco install mingw -y
+              $machine = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+              $user = [System.Environment]::GetEnvironmentVariable("Path", "User")
+              $env:Path = "$machine;$user"
+              $gcc = Get-Command gcc.exe | Select-Object -ExpandProperty Source
+              Split-Path $gcc | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            }
+          }
           irm https://noxlang.com/install.ps1 | iex
-          echo "$env:USERPROFILE\.nox-lang\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "$env:USERPROFILE\.nox-lang\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Pin NOX version
         shell: bash
         run: |
           CURRENT=$(noxc --version)
-          echo "Installed: $CURRENT"
-          if [ "$CURRENT" != "noxc $NOX_VERSION" ]; then
-            noxc upgrade "v$NOX_VERSION"
+          EXPECTED="noxc ${NOX_VERSION#v}"
+          echo "Installed: $CURRENT (expected: $EXPECTED)"
+          if [ "$CURRENT" != "$EXPECTED" ]; then
+            noxc upgrade "$NOX_VERSION"
           fi
           noxc --version
 
@@ -145,14 +158,15 @@ jobs:
 
       - name: Install NOX toolchain
         run: |
-          curl -fsSL https://noxlang.com/install.sh | sh
+          curl -fsSL https://noxlang.com/install.sh | bash
           echo "$HOME/.nox-lang/bin" >> "$GITHUB_PATH"
 
       - name: Pin NOX version
         run: |
           CURRENT=$(noxc --version)
-          if [ "$CURRENT" != "noxc $NOX_VERSION" ]; then
-            noxc upgrade "v$NOX_VERSION"
+          EXPECTED="noxc ${NOX_VERSION#v}"
+          if [ "$CURRENT" != "$EXPECTED" ]; then
+            noxc upgrade "$NOX_VERSION"
           fi
           noxc --version
 
