@@ -26,6 +26,10 @@ def _mode_tag(m: OutputMode) -> str:
             return "xml"
         case OutputMode.Markdown:
             return "md"
+        case OutputMode.Json:
+            return "json"
+        case OutputMode.EmailSubject:
+            return "email_subject"
 
 def _trust_tag(t: TrustTier) -> str:
     match t:
@@ -51,7 +55,8 @@ def build_compile_cache_key(
     effective_trust: TrustTier,
     filters_gen: int,
     tests_gen: int,
-    functions_gen: int
+    functions_gen: int,
+    catalog_version: int = 1
 ) -> str:
     return (
         origin_id + "|" + fingerprint
@@ -61,6 +66,7 @@ def build_compile_cache_key(
         + "|sf=" + _bool_tag(opts.allow_safe_filter)
         + "|di=" + _bool_tag(opts.allow_dynamic_include)
         + "|rg=" + str(filters_gen) + ":" + str(tests_gen) + ":" + str(functions_gen)
+        + "|cat=" + str(catalog_version)
         + "|loc=" + opts.default_locale
         + "|v=" + glyph.version.version()
     )

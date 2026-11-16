@@ -8,6 +8,8 @@ enum OutputMode:
     Text
     Xml
     Markdown
+    Json
+    EmailSubject
 
 enum TrustTier:
     Trusted

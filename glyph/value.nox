@@ -471,3 +471,58 @@ def values_contains(needle: Value, haystack: Value, policy: UndefinedPolicy, spa
                     raise GlyphTypeError(GLYPH_EVAL_TYPE, "string membership check requires string needle", span, "check string 'in' string")
         case _:
             raise GlyphTypeError(GLYPH_EVAL_TYPE, "'in' expects list, map, or string", span, "pass a collection or string")
+
+def value_to_json_raw(val: Value, policy: UndefinedPolicy, depth: int, span: SourceSpan) -> str:
+    if depth > 64:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "JSON nesting depth exceeded maximum limit (64)", span, "flatten deeply nested structures")
+    match val:
+        case Value.VNull:
+            return "null"
+        case Value.VBool(b):
+            if b:
+                return "true"
+            return "false"
+        case Value.VInt(i):
+            return str(i)
+        case Value.VFloat(f):
+            vf: float = validate_float(f, span)
+            return str(vf)
+        case Value.VStr(s):
+            return nox.json.dump_string(s)
+        case Value.VTrustedMarkup(c, _):
+            return nox.json.dump_string(c)
+        case Value.VList(items):
+            parts: list[str] = []
+            i: int = 0
+            while i < len(items):
+                parts.append(value_to_json_raw(items[i], policy, depth + 1, span))
+                i = i + 1
+            return "[" + nox.strings.join(parts, ",") + "]"
+        case Value.VMap(entries):
+            keys: list[str] = entries.keys_list()
+            pairs: list[str] = []
+            ki: int = 0
+            while ki < len(keys):
+                k: str = keys[ki]
+                ev: Value = entries.get(k)
+                pairs.append(nox.json.dump_string(k) + ":" + value_to_json_raw(ev, policy, depth + 1, span))
+                ki = ki + 1
+            return "{" + nox.strings.join(pairs, ",") + "}"
+        case Value.VUndefined(name):
+            match policy:
+                case UndefinedPolicy.LenientUndefined:
+                    return "null"
+                case _:
+                    raise GlyphTypeError(
+                        GLYPH_EVAL_TYPE,
+                        "cannot serialize undefined variable '" + name + "' to JSON",
+                        span,
+                        "define '" + name + "' or apply |default"
+                    )
+        case Value.VCallable(cname):
+            raise GlyphTypeError(
+                GLYPH_EVAL_TYPE,
+                "cannot serialize callable '" + cname + "' to JSON",
+                span,
+                "pass data values rather than callables to JSON output"
+            )

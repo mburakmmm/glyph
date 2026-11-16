@@ -1,0 +1,53 @@
+# Email multipart rendering helper (Subject CR/LF header-injection protection + HTML + PlainText pair).
+# Enforces AGENTS.md §15 (Email profile). Freestanding-safe; SMTP transport stays in application mailer.
+from glyph.options import OutputMode, RenderOptions
+from glyph.scope import Context
+from glyph.runtime import Template
+from glyph.environment import Environment, render_with_options
+
+class EmailMessage:
+    subject: str
+    html_body: str
+    text_body: str
+
+    def __init__(self: EmailMessage, subject: str, html_body: str, text_body: str) -> None:
+        self.subject = subject
+        self.html_body = html_body
+        self.text_body = text_body
+
+def render_email_pair(
+    subject_tpl: Template,
+    html_tpl: Template,
+    text_tpl: Template,
+    context: Context,
+    base_opts: RenderOptions,
+    env: Environment
+) -> EmailMessage:
+    subj_opts: RenderOptions = RenderOptions(
+        OutputMode.EmailSubject,
+        False,
+        base_opts.undefined_policy,
+        base_opts.trust_tier,
+        base_opts.budget,
+        base_opts.locale
+    )
+    html_opts: RenderOptions = RenderOptions(
+        OutputMode.Html,
+        True,
+        base_opts.undefined_policy,
+        base_opts.trust_tier,
+        base_opts.budget,
+        base_opts.locale
+    )
+    txt_opts: RenderOptions = RenderOptions(
+        OutputMode.Text,
+        False,
+        base_opts.undefined_policy,
+        base_opts.trust_tier,
+        base_opts.budget,
+        base_opts.locale
+    )
+    subj: str = render_with_options(subject_tpl, context, subj_opts, env)
+    html_out: str = render_with_options(html_tpl, context, html_opts, env)
+    text_out: str = render_with_options(text_tpl, context, txt_opts, env)
+    return EmailMessage(subj, html_out, text_out)

@@ -1,6 +1,6 @@
 # Glyph Public API Reference (`docs/api.md`)
 
-> **Version:** `0.5.0` (Phase 7)  
+> **Version:** `0.6.0` (Phase 8)  
 > **Entry Module:** `import glyph.api`  
 > **Stability Legend:** `Stable` (contract frozen in SemVer), `Experimental` (v0.x shape subject to refinement before `v1.0`), `Internal` (implementation detail).
 
@@ -19,7 +19,11 @@
 
 - `render(template: Template, context: Context, env: Environment) -> str` — Renders with default `RenderOptions` derived from `env.options`.
 - `render_with_options(template: Template, context: Context, options: RenderOptions, env: Environment) -> str` — Renders with explicit `RenderOptions` and `ResourceBudget`.
-- `render_to_writer(template: Template, context: Context, writer: GlyphWriter, options: RenderOptions, env: Environment) -> RenderResult` — Streams chunks into a `GlyphWriter` under shared `BudgetTracker`.
+- `render_to_writer(template: Template, context: Context, writer: GlyphWriter, options: RenderOptions, env: Environment) -> RenderResult` — Streams chunks into a buffered or streaming `GlyphWriter` under shared `BudgetTracker`.
+- `streaming_writer(tracker: BudgetTracker, sink_fn: (str) -> bool, cancel_fn: () -> bool, flush_threshold_bytes: int) -> GlyphWriter` — Cooperative cancellation (`GlyphCancelledError`), sink backpressure, batch flush, idempotent `.close()`.
+- `render_email_pair(subject_tpl, html_tpl, text_tpl, context, base_opts, env) -> EmailMessage` — Renders multipart HTML + PlainText + single-line `EmailSubject` with CR/LF/NUL header-injection blocking.
+- `TranslationCatalog`, `LocaleCatalog`, `MissingTranslationPolicy`, `PluralForms`, `default_catalog()` (`env.catalog`, `trans(...)`, `plural(...)`), plus hosted Unicode utilities in `glyph/locale.nox` (`normalize_unicode`, `upper_for_locale`, `lower_for_locale`).
+- `OutputMode` profiles: `Html`, `Text`, `Xml`, `Markdown`, `Json`, `EmailSubject`.
 
 ## 3. Context, Value & Safety (`Experimental` until `v1.0.0`)
 

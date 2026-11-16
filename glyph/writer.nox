@@ -1,12 +1,22 @@
-# Chunk-buffered writer with output byte budget enforcement and RenderResult.
-# Enforces AGENTS.md §8.4: avoids O(n^2) concatenation and bounds total output bytes.
+# Chunk-buffered and streaming GlyphWriter with backpressure, cancellation, and budget enforcement.
+# Enforces AGENTS.md §8.4, §16.3, and ADR-0008. Pure NOX, freestanding-safe.
 import nox.strings
-from glyph.errors import SourceSpan, GlyphRenderError, GLYPH_RENDER_ERROR
+from glyph.errors import SourceSpan, GlyphRenderError, GlyphCancelledError, GLYPH_RENDER_ERROR, GLYPH_CANCELLED
 from glyph.limits import BudgetTracker
+
+DEFAULT_STREAM_FLUSH_BYTES: int = 8192
+
+def _noop_sink(_batch: str) -> bool:
+    return True
+
+def _noop_cancel() -> bool:
+    return False
 
 class RenderResult:
     output: str
     bytes_written: int
+    bytes_flushed: int
+    flush_count: int
     ops_used: int
     loop_steps_used: int
     completed: bool
@@ -21,22 +31,67 @@ class RenderResult:
     ) -> None:
         self.output = output
         self.bytes_written = bytes_written
+        self.bytes_flushed = 0
+        self.flush_count = 0
         self.ops_used = ops_used
         self.loop_steps_used = loop_steps_used
         self.completed = completed
 
 class GlyphWriter:
     chunks: list[str]
+    buffered_bytes: int
     bytes_written: int
+    bytes_flushed: int
+    flush_count: int
+    flush_threshold_bytes: int
+    has_sink: bool
+    sink_fn: (str) -> bool
+    has_cancel: bool
+    cancel_fn: () -> bool
+    partial_failure: bool
     tracker: BudgetTracker
     closed: bool
 
     def __init__(self: GlyphWriter, tracker: BudgetTracker) -> None:
         empty_chunks: list[str] = []
         self.chunks = empty_chunks
+        self.buffered_bytes = 0
         self.bytes_written = 0
+        self.bytes_flushed = 0
+        self.flush_count = 0
+        self.flush_threshold_bytes = DEFAULT_STREAM_FLUSH_BYTES
+        self.has_sink = False
+        self.sink_fn = _noop_sink
+        self.has_cancel = False
+        self.cancel_fn = _noop_cancel
+        self.partial_failure = False
         self.tracker = tracker
         self.closed = False
+
+    def _emit_batch(self: GlyphWriter, span: SourceSpan) -> None:
+        if len(self.chunks) == 0:
+            return
+        batch: str = self.chunks[0]
+        if len(self.chunks) > 1:
+            batch = nox.strings.join(self.chunks, "")
+        if self.has_sink:
+            fn: (str) -> bool = self.sink_fn
+            ok: bool = fn(batch)
+            if not ok:
+                self.partial_failure = True
+                raise GlyphRenderError(
+                    GLYPH_RENDER_ERROR,
+                    "streaming sink rejected chunk batch (backpressure or closed downstream)",
+                    span,
+                    "check sink capacity or abort response cleanly"
+                )
+            self.bytes_flushed = self.bytes_flushed + self.buffered_bytes
+            self.flush_count = self.flush_count + 1
+            empty_c: list[str] = []
+            self.chunks = empty_c
+            self.buffered_bytes = 0
+        else:
+            self.chunks = [batch]
 
     def write(self: GlyphWriter, chunk: str, span: SourceSpan) -> None:
         if self.closed:
@@ -46,27 +101,40 @@ class GlyphWriter:
                 span,
                 "check writer lifecycle"
             )
+        if self.has_cancel:
+            cfn: () -> bool = self.cancel_fn
+            if cfn():
+                self.partial_failure = True
+                raise GlyphCancelledError(
+                    GLYPH_CANCELLED,
+                    "template rendering cancelled via cancellation signal",
+                    span,
+                    "abort caller response cleanly"
+                )
         blen: int = nox.strings.byte_len(chunk)
         if blen == 0:
             return
         self.tracker.consume_output_bytes(blen, span)
         cur: list[str] = self.chunks
         cur.append(chunk)
-        if len(cur) >= 512:
-            merged: str = nox.strings.join(cur, "")
-            self.chunks = [merged]
-        else:
-            self.chunks = cur
+        self.chunks = cur
+        self.buffered_bytes = self.buffered_bytes + blen
         self.bytes_written = self.bytes_written + blen
+        if self.has_sink:
+            if self.buffered_bytes >= self.flush_threshold_bytes or len(cur) >= 512:
+                self._emit_batch(span)
+        else:
+            if len(cur) >= 512:
+                self._emit_batch(span)
 
     def flush(self: GlyphWriter) -> None:
-        if len(self.chunks) > 1:
-            merged: str = nox.strings.join(self.chunks, "")
-            self.chunks = [merged]
+        if self.closed:
+            return
+        self._emit_batch(SourceSpan("<writer>", 1, 1, 0, 0))
 
     def close(self: GlyphWriter) -> None:
         if not self.closed:
-            self.flush()
+            self._emit_batch(SourceSpan("<writer>", 1, 1, 0, 0))
             self.closed = True
 
     def to_string(self: GlyphWriter) -> str:
@@ -75,3 +143,20 @@ class GlyphWriter:
         if len(self.chunks) == 1:
             return self.chunks[0]
         return nox.strings.join(self.chunks, "")
+
+def streaming_writer(
+    tracker: BudgetTracker,
+    sink_fn: (str) -> bool,
+    cancel_fn: () -> bool,
+    flush_threshold_bytes: int
+) -> GlyphWriter:
+    w: GlyphWriter = GlyphWriter(tracker)
+    w.has_sink = True
+    w.sink_fn = sink_fn
+    w.has_cancel = True
+    w.cancel_fn = cancel_fn
+    thresh: int = flush_threshold_bytes
+    if thresh < 1:
+        thresh = 1
+    w.flush_threshold_bytes = thresh
+    return w

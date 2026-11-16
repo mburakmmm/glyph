@@ -17,7 +17,8 @@ from glyph.validate import TemplateInfo
 from glyph.options import OutputMode, RenderOptions, TrustTier, min_trust_tier
 from glyph.scope import RenderScope, make_loop_metadata
 from glyph.writer import GlyphWriter, RenderResult
-from glyph.safety import HtmlContextTracker, OutputContext, render_contextual_value
+from glyph.safety import HtmlContextTracker, OutputContext, render_contextual_value, validate_static_text_for_mode
+from glyph.catalog import TranslationCatalog, default_catalog, interpolate_translation_params
 from glyph.filters_text import FilterArgValue
 from glyph.filters import FilterRegistry, apply_filter_with_context
 from glyph.tests_registry import TestRegistry, apply_test_with_context
@@ -131,6 +132,23 @@ def _empty_chain() -> InheritanceChain:
     empty_m: OrderedDict[str, list[BlockVersion]] = OrderedDict[str, list[BlockVersion]]()
     return InheritanceChain(empty_l, empty_m, TrustTier.Trusted)
 
+def _tracks_markup_context(mode: OutputMode, autoescape: bool) -> bool:
+    if not autoescape:
+        return False
+    match mode:
+        case OutputMode.Html:
+            return True
+        case OutputMode.Xml:
+            return True
+        case _:
+            return False
+
+def _make_render_result(writer: GlyphWriter, tracker: BudgetTracker) -> RenderResult:
+    rr: RenderResult = RenderResult(writer.to_string(), writer.bytes_written, tracker.total_ops_used, tracker.loop_steps_used, True)
+    rr.bytes_flushed = writer.bytes_flushed
+    rr.flush_count = writer.flush_count
+    return rr
+
 class _Evaluator:
     scope: RenderScope
     tracker: BudgetTracker
@@ -151,6 +169,7 @@ class _Evaluator:
     has_caller: bool
     active_caller: CallerClosure
     html_ctx: HtmlContextTracker
+    catalog: TranslationCatalog
 
     def __init__(
         self: _Evaluator,
@@ -172,7 +191,8 @@ class _Evaluator:
         cur_block_idx: int,
         has_caller: bool,
         active_caller: CallerClosure,
-        html_ctx: HtmlContextTracker
+        html_ctx: HtmlContextTracker,
+        catalog: TranslationCatalog
     ) -> None:
         self.scope = scope
         self.tracker = tracker
@@ -193,6 +213,7 @@ class _Evaluator:
         self.has_caller = has_caller
         self.active_caller = active_caller
         self.html_ctx = html_ctx
+        self.catalog = catalog
 
     def _helper_ctx(self: _Evaluator) -> HelperContext:
         return HelperContext(
@@ -351,6 +372,56 @@ class _Evaluator:
             return self.macros.has_namespace(parts[0])
         return self.macros.has_macro(fn_name)
 
+    def _eval_i18n_call(self: _Evaluator, is_plural: bool, args: list[CallArg], span: SourceSpan) -> Value:
+        if (not is_plural and len(args) < 1) or (is_plural and len(args) < 2):
+            if is_plural:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "plural() expects at least (key, count)", span, "use plural('items', n)")
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "trans() expects at least a message key", span, "use trans('key', name=val)")
+        key_val: Value = check_not_undef(self.eval_expr(args[0].value), self.options.undefined_policy, span)
+        key_s: str = ""
+        match key_val:
+            case Value.VStr(ks):
+                key_s = ks
+            case _:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "translation key must be a string", span, "pass a string key")
+        params: OrderedDict[str, Value] = OrderedDict[str, Value]()
+        start_idx: int = 1
+        cnt: int = 0
+        if is_plural:
+            cnt_val: Value = check_not_undef(self.eval_expr(args[1].value), self.options.undefined_policy, span)
+            match cnt_val:
+                case Value.VInt(ci_n):
+                    cnt = ci_n
+                case _:
+                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "plural() count must be an integer", span, "pass an integer count")
+            params.set("count", Value.VInt(cnt))
+            start_idx = 2
+        ai: int = start_idx
+        while ai < len(args):
+            ca: CallArg = args[ai]
+            av: Value = self.eval_expr(ca.value)
+            if len(ca.name) > 0:
+                params.set(ca.name, av)
+            else:
+                match av:
+                    case Value.VMap(mp):
+                        mkeys: list[str] = mp.keys_list()
+                        mi: int = 0
+                        while mi < len(mkeys):
+                            mk: str = mkeys[mi]
+                            if not is_forbidden_key(mk):
+                                params.set(mk, mp.get(mk))
+                            mi = mi + 1
+                    case _:
+                        raise GlyphTypeError(GLYPH_EVAL_TYPE, "trans/plural extra positional argument must be a map or keyword arg", ca.span, "pass key=value or {'key': value}")
+            ai = ai + 1
+        tmpl_msg: str = ""
+        if is_plural:
+            tmpl_msg = self.catalog.resolve_plural(key_s, cnt, self.options.locale, span)
+        else:
+            tmpl_msg = self.catalog.resolve_message(key_s, self.options.locale, span)
+        return Value.VStr(interpolate_translation_params(tmpl_msg, params, self.options.undefined_policy, span))
+
     def _eval_call(
         self: _Evaluator,
         fn_name: str,
@@ -365,6 +436,10 @@ class _Evaluator:
             return self._eval_super(span)
         if fn_name == "caller":
             return self._eval_caller(args, span)
+        if fn_name == "trans" or fn_name == "t":
+            return self._eval_i18n_call(False, args, span)
+        if fn_name == "plural":
+            return self._eval_i18n_call(True, args, span)
         if self._has_macro_target(fn_name):
             mdef: MacroDef = self._resolve_macro_target(fn_name, span)
             m_args: list[MacroCallArg] = []
@@ -439,7 +514,8 @@ class _Evaluator:
             -1,
             with_caller,
             caller_val,
-            HtmlContextTracker()
+            HtmlContextTracker(),
+            self.catalog
         )
 
         # Apply explicit bound args and evaluate remaining default params.
@@ -536,7 +612,8 @@ class _Evaluator:
             self.cur_block_idx,
             False,
             _empty_caller(),
-            HtmlContextTracker()
+            HtmlContextTracker(),
+            self.catalog
         )
         call_ev.exec_stmts(cc.body)
         call_writer.flush()
@@ -586,7 +663,8 @@ class _Evaluator:
             self.cur_block_idx + 1,
             self.has_caller,
             self.active_caller,
-            HtmlContextTracker()
+            HtmlContextTracker(),
+            self.catalog
         )
         self.scope.push_frame()
         sup_ev.exec_stmts(parent_ver.body)
@@ -788,13 +866,10 @@ class _Evaluator:
             self.tracker.consume_op(st.span)
             match st.kind:
                 case StmtKind.SText(txt):
+                    validate_static_text_for_mode(txt, self.options.output_mode, st.span)
                     self.writer.write(txt, st.span)
-                    match self.options.output_mode:
-                        case OutputMode.Html:
-                            if self.options.autoescape:
-                                self.html_ctx.advance_text(txt)
-                        case _:
-                            pass
+                    if _tracks_markup_context(self.options.output_mode, self.options.autoescape):
+                        self.html_ctx.advance_text(txt)
                 case StmtKind.SOutput(expr):
                     val: Value = self.eval_expr(expr)
                     rendered: str = render_contextual_value(
@@ -824,13 +899,9 @@ class _Evaluator:
                         self.scope.push_frame()
                         self.exec_stmts(else_body)
                         self.scope.pop_frame()
-                    match self.options.output_mode:
-                        case OutputMode.Html:
-                            if self.options.autoescape:
-                                if not self.html_ctx.same_state(if_base):
-                                    self.html_ctx.mark_unknown()
-                        case _:
-                            pass
+                    if _tracks_markup_context(self.options.output_mode, self.options.autoescape):
+                        if not self.html_ctx.same_state(if_base):
+                            self.html_ctx.mark_unknown()
                 case StmtKind.SFor(targets, iterable, body, else_body):
                     self._exec_for(targets, iterable, body, else_body, st.span)
                 case StmtKind.SSet(target, val_expr):
@@ -878,7 +949,8 @@ class _Evaluator:
                 0,
                 self.has_caller,
                 self.active_caller,
-                self.html_ctx
+                self.html_ctx,
+                self.catalog
             )
             self.scope.push_frame()
             blk_ev.exec_stmts(ver.body)
@@ -887,13 +959,9 @@ class _Evaluator:
             self.scope.push_frame()
             self.exec_stmts(default_body)
             self.scope.pop_frame()
-        match self.options.output_mode:
-            case OutputMode.Html:
-                if self.options.autoescape:
-                    if not self.html_ctx.same_state(blk_base):
-                        self.html_ctx.mark_unknown()
-            case _:
-                pass
+        if _tracks_markup_context(self.options.output_mode, self.options.autoescape):
+            if not self.html_ctx.same_state(blk_base):
+                self.html_ctx.mark_unknown()
 
     def _exec_macro_def(
         self: _Evaluator,
@@ -953,7 +1021,8 @@ class _Evaluator:
             -1,
             False,
             _empty_caller(),
-            HtmlContextTracker()
+            HtmlContextTracker(),
+            self.catalog
         )
         imp_ev.exec_declarations_only(imp_tpl.ast.body)
         self.tracker.exit_include()
@@ -1027,13 +1096,9 @@ class _Evaluator:
                         self.scope.push_frame()
                         self.exec_stmts(else_body)
                         self.scope.pop_frame()
-                        match self.options.output_mode:
-                            case OutputMode.Html:
-                                if self.options.autoescape:
-                                    if not self.html_ctx.same_state(loop_base):
-                                        self.html_ctx.mark_unknown()
-                            case _:
-                                pass
+                        if _tracks_markup_context(self.options.output_mode, self.options.autoescape):
+                            if not self.html_ctx.same_state(loop_base):
+                                self.html_ctx.mark_unknown()
                     return
                 idx: int = 0
                 while idx < n:
@@ -1043,13 +1108,9 @@ class _Evaluator:
                     self.scope.set_local("loop", make_loop_metadata(idx, n), span)
                     self.exec_stmts(body)
                     self.scope.pop_frame()
-                    match self.options.output_mode:
-                        case OutputMode.Html:
-                            if self.options.autoescape:
-                                if not self.html_ctx.same_state(loop_base):
-                                    self.html_ctx.mark_unknown()
-                        case _:
-                            pass
+                    if _tracks_markup_context(self.options.output_mode, self.options.autoescape):
+                        if not self.html_ctx.same_state(loop_base):
+                            self.html_ctx.mark_unknown()
                     idx = idx + 1
             case Value.VMap(entries):
                 keys: list[str] = entries.keys_list()
@@ -1059,13 +1120,9 @@ class _Evaluator:
                         self.scope.push_frame()
                         self.exec_stmts(else_body)
                         self.scope.pop_frame()
-                        match self.options.output_mode:
-                            case OutputMode.Html:
-                                if self.options.autoescape:
-                                    if not self.html_ctx.same_state(loop_base):
-                                        self.html_ctx.mark_unknown()
-                            case _:
-                                pass
+                        if _tracks_markup_context(self.options.output_mode, self.options.autoescape):
+                            if not self.html_ctx.same_state(loop_base):
+                                self.html_ctx.mark_unknown()
                     return
                 kidx: int = 0
                 while kidx < kn:
@@ -1082,13 +1139,9 @@ class _Evaluator:
                     self.scope.set_local("loop", make_loop_metadata(kidx, kn), span)
                     self.exec_stmts(body)
                     self.scope.pop_frame()
-                    match self.options.output_mode:
-                        case OutputMode.Html:
-                            if self.options.autoescape:
-                                if not self.html_ctx.same_state(loop_base):
-                                    self.html_ctx.mark_unknown()
-                        case _:
-                            pass
+                    if _tracks_markup_context(self.options.output_mode, self.options.autoescape):
+                        if not self.html_ctx.same_state(loop_base):
+                            self.html_ctx.mark_unknown()
                     kidx = kidx + 1
             case _:
                 raise GlyphTypeError(GLYPH_EVAL_TYPE, "for-loop iterable must be a list or map", span, "iterate over a list or map")
@@ -1100,22 +1153,18 @@ class _Evaluator:
         ignore_missing: bool,
         span: SourceSpan
     ) -> None:
-        match self.options.output_mode:
-            case OutputMode.Html:
-                if self.options.autoescape:
-                    cur_octx: OutputContext = self.html_ctx.current_output_context()
-                    match cur_octx:
-                        case OutputContext.HtmlText:
-                            pass
-                        case _:
-                            raise GlyphSecurityError(
-                                GLYPH_SECURITY_CONTEXT,
-                                "{% include %} is only allowed in HTML text context",
-                                span,
-                                "move {% include %} outside HTML tags, attributes, comments, or <script>/<style> blocks"
-                            )
-            case _:
-                pass
+        if _tracks_markup_context(self.options.output_mode, self.options.autoescape):
+            cur_octx: OutputContext = self.html_ctx.current_output_context()
+            match cur_octx:
+                case OutputContext.HtmlText:
+                    pass
+                case _:
+                    raise GlyphSecurityError(
+                        GLYPH_SECURITY_CONTEXT,
+                        "{% include %} is only allowed in text content context",
+                        span,
+                        "move {% include %} outside tags, attributes, comments, or <script>/<style> blocks"
+                    )
         is_literal: bool = False
         match tpl_expr.kind:
             case ExprKind.EStr(_):
@@ -1211,16 +1260,13 @@ class _Evaluator:
             -1,
             False,
             _empty_caller(),
-            HtmlContextTracker()
+            HtmlContextTracker(),
+            self.catalog
         )
         child_ev.exec_stmts(child_tpl.ast.body)
-        match self.options.output_mode:
-            case OutputMode.Html:
-                if self.options.autoescape:
-                    if not child_ev.html_ctx.same_state(child_inc_base):
-                        self.html_ctx.mark_unknown()
-            case _:
-                pass
+        if _tracks_markup_context(self.options.output_mode, self.options.autoescape):
+            if not child_ev.html_ctx.same_state(child_inc_base):
+                self.html_ctx.mark_unknown()
         self.tracker.exit_include()
 
 def _noop_resolve(name: str, _tr: BudgetTracker) -> Template:
@@ -1268,7 +1314,8 @@ def _execute_unlocked(
     options: RenderOptions,
     allow_dynamic_include: bool,
     has_resolver: bool,
-    resolve_fn: (str, BudgetTracker) -> Template
+    resolve_fn: (str, BudgetTracker) -> Template,
+    catalog: TranslationCatalog
 ) -> RenderResult:
     if tpl.ast.has_extends:
         layers: list[TemplateLayer] = _build_chain_layers(tpl, tracker, has_resolver, resolve_fn)
@@ -1303,7 +1350,8 @@ def _execute_unlocked(
             -1,
             False,
             _empty_caller(),
-            HtmlContextTracker()
+            HtmlContextTracker(),
+            catalog
         )
         # Execute top-level declarations from base down to leaf child (so child overrides base declarations),
         # then execute the root layout body with block dispatch.
@@ -1314,7 +1362,7 @@ def _execute_unlocked(
         root_layer: TemplateLayer = layers[len(layers) - 1]
         ev.exec_stmts(root_layer.ast.body)
         writer.flush()
-        return RenderResult(writer.to_string(), writer.bytes_written, tracker.total_ops_used, tracker.loop_steps_used, True)
+        return _make_render_result(writer, tracker)
 
     eff_trust2: TrustTier = min_trust_tier(tpl.trust_tier, options.trust_tier)
     eff_opts2: RenderOptions = _opts_with_trust(options, eff_trust2)
@@ -1340,19 +1388,14 @@ def _execute_unlocked(
         -1,
         False,
         _empty_caller(),
-        HtmlContextTracker()
+        HtmlContextTracker(),
+        catalog
     )
     ev2.exec_stmts(tpl.ast.body)
     writer.flush()
-    return RenderResult(
-        writer.to_string(),
-        writer.bytes_written,
-        tracker.total_ops_used,
-        tracker.loop_steps_used,
-        True
-    )
+    return _make_render_result(writer, tracker)
 
-def execute_template_with_resolver(
+def execute_template_with_catalog(
     tpl: Template,
     root_vars: OrderedDict[str, Value],
     writer: GlyphWriter,
@@ -1363,7 +1406,8 @@ def execute_template_with_resolver(
     options: RenderOptions,
     allow_dynamic_include: bool,
     has_resolver: bool,
-    resolve_fn: (str, BudgetTracker) -> Template
+    resolve_fn: (str, BudgetTracker) -> Template,
+    catalog: TranslationCatalog
 ) -> RenderResult:
     filters.begin_use()
     tests.begin_use()
@@ -1381,7 +1425,8 @@ def execute_template_with_resolver(
             options,
             allow_dynamic_include,
             has_resolver,
-            resolve_fn
+            resolve_fn,
+            catalog
         )
     except Exception as err:
         filters.end_use()
@@ -1392,6 +1437,34 @@ def execute_template_with_resolver(
     tests.end_use()
     functions.end_use()
     return res
+
+def execute_template_with_resolver(
+    tpl: Template,
+    root_vars: OrderedDict[str, Value],
+    writer: GlyphWriter,
+    tracker: BudgetTracker,
+    filters: FilterRegistry,
+    tests: TestRegistry,
+    functions: FunctionRegistry,
+    options: RenderOptions,
+    allow_dynamic_include: bool,
+    has_resolver: bool,
+    resolve_fn: (str, BudgetTracker) -> Template
+) -> RenderResult:
+    return execute_template_with_catalog(
+        tpl,
+        root_vars,
+        writer,
+        tracker,
+        filters,
+        tests,
+        functions,
+        options,
+        allow_dynamic_include,
+        has_resolver,
+        resolve_fn,
+        default_catalog()
+    )
 
 def execute_template(
     tpl: Template,

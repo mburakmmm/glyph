@@ -1,0 +1,283 @@
+# Phase 8 Test Suite: i18n/Locale Catalog, Output Profiles (HTML/Text/XML/Markdown/Json/Email), and Streaming GlyphWriter.
+import nox.test
+import nox.strings
+from nox.collections import OrderedDict
+import glyph.api
+import glyph.locale
+from glyph.api import Value, MemoryLoader, Environment, EnvironmentOptions, RenderOptions, Template, Context
+from glyph.api import TrustTier, OutputMode, UndefinedPolicy, ResourceBudget, BudgetTracker
+from glyph.api import GlyphWriter, RenderResult, TranslationCatalog, MissingTranslationPolicy, EmailMessage
+from glyph.api import GlyphSecurityError, GlyphUndefinedError, GlyphLimitError, GlyphRenderError, GlyphCancelledError
+from glyph.errors import GLYPH_SECURITY_CONTEXT, GLYPH_EVAL_UNDEFINED, GLYPH_LIMIT_OUTPUT_BYTES, GLYPH_RENDER_ERROR, GLYPH_CANCELLED, SourceSpan
+
+def _assert_s(got: str, exp: str, label: str) -> None:
+    if got != exp:
+        print("MISMATCH [" + label + "] got=[" + got + "] expected=[" + exp + "]")
+    nox.test.assert_eq_str(got, exp, label)
+
+def test_i18n_catalog_fallback_plural_and_xss_escaping() -> None:
+    mem: MemoryLoader = MemoryLoader()
+    mem.put("greet.html", "<p>{{ trans('welcome', name=user) }}</p><span>{{ plural('items', n) }}</span>")
+    env: Environment = glyph.api.default_environment(mem)
+    env.catalog.add("en", "welcome", "Hello {name}!")
+    env.catalog.add("tr", "welcome", "Merhaba {name}!")
+    env.catalog.add_plural("en", "items", "{count} item", "{count} items")
+    env.catalog.add_plural_with_zero("tr", "items", "Öğe yok", "{count} öğe", "{count} öğe")
+
+    # 1. Exact/fallback locale chain: tr-TR -> tr
+    opts_tr: RenderOptions = glyph.api.default_render_options(env.options)
+    opts_tr.locale = "tr-TR"
+    ctx_xss: Context = glyph.api.context_from_json('{"user":"<script>alert(1)</script>","n":0}')
+    out_tr: str = glyph.api.render_with_options(glyph.api.get_template("greet.html", env), ctx_xss, opts_tr, env)
+    _assert_s(
+        out_tr,
+        "<p>Merhaba &lt;script&gt;alert(1)&lt;/script&gt;!</p><span>Öğe yok</span>",
+        "tr-TR falls back to tr and HTML-escapes translated parameter"
+    )
+
+    # 2. Poisoned catalog translation itself is NOT promoted to TrustedMarkup
+    env.catalog.add("en", "evil_msg", "<img src=x onerror=1>{name}")
+    opts_en: RenderOptions = glyph.api.default_render_options(env.options)
+    opts_en.locale = "en-US"
+    tpl_evil: Template = glyph.api.compile_string("<div>{{ trans('evil_msg', {'name': user}) }}</div>", "ev.html", env)
+    _assert_s(
+        glyph.api.render_with_options(tpl_evil, glyph.api.context_from_json('{"user":"<b>"}'), opts_en, env),
+        "<div>&lt;img src=x onerror=1&gt;&lt;b&gt;</div>",
+        "catalog translation text is HTML-escaped"
+    )
+
+    # 3. French plural rule (0 & 1 -> one) and English plural rule (1 -> one, 0/2 -> other)
+    env.catalog.add_plural("fr", "items", "{count} élément", "{count} éléments")
+    opts_fr: RenderOptions = glyph.api.default_render_options(env.options)
+    opts_fr.locale = "fr-FR"
+    _assert_s(
+        glyph.api.render_with_options(glyph.api.compile_string("{{ plural('items', n) }}", "fr.html", env), glyph.api.context_from_json('{"n":0}'), opts_fr, env),
+        "0 élément",
+        "French plural treats 0 as singular 'one'"
+    )
+    _assert_s(
+        glyph.api.render_with_options(glyph.api.compile_string("{{ plural('items', n) }}", "enp.html", env), glyph.api.context_from_json('{"n":2}'), opts_en, env),
+        "2 items",
+        "English plural 2 -> other"
+    )
+
+    # 4. Strict missing translation policy fails closed
+    env.catalog.missing_policy = MissingTranslationPolicy.Strict
+    miss_code: str = ""
+    try:
+        _rm: str = glyph.api.render_with_options(glyph.api.compile_string("{{ trans('missing.key') }}", "miss.html", env), glyph.api.empty_context(), opts_en, env)
+    except GlyphUndefinedError as ue:
+        miss_code = ue.code
+    _assert_s(miss_code, GLYPH_EVAL_UNDEFINED, "Strict missing translation policy fails closed")
+
+    # 5. Catalog version updates cache key cleanly (no stale cache pollution)
+    mem.put("ver.html", "{{ trans('welcome', name='Ada') }}")
+    opts_en_base: RenderOptions = glyph.api.default_render_options(env.options)
+    opts_en_base.locale = "en"
+    _t1: Template = glyph.api.get_template("ver.html", env)
+    v1: int = env.catalog.version
+    env.catalog.add("en", "welcome", "Welcome back, {name}!")
+    nox.test.assert_true(env.catalog.version > v1, "catalog mutation increments version")
+    _assert_s(
+        glyph.api.render_with_options(glyph.api.get_template("ver.html", env), glyph.api.empty_context(), opts_en_base, env),
+        "Welcome back, Ada!",
+        "catalog version included in CompileCache key"
+    )
+
+def test_hosted_unicode_locale_utilities() -> None:
+    sp: SourceSpan = SourceSpan("<locale-test>", 1, 1, 0, 0)
+    # Combining e + acute (e + \u0301) -> NFC single codepoint
+    e_comb: str = "e" + nox.strings.char_from_byte(204) + nox.strings.char_from_byte(129)
+    nfc: str = glyph.locale.normalize_unicode(e_comb, "NFC", sp)
+    nox.test.assert_eq_int(len(nfc), 1, "hosted Unicode NFC composes combining mark to 1 codepoint")
+    nox.test.assert_true(glyph.locale.is_normalized(nfc, "NFC", sp), "NFC verified normalized")
+    _assert_s(glyph.locale.upper_for_locale("istanbul", "tr-TR"), "İSTANBUL", "hosted upper_for_locale Turkish")
+    _assert_s(glyph.locale.lower_for_locale("İSTANBUL", "tr-TR"), "istanbul", "hosted lower_for_locale Turkish")
+
+def test_output_profiles_xml_markdown_json_email() -> None:
+    mem: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(mem)
+
+    # 1. XML mode: entity escaping + dynamic tag/attr rejection + illegal control char rejection + SafeHtml escaped
+    xml_opts: RenderOptions = RenderOptions(OutputMode.Xml, True, UndefinedPolicy.StrictUndefined, TrustTier.Trusted, glyph.api.default_budget(), "en")
+    xml_ok: Template = glyph.api.compile_string("<note id=\"{{ id }}\">{{ body }}</note>", "n.xml", env)
+    xml_m: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    xml_m.set("id", Value.VStr("a\"&b"))
+    xml_m.set("body", glyph.api.trust_html_fragment("<raw>hi</raw>"))
+    _assert_s(
+        glyph.api.render_with_options(xml_ok, Context(xml_m), xml_opts, env),
+        "<note id=\"a&quot;&amp;b\">&lt;raw&gt;hi&lt;/raw&gt;</note>",
+        "XML escapes both attribute & SafeHtml body"
+    )
+
+    xml_bad_tag: str = ""
+    try:
+        _rx: str = glyph.api.render_with_options(glyph.api.compile_string("<{{ tag }}>x</tag>", "xt.xml", env), glyph.api.context_from_json('{"tag":"node"}'), xml_opts, env)
+    except GlyphSecurityError as se1:
+        xml_bad_tag = se1.code
+    _assert_s(xml_bad_tag, GLYPH_SECURITY_CONTEXT, "XML rejects dynamic tag name")
+
+    xml_bad_ctl: str = ""
+    ctl_m: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    ctl_m.set("v", Value.VStr("a" + nox.strings.char_from_byte(7) + "b"))
+    try:
+        _rx2: str = glyph.api.render_with_options(glyph.api.compile_string("<v>{{ v }}</v>", "xc.xml", env), Context(ctl_m), xml_opts, env)
+    except GlyphSecurityError as se2:
+        xml_bad_ctl = se2.code
+    _assert_s(xml_bad_ctl, GLYPH_SECURITY_CONTEXT, "XML rejects illegal control byte")
+
+    # 2. Markdown mode: literal syntax + explicit md_escape
+    md_opts: RenderOptions = RenderOptions(OutputMode.Markdown, False, UndefinedPolicy.StrictUndefined, TrustTier.Trusted, glyph.api.default_budget(), "en")
+    md_tpl: Template = glyph.api.compile_string("# {{ title }}\nHello {{ name | md_escape }}!", "doc.md", env)
+    _assert_s(
+        glyph.api.render_with_options(md_tpl, glyph.api.context_from_json('{"title":"Title","name":"*Ada*"}'), md_opts, env),
+        "# Title\nHello \\*Ada\\*!",
+        "Markdown mode preserves syntax and supports md_escape"
+    )
+
+    # 3. JSON mode: prevents string breakout even on unquoted {{ name }} inside JSON
+    json_opts: RenderOptions = RenderOptions(OutputMode.Json, True, UndefinedPolicy.StrictUndefined, TrustTier.Trusted, glyph.api.default_budget(), "en")
+    json_tpl: Template = glyph.api.compile_string('{"user":{{ name }},"n":{{ n }},"meta":{{ meta | tojson }}}', "p.json", env)
+    _assert_s(
+        glyph.api.render_with_options(json_tpl, glyph.api.context_from_json('{"name":"A\\"B\\nC","n":7,"meta":{"ok":true}}'), json_opts, env),
+        '{"user":"A\\"B\\nC","n":7,"meta":{"ok":true}}',
+        "JSON mode escapes injected quotes/newlines cleanly"
+    )
+
+    # 4. Email pair + Subject CR/LF injection protection
+    mem.put("s.txt", "Order for {{ name }}")
+    mem.put("b.html", "<p>{{ name }}</p>")
+    mem.put("b.txt", "Order: {{ name }}")
+    base_opts: RenderOptions = glyph.api.default_render_options(env.options)
+    em: EmailMessage = glyph.api.render_email_pair(
+        glyph.api.get_template("s.txt", env),
+        glyph.api.get_template("b.html", env),
+        glyph.api.get_template("b.txt", env),
+        glyph.api.context_from_json('{"name":"<Ada>"}'),
+        base_opts,
+        env
+    )
+    _assert_s(em.subject, "Order for <Ada>", "EmailMessage subject rendered cleanly")
+    _assert_s(em.html_body, "<p>&lt;Ada&gt;</p>", "EmailMessage HTML body escaped")
+    _assert_s(em.text_body, "Order: <Ada>", "EmailMessage PlainText body unescaped")
+
+    hdr_inj: str = ""
+    try:
+        _bad_em: EmailMessage = glyph.api.render_email_pair(
+            glyph.api.get_template("s.txt", env),
+            glyph.api.get_template("b.html", env),
+            glyph.api.get_template("b.txt", env),
+            glyph.api.context_from_json('{"name":"Ada\\r\\nBcc: evil@attacker.test"}'),
+            base_opts,
+            env
+        )
+    except GlyphSecurityError as se3:
+        hdr_inj = se3.code
+    _assert_s(hdr_inj, GLYPH_SECURITY_CONTEXT, "EmailSubject blocks CR/LF header injection")
+
+def _never_cancel() -> bool:
+    return False
+
+def _reject_sink(_batch: str) -> bool:
+    return False
+
+def _discard_sink(_batch: str) -> bool:
+    return True
+
+class _StreamProbe:
+    chunks: list[str]
+    cancel_after: int
+    checks: int
+
+    def __init__(self: _StreamProbe, cancel_after: int) -> None:
+        empty_c: list[str] = []
+        self.chunks = empty_c
+        self.cancel_after = cancel_after
+        self.checks = 0
+
+    def push_chunk(self: _StreamProbe, batch: str) -> bool:
+        c: list[str] = self.chunks
+        c.append(batch)
+        self.chunks = c
+        return True
+
+    def check_cancel(self: _StreamProbe) -> bool:
+        self.checks = self.checks + 1
+        return self.cancel_after > 0 and self.checks > self.cancel_after
+
+def test_streaming_writer_parity_backpressure_cancel_and_limits() -> None:
+    mem: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(mem)
+    tpl: Template = glyph.api.compile_string("<ul>{% for i in range(60) %}<li>{{ i }}-<b>x</b></li>{% endfor %}</ul>", "stream.html", env)
+    opts: RenderOptions = glyph.api.default_render_options(env.options)
+
+    # 1. Exact byte-for-byte parity between buffered and streamed rendering
+    buffered_out: str = glyph.api.render_with_options(tpl, glyph.api.empty_context(), opts, env)
+
+    probe: _StreamProbe = _StreamProbe(0)
+    def _collect_sink(batch: str) -> bool:
+        return probe.push_chunk(batch)
+
+    tr: BudgetTracker = BudgetTracker(opts.budget)
+    sw: GlyphWriter = glyph.api.streaming_writer(tr, _collect_sink, _never_cancel, 128)
+    sres: RenderResult = glyph.api.render_to_writer(tpl, glyph.api.empty_context(), sw, opts, env)
+    sw.close()
+    # Idempotent second close must NOT emit duplicate batches or fail
+    sw.close()
+
+    streamed_out: str = nox.strings.join(probe.chunks, "")
+    _assert_s(streamed_out, buffered_out, "streamed output matches buffered output byte-for-byte")
+    nox.test.assert_true(sw.flush_count >= 2, "streaming writer flushes in batches")
+    nox.test.assert_eq_int(sw.bytes_flushed, nox.strings.byte_len(buffered_out), "all bytes accounted in bytes_flushed")
+
+    # 2. Write after close raises GlyphRenderError
+    closed_err: str = ""
+    try:
+        sw.write("late", SourceSpan("t", 1, 1, 0, 0))
+    except GlyphRenderError as re:
+        closed_err = re.code
+    _assert_s(closed_err, GLYPH_RENDER_ERROR, "write after close fails closed")
+
+    # 3. Backpressure rejection (sink returning False)
+    tr2: BudgetTracker = BudgetTracker(opts.budget)
+    sw_bp: GlyphWriter = glyph.api.streaming_writer(tr2, _reject_sink, _never_cancel, 64)
+    bp_err: str = ""
+    try:
+        _r2: RenderResult = glyph.api.render_to_writer(tpl, glyph.api.empty_context(), sw_bp, opts, env)
+    except GlyphRenderError as re2:
+        bp_err = re2.code
+    _assert_s(bp_err, GLYPH_RENDER_ERROR, "streaming backpressure rejection raises GlyphRenderError")
+    nox.test.assert_true(sw_bp.partial_failure, "partial_failure recorded on sink abort")
+
+    # 4. Cancellation signal raises GlyphCancelledError mid-stream
+    probe_can: _StreamProbe = _StreamProbe(5)
+    def _cancel_after_five() -> bool:
+        return probe_can.check_cancel()
+    tr3: BudgetTracker = BudgetTracker(opts.budget)
+    sw_can: GlyphWriter = glyph.api.streaming_writer(tr3, _collect_sink, _cancel_after_five, 64)
+    can_err: str = ""
+    try:
+        _r3: RenderResult = glyph.api.render_to_writer(tpl, glyph.api.empty_context(), sw_can, opts, env)
+    except GlyphCancelledError as ce:
+        can_err = ce.code
+    _assert_s(can_err, GLYPH_CANCELLED, "cancellation triggers GlyphCancelledError mid-stream")
+
+    # 5. Output byte limit (16 MiB default cap verified on streaming sink)
+    big_chunk: str = nox.strings.repeat("A", 1048576)
+    tr_big: BudgetTracker = BudgetTracker(glyph.api.default_budget())
+    sw_big: GlyphWriter = glyph.api.streaming_writer(tr_big, _discard_sink, _never_cancel, 1048576)
+    big_limit_err: str = ""
+    bi: int = 0
+    try:
+        while bi < 17:
+            sw_big.write(big_chunk, SourceSpan("<stress>", 1, 1, 0, 0))
+            bi = bi + 1
+    except GlyphLimitError as le:
+        big_limit_err = le.code
+    _assert_s(big_limit_err, GLYPH_LIMIT_OUTPUT_BYTES, "16 MiB streaming output limit enforced cleanly")
+    nox.test.assert_eq_int(sw_big.bytes_flushed, 16 * 1048576, "exactly 16 MiB flushed before 17th write rejected")
+
+test_i18n_catalog_fallback_plural_and_xss_escaping()
+test_hosted_unicode_locale_utilities()
+test_output_profiles_xml_markdown_json_email()
+test_streaming_writer_parity_backpressure_cancel_and_limits()

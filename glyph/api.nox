@@ -24,9 +24,11 @@ import glyph.tests_registry
 import glyph.functions
 import glyph.loader
 import glyph.loader_memory
+import glyph.catalog
 import glyph.runtime
 import glyph.cache
 import glyph.environment
+import glyph.email
 
 from glyph.errors import SourceSpan, RelatedSpan
 from glyph.errors import GlyphError, GlyphSyntaxError, GlyphUndefinedError, GlyphTypeError
@@ -49,9 +51,11 @@ from glyph.tests_registry import TestRegistry
 from glyph.functions import FunctionRegistry
 from glyph.loader import SourceRecord, Loader, ChoiceLoader, PrefixLoader
 from glyph.loader_memory import MemoryLoader
+from glyph.catalog import MissingTranslationPolicy, PluralForms, LocaleCatalog, TranslationCatalog
 from glyph.runtime import Template
 from glyph.cache import DepFingerprint, ParseCache, CompileCacheEntry, CompileCache
 from glyph.environment import Environment
+from glyph.email import EmailMessage
 
 def engine_version() -> str:
     return glyph.version.version()
@@ -152,3 +156,24 @@ def builtin_test_specs() -> list[TestSpec]:
 
 def builtin_function_specs() -> list[FunctionSpec]:
     return glyph.functions.builtin_function_specs()
+
+def streaming_writer(
+    tracker: BudgetTracker,
+    sink_fn: (str) -> bool,
+    cancel_fn: () -> bool,
+    flush_threshold_bytes: int
+) -> GlyphWriter:
+    return glyph.writer.streaming_writer(tracker, sink_fn, cancel_fn, flush_threshold_bytes)
+
+def default_catalog() -> TranslationCatalog:
+    return glyph.catalog.default_catalog()
+
+def render_email_pair(
+    subject_tpl: Template,
+    html_tpl: Template,
+    text_tpl: Template,
+    context: Context,
+    base_opts: RenderOptions,
+    env: Environment
+) -> EmailMessage:
+    return glyph.email.render_email_pair(subject_tpl, html_tpl, text_tpl, context, base_opts, env)

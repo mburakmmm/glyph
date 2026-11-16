@@ -2,7 +2,7 @@
 # Enforces AGENTS.md §2.3-2.5, §10.1-10.4 and ADR-0003, ADR-0004. Pure NOX, freestanding-safe.
 import nox.strings
 from glyph.errors import SourceSpan, GlyphSecurityError, GLYPH_SECURITY_CONTEXT
-from glyph.value import Value, MarkupContext, UndefinedPolicy, stringify
+from glyph.value import Value, MarkupContext, UndefinedPolicy, stringify, value_to_json_raw
 from glyph.options import OutputMode, TrustTier
 
 enum OutputContext:
@@ -583,6 +583,43 @@ class HtmlContextTracker:
 def _is_trusted_ctx_for(mctx: MarkupContext, expected: MarkupContext) -> bool:
     return mctx == expected
 
+def _validate_xml_chars(text: str, span: SourceSpan) -> None:
+    blen: int = nox.strings.byte_len(text)
+    i: int = 0
+    while i < blen:
+        b: int = nox.strings.byte_at(text, i)
+        if b < 32 and b != 9 and b != 10 and b != 13:
+            raise GlyphSecurityError(
+                GLYPH_SECURITY_CONTEXT,
+                "illegal XML 1.0 control byte (" + str(b) + ") forbidden in XML output",
+                span,
+                "strip ASCII control characters before XML output"
+            )
+        i = i + 1
+
+def _validate_email_subject(text: str, span: SourceSpan) -> None:
+    blen: int = nox.strings.byte_len(text)
+    i: int = 0
+    while i < blen:
+        b: int = nox.strings.byte_at(text, i)
+        if b == 0 or b == 10 or b == 13:
+            raise GlyphSecurityError(
+                GLYPH_SECURITY_CONTEXT,
+                "CR/LF/NUL control characters are forbidden in EmailSubject output (header injection blocked)",
+                span,
+                "render single-line email subjects without newline characters"
+            )
+        i = i + 1
+
+def validate_static_text_for_mode(text: str, mode: OutputMode, span: SourceSpan) -> None:
+    match mode:
+        case OutputMode.Xml:
+            _validate_xml_chars(text, span)
+        case OutputMode.EmailSubject:
+            _validate_email_subject(text, span)
+        case _:
+            pass
+
 def render_contextual_value(
     val: Value,
     autoescape: bool,
@@ -597,8 +634,41 @@ def render_contextual_value(
             return stringify(val, policy, span)
         case OutputMode.Markdown:
             return stringify(val, policy, span)
+        case OutputMode.EmailSubject:
+            sub_s: str = stringify(val, policy, span)
+            _validate_email_subject(sub_s, span)
+            return sub_s
+        case OutputMode.Json:
+            match val:
+                case Value.VTrustedMarkup(js_raw, jctx):
+                    if jctx == MarkupContext.SafeJs:
+                        return js_raw
+                    return value_to_json_raw(val, policy, 0, span)
+                case _:
+                    return value_to_json_raw(val, policy, 0, span)
         case OutputMode.Xml:
-            return escape_html_with_span(stringify(val, policy, span), span)
+            if not autoescape:
+                raw_x: str = stringify(val, policy, span)
+                _validate_xml_chars(raw_x, span)
+                return raw_x
+            xctx: OutputContext = tracker.current_output_context()
+            match xctx:
+                case OutputContext.HtmlTagOrAttrName:
+                    raise GlyphSecurityError(GLYPH_SECURITY_CONTEXT, "dynamic XML tag or attribute names are forbidden", span, "use static XML tag and attribute names")
+                case OutputContext.HtmlAttributeUnquoted:
+                    raise GlyphSecurityError(GLYPH_SECURITY_CONTEXT, "unquoted XML attribute interpolation is forbidden", span, "quote all XML attribute values")
+                case OutputContext.Unknown:
+                    raise GlyphSecurityError(GLYPH_SECURITY_CONTEXT, "ambiguous XML output context (fail-closed)", span, "ensure well-formed XML structure around expressions")
+                case OutputContext.HtmlComment:
+                    xs_c: str = stringify(val, policy, span)
+                    _validate_xml_chars(xs_c, span)
+                    if nox.strings.contains(xs_c, "--") or nox.strings.contains(xs_c, ">"):
+                        raise GlyphSecurityError(GLYPH_SECURITY_CONTEXT, "XML comment breakout sequence is forbidden", span, "avoid '--' and '>' inside XML comments")
+                    return escape_html_with_span(xs_c, span)
+                case _:
+                    xs: str = stringify(val, policy, span)
+                    _validate_xml_chars(xs, span)
+                    return escape_html_with_span(xs, span)
         case OutputMode.Html:
             if not autoescape:
                 return stringify(val, policy, span)

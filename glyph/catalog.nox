@@ -1,0 +1,252 @@
+# Deterministic i18n TranslationCatalog, fallback chain, plural rules, and parameter interpolation for Glyph (Phase 8).
+# Enforces AGENTS.md §14, ADR-0009, and pure-memory portability (freestanding-safe; no OS clock/env access).
+import nox.strings
+from nox.collections import OrderedDict
+from glyph.errors import SourceSpan, GlyphUndefinedError, GlyphTypeError, GLYPH_EVAL_UNDEFINED, GLYPH_EVAL_TYPE
+from glyph.value import Value, UndefinedPolicy, check_not_undef, stringify
+
+enum MissingTranslationPolicy:
+    Strict
+    FallbackKey
+
+class PluralForms:
+    one: str
+    other: str
+    has_zero: bool
+    zero: str
+
+    def __init__(self: PluralForms, one: str, other: str) -> None:
+        self.one = one
+        self.other = other
+        self.has_zero = False
+        self.zero = ""
+
+class LocaleCatalog:
+    messages: OrderedDict[str, str]
+    plurals: OrderedDict[str, PluralForms]
+
+    def __init__(self: LocaleCatalog) -> None:
+        msgs: OrderedDict[str, str] = OrderedDict[str, str]()
+        pls: OrderedDict[str, PluralForms] = OrderedDict[str, PluralForms]()
+        self.messages = msgs
+        self.plurals = pls
+
+    def set_message(self: LocaleCatalog, key: str, text: str) -> None:
+        m: OrderedDict[str, str] = self.messages
+        m.set(key, text)
+        self.messages = m
+
+    def set_plural(self: LocaleCatalog, key: str, one: str, other: str) -> None:
+        p: OrderedDict[str, PluralForms] = self.plurals
+        p.set(key, PluralForms(one, other))
+        self.plurals = p
+
+    def set_plural_zero(self: LocaleCatalog, key: str, zero: str, one: str, other: str) -> None:
+        pf: PluralForms = PluralForms(one, other)
+        pf.has_zero = True
+        pf.zero = zero
+        p: OrderedDict[str, PluralForms] = self.plurals
+        p.set(key, pf)
+        self.plurals = p
+
+def _norm_locale_tag(loc: str) -> str:
+    return nox.strings.replace(nox.strings.trim(loc), "_", "-")
+
+def locale_fallback_chain(locale: str, default_locale: str) -> list[str]:
+    out: list[str] = []
+    norm_loc: str = _norm_locale_tag(locale)
+    norm_def: str = _norm_locale_tag(default_locale)
+    if len(norm_loc) > 0:
+        out.append(norm_loc)
+        dash: int = nox.strings.index_of(norm_loc, "-")
+        if dash > 0:
+            base: str = norm_loc[0:dash]
+            if base != norm_loc:
+                out.append(base)
+    if len(norm_def) > 0:
+        already: bool = False
+        i: int = 0
+        while i < len(out):
+            if out[i] == norm_def:
+                already = True
+            i = i + 1
+        if not already:
+            out.append(norm_def)
+    return out
+
+# Data-driven plural rule selection (ADR-0009: documented finite rule table, not claiming full CLDR/ICU).
+def plural_category(locale: str, count: int) -> str:
+    ll: str = nox.strings.lower(_norm_locale_tag(locale))
+    base: str = ll
+    dash: int = nox.strings.index_of(ll, "-")
+    if dash > 0:
+        base = ll[0:dash]
+    if count == 0:
+        if base == "fr":
+            return "one"
+        return "zero"
+    if base == "fr":
+        if count == 0 or count == 1:
+            return "one"
+        return "other"
+    if count == 1:
+        return "one"
+    return "other"
+
+class TranslationCatalog:
+    locales: OrderedDict[str, LocaleCatalog]
+    default_locale: str
+    missing_policy: MissingTranslationPolicy
+    version: int
+    frozen: bool
+
+    def __init__(self: TranslationCatalog, default_locale: str = "en") -> None:
+        locs: OrderedDict[str, LocaleCatalog] = OrderedDict[str, LocaleCatalog]()
+        self.locales = locs
+        self.default_locale = _norm_locale_tag(default_locale)
+        self.missing_policy = MissingTranslationPolicy.FallbackKey
+        self.version = 1
+        self.frozen = False
+
+    def freeze(self: TranslationCatalog) -> None:
+        self.frozen = True
+
+    def _ensure_locale(self: TranslationCatalog, locale: str) -> LocaleCatalog:
+        if self.frozen:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "cannot mutate frozen TranslationCatalog", SourceSpan("<catalog>", 1, 1, 0, 0), "populate catalog before freezing")
+        norm: str = _norm_locale_tag(locale)
+        locs: OrderedDict[str, LocaleCatalog] = self.locales
+        if locs.contains(norm):
+            return locs.get(norm)
+        lc: LocaleCatalog = LocaleCatalog()
+        locs.set(norm, lc)
+        self.locales = locs
+        return lc
+
+    def add(self: TranslationCatalog, locale: str, key: str, message: str) -> None:
+        lc: LocaleCatalog = self._ensure_locale(locale)
+        lc.set_message(key, message)
+        self.version = self.version + 1
+
+    def add_plural(self: TranslationCatalog, locale: str, key: str, one: str, other: str) -> None:
+        lc: LocaleCatalog = self._ensure_locale(locale)
+        lc.set_plural(key, one, other)
+        self.version = self.version + 1
+
+    def add_plural_with_zero(self: TranslationCatalog, locale: str, key: str, zero: str, one: str, other: str) -> None:
+        lc: LocaleCatalog = self._ensure_locale(locale)
+        lc.set_plural_zero(key, zero, one, other)
+        self.version = self.version + 1
+
+    def resolve_message(self: TranslationCatalog, key: str, locale: str, span: SourceSpan) -> str:
+        chain: list[str] = locale_fallback_chain(locale, self.default_locale)
+        i: int = 0
+        while i < len(chain):
+            loc_tag: str = chain[i]
+            if self.locales.contains(loc_tag):
+                lc: LocaleCatalog = self.locales.get(loc_tag)
+                if lc.messages.contains(key):
+                    return lc.messages.get(key)
+            i = i + 1
+        match self.missing_policy:
+            case MissingTranslationPolicy.Strict:
+                raise GlyphUndefinedError(
+                    GLYPH_EVAL_UNDEFINED,
+                    "missing translation key '" + key + "' for locale '" + locale + "'",
+                    span,
+                    "register translation key '" + key + "' or use FallbackKey policy"
+                )
+            case MissingTranslationPolicy.FallbackKey:
+                return key
+
+    def resolve_plural(self: TranslationCatalog, key: str, count: int, locale: str, span: SourceSpan) -> str:
+        chain: list[str] = locale_fallback_chain(locale, self.default_locale)
+        cat: str = plural_category(locale, count)
+        i: int = 0
+        while i < len(chain):
+            loc_tag: str = chain[i]
+            if self.locales.contains(loc_tag):
+                lc: LocaleCatalog = self.locales.get(loc_tag)
+                if lc.plurals.contains(key):
+                    pf: PluralForms = lc.plurals.get(key)
+                    if cat == "zero" and pf.has_zero:
+                        return pf.zero
+                    if cat == "one":
+                        return pf.one
+                    return pf.other
+            i = i + 1
+        match self.missing_policy:
+            case MissingTranslationPolicy.Strict:
+                raise GlyphUndefinedError(
+                    GLYPH_EVAL_UNDEFINED,
+                    "missing plural translation key '" + key + "' for locale '" + locale + "'",
+                    span,
+                    "register plural forms for '" + key + "'"
+                )
+            case MissingTranslationPolicy.FallbackKey:
+                return key
+
+def default_catalog() -> TranslationCatalog:
+    return TranslationCatalog("en")
+
+# Substitutes {param} placeholders in translated strings without promoting output to TrustedMarkup.
+def interpolate_translation_params(
+    template_text: str,
+    params: OrderedDict[str, Value],
+    policy: UndefinedPolicy,
+    span: SourceSpan
+) -> str:
+    n: int = len(template_text)
+    out: list[str] = []
+    i: int = 0
+    seg_start: int = 0
+    while i < n:
+        ch: str = template_text[i:i + 1]
+        if ch == "{":
+            # Support escaped '{{' -> '{'
+            if i + 1 < n and template_text[i + 1:i + 2] == "{":
+                if i > seg_start:
+                    out.append(template_text[seg_start:i])
+                out.append("{")
+                i = i + 2
+                seg_start = i
+            else:
+                close_pos: int = -1
+                j: int = i + 1
+                while j < n and close_pos < 0:
+                    if template_text[j:j + 1] == "}":
+                        close_pos = j
+                    j = j + 1
+                if close_pos > i + 1:
+                    if i > seg_start:
+                        out.append(template_text[seg_start:i])
+                    pname: str = nox.strings.trim(template_text[i + 1:close_pos])
+                    if not params.contains(pname):
+                        match policy:
+                            case UndefinedPolicy.StrictUndefined:
+                                raise GlyphUndefinedError(
+                                    GLYPH_EVAL_UNDEFINED,
+                                    "missing translation parameter '{" + pname + "}'",
+                                    span,
+                                    "supply parameter '" + pname + "' to trans/plural"
+                                )
+                            case UndefinedPolicy.LenientUndefined:
+                                out.append("")
+                    else:
+                        pv: Value = check_not_undef(params.get(pname), policy, span)
+                        out.append(stringify(pv, policy, span))
+                    i = close_pos + 1
+                    seg_start = i
+                else:
+                    i = i + 1
+        elif ch == "}" and i + 1 < n and template_text[i + 1:i + 2] == "}":
+            if i > seg_start:
+                out.append(template_text[seg_start:i])
+            out.append("}")
+            i = i + 2
+            seg_start = i
+        else:
+            i = i + 1
+    if n > seg_start:
+        out.append(template_text[seg_start:n])
+    return nox.strings.join(out, "")

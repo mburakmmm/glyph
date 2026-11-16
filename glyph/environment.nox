@@ -16,7 +16,8 @@ from glyph.tests_registry import TestRegistry, default_tests
 from glyph.functions import FunctionRegistry, default_functions
 from glyph.loader import SourceRecord, Loader, compute_fingerprint
 from glyph.loader_memory import MemoryLoader
-from glyph.runtime import Template, execute_template_with_resolver
+from glyph.catalog import TranslationCatalog, default_catalog
+from glyph.runtime import Template, execute_template_with_catalog
 from glyph.cache import DepFingerprint, ParseCache, CompileCacheEntry, CompileCache
 from glyph.cache import build_parse_cache_key, build_compile_cache_key, default_compile_cache
 
@@ -28,6 +29,7 @@ class Environment:
     functions: FunctionRegistry
     parse_cache: ParseCache
     compile_cache: CompileCache
+    catalog: TranslationCatalog
 
     def __init__(
         self: Environment,
@@ -46,6 +48,7 @@ class Environment:
         self.functions = functions
         self.parse_cache = parse_cache
         self.compile_cache = compile_cache
+        self.catalog = TranslationCatalog(options.default_locale)
 
 def environment_with_loader(loader: Loader, options: EnvironmentOptions) -> Environment:
     return Environment(
@@ -164,7 +167,8 @@ def _get_template_with_tracker(name: str, env: Environment, tracker: BudgetTrack
         eff_trust,
         env.filters.generation,
         env.tests.generation,
-        env.functions.generation
+        env.functions.generation,
+        env.catalog.version
     )
     if env.compile_cache.contains_fresh(ckey):
         entry: CompileCacheEntry = env.compile_cache.get(ckey)
@@ -200,7 +204,7 @@ def render_to_writer(
     def _resolve(inc_name: str, tr: BudgetTracker) -> Template:
         return _get_template_with_tracker(inc_name, env, tr)
 
-    return execute_template_with_resolver(
+    return execute_template_with_catalog(
         template,
         context.data,
         writer,
@@ -211,7 +215,8 @@ def render_to_writer(
         options,
         env.options.allow_dynamic_include,
         True,
-        _resolve
+        _resolve,
+        env.catalog
     )
 
 def render_with_options(
@@ -224,6 +229,8 @@ def render_with_options(
     writer: GlyphWriter = GlyphWriter(tracker)
     res: RenderResult = render_to_writer(template, context, writer, options, env)
     writer.close()
+    res.bytes_flushed = writer.bytes_flushed
+    res.flush_count = writer.flush_count
     return res.output
 
 def render(template: Template, context: Context, env: Environment) -> str:

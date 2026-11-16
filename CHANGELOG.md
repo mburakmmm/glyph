@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-16
+
+### Added
+- `docs/adr/0008-streaming-writer-and-partial-errors.md` (ADR-0008) and `docs/adr/0009-locale-catalog-and-plural-format.md` (ADR-0009).
+- `glyph/catalog.nox` (freestanding-safe) & `glyph/locale.nox` (hosted `nox.unicode`): `TranslationCatalog`, `LocaleCatalog`, `MissingTranslationPolicy`, fallback chains (`tr-TR -> tr -> en`), deterministic rule-based `plural()`, contextual escaping of `trans()`/`plural()` interpolated parameters, and `catalog.version` cache invalidation in `glyph/cache.nox`.
+- `glyph/options.nox`, `glyph/safety.nox`, `glyph/value.nox`, `glyph/email.nox`: `OutputMode.Xml` structural + illegal control-char guards (dynamic XML tags/attributes and unquoted attrs rejected), `OutputMode.Json` safe serializer, `OutputMode.Markdown`, `OutputMode.EmailSubject` (blocks `\r`, `\n`, `\0` header injection), and `render_email_pair(...)` + `examples/email/main.nox`.
+- `glyph/writer.nox`: `streaming_writer(tracker, sink_fn, cancel_fn, flush_threshold_bytes)` with batched flushing, downstream backpressure (`GlyphRenderError`), cooperative cancellation (`GlyphCancelledError`), idempotent `.close()`, `bytes_flushed`/`flush_count`, and 16 MiB output cap parity.
+- `tests/locale/i18n_profiles_streaming_test.nox` and updated `docs/api.md`.
+
 ## [0.5.0] - 2026-11-16
 
 ### Added

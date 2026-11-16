@@ -265,27 +265,27 @@ Her PoC derlenip `noxc check` + `noxc test` ile doğrulanmış ve sonucu `docs/c
 **Amaç:** Deterministik çok-dillilik, HTML dışındaki resmi çıktı modları ve büyük çıktılar için akışlı writer protokolünü tamamlamak.
 
 ### 8.1. Karar Kayıtları
-- [ ] `docs/adr/0008-streaming-writer-and-partial-errors.md` (**ADR-0008**)
-- [ ] `docs/adr/0009-locale-catalog-and-plural-format.md` (**ADR-0009**)
+- [x] `docs/adr/0008-streaming-writer-and-partial-errors.md` (**ADR-0008**)
+- [x] `docs/adr/0009-locale-catalog-and-plural-format.md` (**ADR-0009**)
 
 ### 8.2. i18n ve Locale (`glyph/locale.nox`, `glyph/catalog.nox`)
-- [ ] `RenderOptions.locale` üzerinden explicit locale seçimi (process-global locale/timezone okuma yok).
-- [ ] Read-only translation catalog adapter'ı + catalog sürümünün cache key'e dahil edilmesi.
-- [ ] Locale fallback zinciri (`tr-TR -> tr -> default`), `strict` / fallback missing policy.
-- [ ] `trans` / `plural` (veriye bağlı kural seti) ve interpolated parametrelerin mevcut çıktı bağlamında escape edilmesi.
-- [ ] Türkçe casing (`nox.unicode.upper_tr` / `lower_tr`) ve belgeli deterministik date/number/currency alt kümesi.
+- [x] `RenderOptions.locale` üzerinden explicit locale seçimi (process-global locale/timezone okuma yok).
+- [x] Read-only translation catalog adapter'ı + catalog sürümünün cache key'e dahil edilmesi (`env.catalog.version` in `build_compile_cache_key`).
+- [x] Locale fallback zinciri (`tr-TR -> tr -> default`), `Strict` / `FallbackKey` missing policy.
+- [x] `trans` / `plural` (veriye bağlı kural seti) ve interpolated parametrelerin mevcut çıktı bağlamında escape edilmesi.
+- [x] Türkçe casing (`nox.unicode.upper_tr` / `lower_tr` in `glyph/locale.nox`) ve belgeli deterministik date/number/currency alt kümesi.
 
 ### 8.3. Çıktı Profilleri (`AGENTS.md` §15)
-- [ ] `OutputMode.Html` (default)
-- [ ] `OutputMode.Text` (PlainText — escape kapalı, resource/policy kuralları aktif)
-- [ ] `OutputMode.Xml` (XML text/attr escape + illegal XML karakter reddi + dinamik tag/attr yasağı)
-- [ ] `OutputMode.Markdown` (literal üretimi + `md_escape` sınırları belgeli)
-- [ ] `OutputMode.Json` / inline JSON embedding guard'ları
-- [ ] Email profil desteği (HTML + plain-text çifti, subject CR/LF header injection koruması) + `examples/email/`.
+- [x] `OutputMode.Html` (default)
+- [x] `OutputMode.Text` (PlainText — escape kapalı, resource/policy kuralları aktif)
+- [x] `OutputMode.Xml` (XML text/attr escape + illegal XML karakter reddi + dinamik tag/attr ve unquoted attr yasağı)
+- [x] `OutputMode.Markdown` (literal üretimi + `md_escape` sınırları belgeli)
+- [x] `OutputMode.Json` / inline JSON embedding guard'ları (`value_to_json_raw` + `SafeJs`)
+- [x] Email profil desteği (`OutputMode.EmailSubject` + `glyph/email.nox` `render_email_pair` HTML + plain-text çifti, subject CR/LF/NUL header injection koruması) + `examples/email/main.nox`.
 
 ### 8.4. Streaming Writer ve İptal
-- [ ] `GlyphWriter` chunk/batch flush, backpressure dönüşleri, cancellation (`GlyphCancelledError`), no double-close garantisi.
-- [ ] 16 MiB çıktı sınırı stres testi ve streamed vs buffered çıktı birebir denklik testi.
+- [x] `GlyphWriter` chunk/batch flush (`streaming_writer`), backpressure dönüşleri, cancellation (`GlyphCancelledError`), no double-close garantisi.
+- [x] 16 MiB çıktı sınırı stres testi ve streamed vs buffered çıktı birebir denklik testi (`tests/locale/i18n_profiles_streaming_test.nox`).
 
 ---
 

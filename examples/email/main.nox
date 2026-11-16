@@ -1,0 +1,29 @@
+# Phase 8 Email Multipart Example (Subject CR/LF Guard + HTML + PlainText + i18n)
+import glyph.api
+from glyph.api import MemoryLoader, Environment, RenderOptions, Template, Context, EmailMessage
+
+mem: MemoryLoader = MemoryLoader()
+mem.put("mail/subj.txt", "{{ trans('mail.subject', user=user.name) }}")
+mem.put("mail/body.html", "<p>{{ trans('mail.hello', user=user.name) }}</p><p>{{ plural('mail.alerts', count) }}</p>")
+mem.put("mail/body.txt", "{{ trans('mail.hello', user=user.name) }}\n{{ plural('mail.alerts', count) }}")
+
+env: Environment = glyph.api.default_environment(mem)
+env.catalog.add("tr", "mail.subject", "Hoş geldiniz, {user}")
+env.catalog.add("tr", "mail.hello", "Merhaba {user}, hesabınız hazır.")
+env.catalog.add_plural("tr", "mail.alerts", "{count} yeni bildiriminiz var.", "{count} yeni bildiriminiz var.")
+
+opts: RenderOptions = glyph.api.default_render_options(env.options)
+opts.locale = "tr-TR"
+
+ctx: Context = glyph.api.context_from_json('{"user":{"name":"<Ada>"},"count":3}')
+msg: EmailMessage = glyph.api.render_email_pair(
+    glyph.api.get_template("mail/subj.txt", env),
+    glyph.api.get_template("mail/body.html", env),
+    glyph.api.get_template("mail/body.txt", env),
+    ctx,
+    opts,
+    env
+)
+print("SUBJECT: " + msg.subject)
+print("HTML:    " + msg.html_body)
+print("TEXT:    " + msg.text_body)

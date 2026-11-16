@@ -1,0 +1,36 @@
+# Hosted-only Unicode normalization and Turkish/Azeri casing utilities for Glyph (Phase 8).
+# Allowed to import `nox.unicode` per CI hosted allowlist (`loader_fs.nox`, `locale.nox`); NOT imported by freestanding core `glyph/api.nox`.
+import nox.unicode
+import nox.strings
+from glyph.errors import SourceSpan, GlyphTypeError, GLYPH_EVAL_TYPE
+
+def normalize_unicode(text: str, form: str, span: SourceSpan) -> str:
+    upper_form: str = nox.strings.upper(nox.strings.trim(form))
+    if upper_form != "NFC" and upper_form != "NFD" and upper_form != "NFKC" and upper_form != "NFKD":
+        raise GlyphTypeError(
+            GLYPH_EVAL_TYPE,
+            "invalid Unicode normalization form '" + form + "'",
+            span,
+            "use NFC, NFD, NFKC, or NFKD"
+        )
+    return nox.unicode.normalize(text, upper_form)
+
+def is_normalized(text: str, form: str, span: SourceSpan) -> bool:
+    upper_form: str = nox.strings.upper(nox.strings.trim(form))
+    if upper_form != "NFC" and upper_form != "NFD" and upper_form != "NFKC" and upper_form != "NFKD":
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "invalid Unicode normalization form '" + form + "'", span, "use NFC, NFD, NFKC, or NFKD")
+    return nox.unicode.is_normalized(text, upper_form)
+
+def _is_tr_az(locale: str) -> bool:
+    ll: str = nox.strings.lower(nox.strings.trim(locale))
+    return nox.strings.starts_with(ll, "tr") or nox.strings.starts_with(ll, "az")
+
+def upper_for_locale(text: str, locale: str) -> str:
+    if _is_tr_az(locale):
+        return nox.unicode.upper_tr(text)
+    return nox.strings.upper(text)
+
+def lower_for_locale(text: str, locale: str) -> str:
+    if _is_tr_az(locale):
+        return nox.unicode.lower_tr(text)
+    return nox.strings.lower(text)
