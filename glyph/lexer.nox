@@ -260,6 +260,19 @@ def _scan_raw_block(sc: _Scanner, tokens: list[Token], tracker: BudgetTracker) -
         sc.advance_cp()
     raise GlyphSyntaxError(GLYPH_SYNTAX_UNCLOSED_RAW, "unclosed '{% raw %}' block", open_span, "close the raw block with '{% endraw %}'")
 
+def _concat_parts_safe(parts: list[str]) -> str:
+    n: int = len(parts)
+    if n == 0:
+        return ""
+    if n == 1:
+        return parts[0]
+    out: str = ""
+    i: int = 0
+    while i < n:
+        out = out + parts[i]
+        i = i + 1
+    return out
+
 def _scan_string(sc: _Scanner, quote_byte: int, tracker: BudgetTracker) -> Token:
     start_span: SourceSpan = sc.span_here()
     bstart: int = sc.byte_pos
@@ -302,7 +315,8 @@ def _scan_string(sc: _Scanner, quote_byte: int, tracker: BudgetTracker) -> Token
             sc.advance_cp()
     if not closed:
         raise GlyphSyntaxError(GLYPH_SYNTAX_UNCLOSED_STRING, "unclosed string literal", start_span, "terminate the string literal")
-    decoded: str = nox.strings.join(parts, "")
+    # Use length-preserving concatenation rather than nox.strings.join (noxc 2.1.186 strings.zig uses strlen in total_len).
+    decoded: str = _concat_parts_safe(parts)
     full_span: SourceSpan = SourceSpan(sc.logical_name, start_span.line, start_span.column, bstart, sc.byte_pos)
     tracker.check_token_bytes(nox.strings.byte_len(decoded), full_span)
     return Token(TokenKind.TString, decoded, full_span)
