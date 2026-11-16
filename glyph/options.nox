@@ -1,0 +1,128 @@
+# Environment and Render options for Glyph.
+# Enforces AGENTS.md §2, §10.5, §15, §16. Pure NOX, freestanding-safe.
+from glyph.limits import ResourceBudget, default_budget, restricted_budget
+from glyph.value import UndefinedPolicy
+
+enum OutputMode:
+    Html
+    Text
+    Xml
+    Markdown
+
+enum TrustTier:
+    Trusted
+    Restricted
+    Untrusted
+
+def min_trust_tier(a: TrustTier, b: TrustTier) -> TrustTier:
+    match a:
+        case TrustTier.Untrusted:
+            return TrustTier.Untrusted
+        case TrustTier.Restricted:
+            match b:
+                case TrustTier.Untrusted:
+                    return TrustTier.Untrusted
+                case _:
+                    return TrustTier.Restricted
+        case TrustTier.Trusted:
+            return b
+
+class EnvironmentOptions:
+    output_mode: OutputMode
+    autoescape: bool
+    undefined_policy: UndefinedPolicy
+    trust_tier: TrustTier
+    allow_safe_filter: bool
+    allow_dynamic_include: bool
+    default_budget: ResourceBudget
+    default_locale: str
+
+    def __init__(
+        self: EnvironmentOptions,
+        output_mode: OutputMode,
+        autoescape: bool,
+        undefined_policy: UndefinedPolicy,
+        trust_tier: TrustTier,
+        allow_safe_filter: bool,
+        allow_dynamic_include: bool,
+        default_budget: ResourceBudget,
+        default_locale: str
+    ) -> None:
+        self.output_mode = output_mode
+        self.autoescape = autoescape
+        self.undefined_policy = undefined_policy
+        self.trust_tier = trust_tier
+        self.allow_safe_filter = allow_safe_filter
+        self.allow_dynamic_include = allow_dynamic_include
+        self.default_budget = default_budget
+        self.default_locale = default_locale
+
+class RenderOptions:
+    output_mode: OutputMode
+    autoescape: bool
+    undefined_policy: UndefinedPolicy
+    trust_tier: TrustTier
+    budget: ResourceBudget
+    locale: str
+
+    def __init__(
+        self: RenderOptions,
+        output_mode: OutputMode,
+        autoescape: bool,
+        undefined_policy: UndefinedPolicy,
+        trust_tier: TrustTier,
+        budget: ResourceBudget,
+        locale: str
+    ) -> None:
+        self.output_mode = output_mode
+        self.autoescape = autoescape
+        self.undefined_policy = undefined_policy
+        self.trust_tier = trust_tier
+        self.budget = budget
+        self.locale = locale
+
+def html_safe_defaults() -> EnvironmentOptions:
+    return EnvironmentOptions(
+        OutputMode.Html,
+        True,
+        UndefinedPolicy.StrictUndefined,
+        TrustTier.Trusted,
+        False,
+        False,
+        default_budget(),
+        "en"
+    )
+
+def text_safe_defaults() -> EnvironmentOptions:
+    return EnvironmentOptions(
+        OutputMode.Text,
+        False,
+        UndefinedPolicy.StrictUndefined,
+        TrustTier.Trusted,
+        False,
+        False,
+        default_budget(),
+        "en"
+    )
+
+def restricted_defaults() -> EnvironmentOptions:
+    return EnvironmentOptions(
+        OutputMode.Html,
+        True,
+        UndefinedPolicy.StrictUndefined,
+        TrustTier.Restricted,
+        False,
+        False,
+        restricted_budget(),
+        "en"
+    )
+
+def default_render_options(env_opts: EnvironmentOptions) -> RenderOptions:
+    return RenderOptions(
+        env_opts.output_mode,
+        env_opts.autoescape,
+        env_opts.undefined_policy,
+        env_opts.trust_tier,
+        env_opts.default_budget,
+        env_opts.default_locale
+    )

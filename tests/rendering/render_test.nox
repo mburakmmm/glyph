@@ -1,0 +1,104 @@
+# Phase 3 MVP Rendering, Scope, Filters, Built-ins, and Reusable Template Tests
+import nox.test
+from nox.collections import OrderedDict
+import glyph.api
+from glyph.api import Value, MarkupContext, UndefinedPolicy, MemoryLoader, Environment
+from glyph.api import Template, Context, TemplateInfo, RenderOptions, GlyphWriter, RenderResult
+from glyph.api import BudgetTracker, ResourceBudget, GlyphError, FilterArgValue, SourceSpan
+
+def _custom_exclaim(val: Value, _args: list[FilterArgValue], _tr: BudgetTracker, _sp: SourceSpan) -> Value:
+    match val:
+        case Value.VStr(s):
+            return Value.VStr(s + "!")
+        case _:
+            return val
+
+def test_vertical_slice_one() -> None:
+    loader: MemoryLoader = MemoryLoader()
+    tpl_src: str = "<h1>{{ title }}</h1><ul>{% for item in items %}{% if item.visible %}<li>{{ item.name | upper }}</li>{% endif %}{% endfor %}</ul>"
+    loader.put("slice1.html", tpl_src)
+    env: Environment = glyph.api.default_environment(loader)
+    tpl: Template = glyph.api.get_template("slice1.html", env)
+    ctx: Context = glyph.api.context_from_json('{"title":"<Welcome>","items":[{"name":"<script>alert(1)</script>","visible":true},{"name":"secret","visible":false}]}')
+    out: str = glyph.api.render(tpl, ctx, env)
+    nox.test.assert_eq_str(
+        out,
+        "<h1>&lt;Welcome&gt;</h1><ul><li>&lt;SCRIPT&gt;ALERT(1)&lt;/SCRIPT&gt;</li></ul>",
+        "vertical slice #1 safe escaped output"
+    )
+
+def test_reusable_template_and_scope_isolation() -> None:
+    loader: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(loader)
+    tpl: Template = glyph.api.compile_string("{% set x = 'outer' %}{% if flag %}{% set x = 'inner' %}{{ x }}{% endif %}:{{ x }}:{{ who }}", "scope.html", env)
+
+    c1: Context = glyph.api.context_from_json('{"flag":true,"who":"Ada"}')
+    c2: Context = glyph.api.context_from_json('{"flag":false,"who":"Grace"}')
+    nox.test.assert_eq_str(glyph.api.render(tpl, c1, env), "inner:outer:Ada", "render 1 inner shadows without mutating outer")
+    nox.test.assert_eq_str(glyph.api.render(tpl, c2, env), ":outer:Grace", "render 2 isolated from render 1")
+
+def test_loops_and_map_iteration() -> None:
+    loader: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(loader)
+    tpl: Template = glyph.api.compile_string("{% for k, v in cfg %}[{{ loop.index }}/{{ loop.length }}:{{ loop.first }}:{{ loop.last }}:{{ k }}={{ v }}]{% else %}EMPTY{% endfor %}", "maploop.html", env)
+
+    ctx: Context = glyph.api.context_from_json('{"cfg":{"a":1,"b":2}}')
+    nox.test.assert_eq_str(glyph.api.render(tpl, ctx, env), "[1/2:true:false:a=1][2/2:false:true:b=2]", "ordered map loop + metadata")
+
+    empty_ctx: Context = glyph.api.context_from_json('{"cfg":{}}')
+    nox.test.assert_eq_str(glyph.api.render(tpl, empty_ctx, env), "EMPTY", "for-else on empty map")
+
+def test_short_circuit_and_expressions() -> None:
+    loader: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(loader)
+    tpl: Template = glyph.api.compile_string(
+        "{{ (false and missing_a) }}|{{ (true or missing_b) }}|{{ ('ok' if true else missing_c) }}|{{ 1 + 2 * 3 }}|{{ 7 // 2 }}|{{ 7 % 2 }}|{{ 'a' in 'cat' }}|{{ 2 in [1, 2, 3] }}",
+        "expr.html",
+        env
+    )
+    out: str = glyph.api.render(tpl, glyph.api.empty_context(), env)
+    nox.test.assert_eq_str(out, "false|true|ok|7|3|1|true|true", "short-circuit and operators")
+
+def test_mvp_filters_tests_functions_and_writer() -> None:
+    loader: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(loader)
+    env.filters.register("exclaim", _custom_exclaim)
+
+    tpl: Template = glyph.api.compile_string(
+        "{{ missing | default('fallback') }}|{{ '' | default('falsy', boolean=true) }}|{{ [10, 20, 30] | length }}|{{ ['a', 'b'] | join('-') }}|{{ 'Hi' | lower | exclaim }}|{{ range(3) | join(',') }}|{{ missing is undefined }}|{{ null is none }}|{{ [] is empty }}|{{ '<b>' | escape | escape }}",
+        "filters.html",
+        env
+    )
+    tracker: BudgetTracker = BudgetTracker(glyph.api.default_budget())
+    writer: GlyphWriter = GlyphWriter(tracker)
+    opts: RenderOptions = glyph.api.default_render_options(env.options)
+    res: RenderResult = glyph.api.render_to_writer(tpl, glyph.api.empty_context(), writer, opts, env)
+    writer.close()
+
+    nox.test.assert_true(res.completed, "render_to_writer completed")
+    nox.test.assert_eq_str(
+        res.output,
+        "fallback|falsy|3|a-b|hi!|0,1,2|true|true|true|&lt;b&gt;",
+        "MVP filters, custom filter, range, is tests, and idempotent escape"
+    )
+
+    info: TemplateInfo = glyph.api.inspect(tpl)
+    nox.test.assert_eq_str(info.logical_name, "filters.html", "inspect logical_name")
+
+def test_text_mode_and_lint() -> None:
+    loader: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.new_environment(loader, glyph.api.text_safe_defaults())
+    tpl: Template = glyph.api.compile_string("Hello {{ name }}", "msg.txt", env)
+    ctx: Context = glyph.api.context_from_json('{"name":"<Ada>"}')
+    nox.test.assert_eq_str(glyph.api.render(tpl, ctx, env), "Hello <Ada>", "OutputMode.Text skips HTML escaping")
+
+    diags: list[GlyphError] = glyph.api.lint("{{ user.__class__ }}", "bad.html", env)
+    nox.test.assert_eq_int(len(diags), 1, "lint catches syntax/security error")
+    nox.test.assert_eq_str(glyph.api.escape_html("<a&b>"), "&lt;a&amp;b&gt;", "public escape_html")
+
+test_vertical_slice_one()
+test_reusable_template_and_scope_isolation()
+test_loops_and_map_iteration()
+test_short_circuit_and_expressions()
+test_mvp_filters_tests_functions_and_writer()
+test_text_mode_and_lint()

@@ -1,0 +1,24 @@
+# Loader source record contract for Glyph.
+# Enforces AGENTS.md §11.1: separates logical_name and provenance from physical disk paths.
+from glyph.options import TrustTier
+
+class SourceRecord:
+    logical_name: str
+    content: str
+    origin_id: str
+    fingerprint: str
+    trust_tier: TrustTier
+
+    def __init__(
+        self: SourceRecord,
+        logical_name: str,
+        content: str,
+        origin_id: str,
+        fingerprint: str,
+        trust_tier: TrustTier
+    ) -> None:
+        self.logical_name = logical_name
+        self.content = content
+        self.origin_id = origin_id
+        self.fingerprint = fingerprint
+        self.trust_tier = trust_tier

@@ -1,22 +1,115 @@
 # Public entry point for Glyph (`import glyph.api`).
-# Re-exports core Phase 1 types and lexer entrypoints. Freestanding-safe.
+# Exposes Phase 3 (v0.1.0 MVP) Environment, Template, Context, Loaders, Filters, Safety, and AST APIs.
+# Freestanding-safe (no nox.fs or nox.unicode imports).
+from nox.collections import OrderedDict
 import glyph.version
-from glyph.errors import SourceSpan, RelatedSpan, empty_span, format_public_error
+import glyph.errors
+import glyph.limits
+import glyph.value
+import glyph.token
+import glyph.lexer
+import glyph.expressions
+import glyph.ast
+import glyph.parser
+import glyph.validate
+import glyph.options
+import glyph.scope
+import glyph.writer
+import glyph.safety
+import glyph.filters
+import glyph.tests_registry
+import glyph.functions
+import glyph.loader
+import glyph.loader_memory
+import glyph.runtime
+import glyph.environment
+
+from glyph.errors import SourceSpan, RelatedSpan
 from glyph.errors import GlyphError, GlyphSyntaxError, GlyphUndefinedError, GlyphTypeError
 from glyph.errors import GlyphSecurityError, GlyphLoadError, GlyphLimitError
 from glyph.errors import GlyphRenderError, GlyphExtensionError, GlyphCancelledError
-from glyph.limits import ResourceBudget, BudgetTracker, default_budget, restricted_budget
-from glyph.value import Value, MarkupContext, UndefinedPolicy, from_json, from_json_str
-from glyph.value import is_truthy, stringify, map_get, list_get
-from glyph.token import Token, TokenKind, token_kind_name
-from glyph.lexer import tokenize, tokenize_with_budget
+from glyph.limits import ResourceBudget, BudgetTracker
+from glyph.value import Value, MarkupContext, UndefinedPolicy
+from glyph.token import Token, TokenKind
 from glyph.expressions import Expr, ExprKind, UnaryOp, BinaryOp, CallArg, MapEntry
 from glyph.ast import Stmt, StmtKind, IfBranch, MacroParam, TemplateAst
-from glyph.parser import parse_tokens, parse_string, parse_source, lint_tokens
-from glyph.validate import TemplateInfo, validate_ast
+from glyph.validate import TemplateInfo
+from glyph.options import OutputMode, TrustTier, EnvironmentOptions, RenderOptions
+from glyph.scope import Context
+from glyph.writer import GlyphWriter, RenderResult
+from glyph.filters import FilterRegistry, FilterArgValue
+from glyph.tests_registry import TestRegistry
+from glyph.functions import FunctionRegistry
+from glyph.loader import SourceRecord
+from glyph.loader_memory import MemoryLoader
+from glyph.runtime import Template
+from glyph.environment import Environment
 
 def engine_version() -> str:
     return glyph.version.version()
 
 def min_nox_version() -> str:
     return glyph.version.min_nox_version()
+
+def default_budget() -> ResourceBudget:
+    return glyph.limits.default_budget()
+
+def restricted_budget() -> ResourceBudget:
+    return glyph.limits.restricted_budget()
+
+def html_safe_defaults() -> EnvironmentOptions:
+    return glyph.options.html_safe_defaults()
+
+def text_safe_defaults() -> EnvironmentOptions:
+    return glyph.options.text_safe_defaults()
+
+def restricted_defaults() -> EnvironmentOptions:
+    return glyph.options.restricted_defaults()
+
+def default_render_options(env_opts: EnvironmentOptions) -> RenderOptions:
+    return glyph.options.default_render_options(env_opts)
+
+def empty_context() -> Context:
+    return glyph.scope.empty_context()
+
+def context_from_map(entries: OrderedDict[str, Value]) -> Context:
+    return glyph.scope.context_from_map(entries)
+
+def context_from_json(raw: str) -> Context:
+    return glyph.scope.context_from_json(raw)
+
+def new_environment(loader: MemoryLoader, options: EnvironmentOptions) -> Environment:
+    return glyph.environment.new_environment(loader, options)
+
+def default_environment(loader: MemoryLoader) -> Environment:
+    return glyph.environment.default_environment(loader)
+
+def compile_string(source: str, logical_name: str, env: Environment) -> Template:
+    return glyph.environment.compile_string(source, logical_name, env)
+
+def get_template(name: str, env: Environment) -> Template:
+    return glyph.environment.get_template(name, env)
+
+def render(template: Template, context: Context, env: Environment) -> str:
+    return glyph.environment.render(template, context, env)
+
+def render_with_options(template: Template, context: Context, options: RenderOptions, env: Environment) -> str:
+    return glyph.environment.render_with_options(template, context, options, env)
+
+def render_to_writer(
+    template: Template,
+    context: Context,
+    writer: GlyphWriter,
+    options: RenderOptions,
+    env: Environment
+) -> RenderResult:
+    return glyph.environment.render_to_writer(template, context, writer, options, env)
+
+def lint(source: str, name: str, env: Environment) -> list[GlyphError]:
+    return glyph.environment.lint(source, name, env)
+
+def inspect(template: Template) -> TemplateInfo:
+    return glyph.environment.inspect(template)
+
+def escape_html(text: str) -> str:
+    return glyph.safety.escape_html(text)

@@ -1,7 +1,7 @@
-# Glyph version metadata (Phase 2: Parser, Expressions, Static Validation).
+# Glyph version metadata (Phase 3: v0.1.0 MVP).
 # Pure NOX, freestanding-compatible (no hosted-only imports).
 
-GLYPH_VERSION: str = "0.0.3-parser-ast"
+GLYPH_VERSION: str = "0.1.0"
 GLYPH_MIN_NOX_VERSION: str = "2.1.186"
 
 def version() -> str:

@@ -1,0 +1,139 @@
+# Phase 3 Security Baseline & ResourceBudget Enforcement Tests
+import nox.test
+import nox.strings
+from nox.collections import OrderedDict
+import glyph.api
+from glyph.api import Value, MarkupContext, MemoryLoader, Environment, EnvironmentOptions
+from glyph.api import RenderOptions, Template, Context, TrustTier, OutputMode, UndefinedPolicy
+from glyph.api import ResourceBudget, GlyphSecurityError, GlyphUndefinedError, GlyphLimitError
+from glyph.api import GlyphExtensionError, GlyphTypeError, FilterArgValue, BudgetTracker, SourceSpan
+from glyph.errors import GLYPH_SECURITY_CONTEXT, GLYPH_SECURITY_POLICY, GLYPH_EVAL_UNDEFINED
+from glyph.errors import GLYPH_LIMIT_LOOP_STEPS, GLYPH_LIMIT_OUTPUT_BYTES, GLYPH_LIMIT_TOTAL_OPS
+
+def _evil_esc(val: Value, _a: list[FilterArgValue], _t: BudgetTracker, _s: SourceSpan) -> Value:
+    return val
+
+def test_xss_escaping_and_nul_rejection() -> None:
+    loader: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(loader)
+    tpl: Template = glyph.api.compile_string("<div title=\"{{ attr }}\">{{ body }}</div>", "xss.html", env)
+    ctx: Context = glyph.api.context_from_json('{"attr":"\\"><script>","body":"<img src=x onerror=\'alert(1)\'> & \\"hi\\""}')
+    out: str = glyph.api.render(tpl, ctx, env)
+    nox.test.assert_eq_str(
+        out,
+        "<div title=\"&quot;&gt;&lt;script&gt;\">&lt;img src=x onerror=&#39;alert(1)&#39;&gt; &amp; &quot;hi&quot;</div>",
+        "HTML special chars escaped in text and quoted attribute"
+    )
+
+    # NUL byte rejected in HTML output
+    nul_map: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    nul_map.set("body", Value.VStr("a" + nox.strings.char_from_byte(0) + "b"))
+    nul_map.set("attr", Value.VStr("ok"))
+    nul_hit: bool = False
+    try:
+        _res: str = glyph.api.render(tpl, glyph.api.context_from_map(nul_map), env)
+    except GlyphSecurityError as se:
+        nul_hit = (se.code == GLYPH_SECURITY_CONTEXT)
+    nox.test.assert_true(nul_hit, "NUL byte rejected in HTML output")
+
+def test_safe_filter_policy_and_trust_downgrade() -> None:
+    loader: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(loader)
+    tpl: Template = glyph.api.compile_string("{{ html | safe }}", "safe.html", env)
+    ctx: Context = glyph.api.context_from_json('{"html":"<b>bold</b>"}')
+
+    # Default environment blocks |safe
+    safe_blocked: bool = False
+    try:
+        _r: str = glyph.api.render(tpl, ctx, env)
+    except GlyphSecurityError as se:
+        safe_blocked = (se.code == GLYPH_SECURITY_POLICY)
+    nox.test.assert_true(safe_blocked, "|safe blocked by default")
+
+    # Even if allow_safe_filter=True on Environment, Restricted template trust tier blocks |safe
+    opts: EnvironmentOptions = EnvironmentOptions(
+        OutputMode.Html,
+        True,
+        UndefinedPolicy.StrictUndefined,
+        TrustTier.Trusted,
+        True,
+        False,
+        glyph.api.default_budget(),
+        "en"
+    )
+    loader.put_with_trust("tenant.html", "{{ html | safe }}", TrustTier.Restricted)
+    env_safe: Environment = glyph.api.new_environment(loader, opts)
+    restricted_tpl: Template = glyph.api.get_template("tenant.html", env_safe)
+    restricted_blocked: bool = False
+    try:
+        _r2: str = glyph.api.render(restricted_tpl, ctx, env_safe)
+    except GlyphSecurityError as se2:
+        restricted_blocked = (se2.code == GLYPH_SECURITY_POLICY)
+    nox.test.assert_true(restricted_blocked, "Restricted template tier overrides allow_safe_filter")
+
+    # TrustedMarkup (SafeHtml) concatenated with plain string loses trust and is escaped!
+    m: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    m.set("safe_part", Value.VTrustedMarkup("<b>ok</b>", MarkupContext.SafeHtml))
+    m.set("url_part", Value.VTrustedMarkup("https://example.com/?a=1&b=2", MarkupContext.SafeUrl))
+    m.set("user_part", Value.VStr("<script>"))
+    tpl_concat: Template = glyph.api.compile_string("{{ safe_part + user_part }}|{{ url_part }}|{{ safe_part }}", "trust.html", env)
+    out_concat: str = glyph.api.render(tpl_concat, glyph.api.context_from_map(m), env)
+    nox.test.assert_eq_str(
+        out_concat,
+        "&lt;b&gt;ok&lt;/b&gt;&lt;script&gt;|https://example.com/?a=1&amp;b=2|<b>ok</b>",
+        "concat strips trust and SafeUrl is escaped in HTML text while SafeHtml renders raw"
+    )
+
+def test_strict_undefined_and_budget_limits() -> None:
+    loader: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(loader)
+    tpl_undef: Template = glyph.api.compile_string("{{ user.missing }}", "undef.html", env)
+    undef_hit: bool = False
+    try:
+        _u: str = glyph.api.render(tpl_undef, glyph.api.context_from_json('{"user":{}}'), env)
+    except GlyphUndefinedError as ue:
+        undef_hit = (ue.code == GLYPH_EVAL_UNDEFINED)
+    nox.test.assert_true(undef_hit, "StrictUndefined fails on missing field")
+
+    # Loop step limit
+    loop_tpl: Template = glyph.api.compile_string("{% for i in range(50) %}{{ i }}{% endfor %}", "loop.html", env)
+    loop_budget: ResourceBudget = ResourceBudget(4096, 1000, 256, 1000, 8, 8, 16, 10, 4096, 10000)
+    loop_opts: RenderOptions = RenderOptions(OutputMode.Html, True, UndefinedPolicy.StrictUndefined, TrustTier.Trusted, loop_budget, "en")
+    loop_hit: bool = False
+    try:
+        _l: str = glyph.api.render_with_options(loop_tpl, glyph.api.empty_context(), loop_opts, env)
+    except GlyphLimitError as le:
+        loop_hit = (le.code == GLYPH_LIMIT_LOOP_STEPS)
+    nox.test.assert_true(loop_hit, "max_loop_steps enforced")
+
+    # Output byte limit
+    out_tpl: Template = glyph.api.compile_string("0123456789", "out.html", env)
+    out_budget: ResourceBudget = ResourceBudget(4096, 1000, 256, 1000, 8, 8, 16, 100, 5, 10000)
+    out_opts: RenderOptions = RenderOptions(OutputMode.Html, True, UndefinedPolicy.StrictUndefined, TrustTier.Trusted, out_budget, "en")
+    out_hit: bool = False
+    try:
+        _o: str = glyph.api.render_with_options(out_tpl, glyph.api.empty_context(), out_opts, env)
+    except GlyphLimitError as le2:
+        out_hit = (le2.code == GLYPH_LIMIT_OUTPUT_BYTES)
+    nox.test.assert_true(out_hit, "max_output_bytes enforced")
+
+    # Bounded range() protection
+    big_range: Template = glyph.api.compile_string("{{ range(100000) | length }}", "range.html", env)
+    range_hit: bool = False
+    try:
+        _r: str = glyph.api.render(big_range, glyph.api.empty_context(), env)
+    except GlyphTypeError:
+        range_hit = True
+    nox.test.assert_true(range_hit, "range(100000) bounded")
+
+    # Cannot override core 'escape' filter
+    override_hit: bool = False
+    try:
+        env.filters.register("escape", _evil_esc)
+    except GlyphExtensionError:
+        override_hit = True
+    nox.test.assert_true(override_hit, "core filter override denied")
+
+test_xss_escaping_and_nul_rejection()
+test_safe_filter_policy_and_trust_downgrade()
+test_strict_undefined_and_budget_limits()

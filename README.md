@@ -14,7 +14,7 @@
 
 ---
 
-> **Project Status:** **Phase 2 (`v0.0.3-parser-ast`) Complete** — Pratt expression parser, immutable AST, statement nesting, static validation, and ADR-0002 verified (`noxc test`: 5/5 suites passing on LLVM & QBE). Next up: Phase 3 (`v0.1.0` MVP, see [todo.md](todo.md) and [docs/roadmap.md](docs/roadmap.md)).
+> **Project Status:** **Phase 3 (`v0.1.0` MVP) Complete** — End-to-end AST interpreter, `MemoryLoader`, HTML-safe defaults, `ResourceBudget`, MVP filters, and Vertical Slice #1 verified (`noxc test`: 7/7 suites passing on LLVM & QBE). Next up: Phase 4 (`v0.2.0` Loaders, `include`, and Compile Cache — see [todo.md](todo.md) and [docs/roadmap.md](docs/roadmap.md)).
 
 ---
 
@@ -72,6 +72,9 @@ noxc check --profile freestanding glyph/api.nox
 # Run all *_test.nox suites
 noxc test
 
+# Run the Phase 3 MVP example (Vertical Slice #1)
+noxc run examples/hello/main.nox
+
 # Run the Phase 0 standalone consumer verification
 noxc run examples/audit_consumer/main.nox
 
@@ -88,7 +91,7 @@ noxc sbom . -o glyph.sbom.json
 | **Phase 0** | `v0.0.1-audit` | Toolchain lock (`noxc 2.1.186`), capability audit, PoCs, CI/Release, `ADR-0001` | Done |
 | **Phase 1** | `v0.0.2-core-lexer` | Typed `Value`, `SourceSpan`, `GlyphError`, `ResourceBudget`, O(n) `Lexer` | Done |
 | **Phase 2** | `v0.0.3-parser-ast` | Pratt expression parser, AST, `if`/`for`/`set`, static validation | Done |
-| **Phase 3** | `v0.1.0` **(MVP)** | Interpreter, chunked `Writer`, HTML escape, MVP filters, `MemoryLoader` | Planned |
+| **Phase 3** | `v0.1.0` **(MVP)** | Interpreter, chunked `Writer`, HTML escape, MVP filters, `MemoryLoader` | Done |
 | **Phase 4** | `v0.2.0` | `FilesystemLoader` sandbox, `include`, `ParseCache`/`CompileCache` | Planned |
 | **Phase 5** | `v0.3.0` | `extends`, `block`, `super()`, `macro`, `import`, `call/caller` | Planned |
 | **Phase 6** | `v0.4.0` | Contextual escaping, URL/JS/CSS denial, `TrustedMarkup`, XSS corpus | Planned |

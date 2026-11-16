@@ -1,0 +1,101 @@
+# Built-in `is` test registry for Glyph (Phase 3 MVP subset).
+# Enforces AGENTS.md §13.3: pure type/state predicates.
+from glyph.errors import SourceSpan, GlyphExtensionError, GlyphTypeError, GLYPH_EXTENSION_ERROR, GLYPH_EVAL_TYPE
+from glyph.limits import BudgetTracker
+from glyph.value import Value
+
+class TestRegistry:
+    generation: int
+
+    def __init__(self: TestRegistry) -> None:
+        self.generation = 1
+
+def default_tests() -> TestRegistry:
+    return TestRegistry()
+
+def apply_test(
+    reg: TestRegistry,
+    name: str,
+    val: Value,
+    args: list[Value],
+    tracker: BudgetTracker,
+    span: SourceSpan
+) -> bool:
+    tracker.consume_op(span)
+    if len(args) > 0:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "test '" + name + "' takes no arguments", span, "remove arguments from 'is " + name + "'")
+    if name == "defined":
+        match val:
+            case Value.VUndefined(_):
+                return False
+            case _:
+                return True
+    if name == "undefined":
+        match val:
+            case Value.VUndefined(_):
+                return True
+            case _:
+                return False
+    if name == "none" or name == "null":
+        match val:
+            case Value.VNull:
+                return True
+            case _:
+                return False
+    if name == "boolean":
+        match val:
+            case Value.VBool(_):
+                return True
+            case _:
+                return False
+    if name == "integer":
+        match val:
+            case Value.VInt(_):
+                return True
+            case _:
+                return False
+    if name == "float":
+        match val:
+            case Value.VFloat(_):
+                return True
+            case _:
+                return False
+    if name == "number":
+        match val:
+            case Value.VInt(_):
+                return True
+            case Value.VFloat(_):
+                return True
+            case _:
+                return False
+    if name == "string":
+        match val:
+            case Value.VStr(_):
+                return True
+            case _:
+                return False
+    if name == "sequence":
+        match val:
+            case Value.VList(_):
+                return True
+            case _:
+                return False
+    if name == "mapping":
+        match val:
+            case Value.VMap(_):
+                return True
+            case _:
+                return False
+    if name == "empty":
+        match val:
+            case Value.VStr(s):
+                return len(s) == 0
+            case Value.VList(items):
+                return len(items) == 0
+            case Value.VMap(entries):
+                return entries.size() == 0
+            case Value.VNull:
+                return True
+            case _:
+                return False
+    raise GlyphExtensionError(GLYPH_EXTENSION_ERROR, "unknown test '" + name + "'", span, "use a registered test name")

@@ -1,0 +1,98 @@
+# Core escaping and output safety policy for Glyph (MVP Phase 3).
+# Enforces AGENTS.md §2.3-2.5, §10.1-10.3: O(n) HTML escape, NUL rejection, context-tagged trust.
+import nox.strings
+from glyph.errors import SourceSpan, GlyphSecurityError, GLYPH_SECURITY_CONTEXT
+from glyph.value import Value, MarkupContext, UndefinedPolicy, stringify
+from glyph.options import OutputMode
+
+# O(n) HTML escaping with zero allocation when no special characters are present.
+# Rejects NUL bytes in HTML output to prevent truncation/bypass payloads.
+def escape_html_with_span(s: str, span: SourceSpan) -> str:
+    blen: int = nox.strings.byte_len(s)
+    if blen == 0:
+        return ""
+    has_special: bool = False
+    i: int = 0
+    while i < blen and not has_special:
+        b: int = nox.strings.byte_at(s, i)
+        if b == 38 or b == 60 or b == 62 or b == 34 or b == 39 or b == 0:
+            has_special = True
+        else:
+            i = i + 1
+    if not has_special:
+        return s
+
+    parts: list[str] = []
+    bpos: int = 0
+    cpos: int = 0
+    seg_cstart: int = 0
+    while bpos < blen:
+        b0: int = nox.strings.byte_at(s, bpos)
+        if b0 == 0:
+            raise GlyphSecurityError(
+                GLYPH_SECURITY_CONTEXT,
+                "NUL byte is not allowed in HTML output",
+                span,
+                "strip NUL bytes from untrusted input"
+            )
+        if b0 == 38 or b0 == 60 or b0 == 62 or b0 == 34 or b0 == 39:
+            if cpos > seg_cstart:
+                parts.append(s[seg_cstart:cpos])
+            if b0 == 38:
+                parts.append("&amp;")
+            elif b0 == 60:
+                parts.append("&lt;")
+            elif b0 == 62:
+                parts.append("&gt;")
+            elif b0 == 34:
+                parts.append("&quot;")
+            else:
+                parts.append("&#39;")
+            bpos = bpos + 1
+            cpos = cpos + 1
+            seg_cstart = cpos
+        else:
+            # Advance UTF-8 codepoint boundary so slice indices stay aligned
+            if b0 < 128:
+                bpos = bpos + 1
+            elif b0 < 224:
+                bpos = bpos + 2
+            elif b0 < 240:
+                bpos = bpos + 3
+            else:
+                bpos = bpos + 4
+            cpos = cpos + 1
+    if cpos > seg_cstart:
+        parts.append(s[seg_cstart:cpos])
+    return nox.strings.join(parts, "")
+
+def escape_html(s: str) -> str:
+    return escape_html_with_span(s, SourceSpan("<escape>", 1, 1, 0, 0))
+
+def render_value_for_mode(
+    val: Value,
+    autoescape: bool,
+    mode: OutputMode,
+    policy: UndefinedPolicy,
+    span: SourceSpan
+) -> str:
+    match mode:
+        case OutputMode.Text:
+            return stringify(val, policy, span)
+        case OutputMode.Markdown:
+            return stringify(val, policy, span)
+        case OutputMode.Html:
+            if not autoescape:
+                return stringify(val, policy, span)
+            match val:
+                case Value.VTrustedMarkup(content, ctx):
+                    match ctx:
+                        case MarkupContext.SafeHtml:
+                            return content
+                        case _:
+                            # Non-HTML trusted markers (SafeUrl/SafeAttr/SafeJs) are still escaped in HTML text
+                            return escape_html_with_span(content, span)
+                case _:
+                    return escape_html_with_span(stringify(val, policy, span), span)
+        case OutputMode.Xml:
+            return escape_html_with_span(stringify(val, policy, span), span)

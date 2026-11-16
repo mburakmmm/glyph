@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-16 (MVP)
+
+### Added
+- `glyph/options.nox`: `OutputMode`, `TrustTier`, `EnvironmentOptions`, `RenderOptions` (`html_safe_defaults()`, `text_safe_defaults()`, `restricted_defaults()`).
+- `glyph/scope.nox`: `Context` (`empty_context`, `context_from_map`, `context_from_json`), `RenderScope` lexical scope chain, and `loop` metadata.
+- `glyph/writer.nox`: Chunk-buffered `GlyphWriter` and `RenderResult` with `max_output_bytes` enforcement.
+- `glyph/safety.nox`: O(n) `escape_html` (zero-alloc clean path), NUL-byte rejection in HTML output, and context-tagged `VTrustedMarkup` rendering rules.
+- `glyph/filters.nox`, `glyph/tests_registry.nox`, `glyph/functions.nox`: MVP built-in filters (`escape`/`e`, `default`, `length`, `join`, `upper`, `lower`, policy-gated `safe`), built-in tests (`defined`, `undefined`, `none`, `empty`, type predicates), and bounded `range()`.
+- `glyph/loader.nox` & `glyph/loader_memory.nox`: `SourceRecord` and pure-memory `MemoryLoader`.
+- `glyph/runtime.nox` & `glyph/environment.nox` & `glyph/api.nox`: AST interpreter, reusable `Template`, `Environment`, `compile_string`, `get_template`, `render`, `render_with_options`, `render_to_writer`, `lint`, `inspect`.
+- `examples/hello/main.nox` (Vertical Slice #1), `docs/api.md`, `tests/rendering/render_test.nox`, and `tests/security/mvp_security_test.nox`.
+
 ## [0.0.3-parser-ast] - 2026-11-16
 
 ### Added

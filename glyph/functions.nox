@@ -1,0 +1,80 @@
+# Registered pure helper function dispatch for Glyph (Phase 3 MVP).
+# Enforces AGENTS.md §7.2: only whitelisted, bounded helpers (e.g. bounded range).
+from glyph.errors import SourceSpan, GlyphTypeError, GlyphExtensionError, GLYPH_EVAL_TYPE, GLYPH_EXTENSION_ERROR
+from glyph.limits import BudgetTracker
+from glyph.value import Value
+
+MAX_RANGE_ITEMS: int = 10000
+
+class FunctionRegistry:
+    generation: int
+
+    def __init__(self: FunctionRegistry) -> None:
+        self.generation = 1
+
+def default_functions() -> FunctionRegistry:
+    return FunctionRegistry()
+
+def _expect_int(v: Value, span: SourceSpan) -> int:
+    match v:
+        case Value.VInt(i):
+            return i
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "range() arguments must be integers", span, "pass integer arguments to range()")
+
+def _fn_range(args: list[Value], tracker: BudgetTracker, span: SourceSpan) -> Value:
+    nargs: int = len(args)
+    if nargs < 1 or nargs > 3:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "range() expects 1 to 3 arguments", span, "use range(stop) or range(start, stop, step)")
+    start: int = 0
+    stop: int = 0
+    step: int = 1
+    if nargs == 1:
+        stop = _expect_int(args[0], span)
+    elif nargs == 2:
+        start = _expect_int(args[0], span)
+        stop = _expect_int(args[1], span)
+    else:
+        start = _expect_int(args[0], span)
+        stop = _expect_int(args[1], span)
+        step = _expect_int(args[2], span)
+    if step == 0:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "range() step argument must not be zero", span, "pass a non-zero step")
+
+    items: list[Value] = []
+    cur: int = start
+    count: int = 0
+    if step > 0:
+        while cur < stop:
+            count = count + 1
+            if count > MAX_RANGE_ITEMS:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "range() exceeds maximum allowed items (" + str(MAX_RANGE_ITEMS) + ")", span, "use a smaller range")
+            tracker.consume_op(span)
+            items.append(Value.VInt(cur))
+            cur = cur + step
+    else:
+        while cur > stop:
+            count = count + 1
+            if count > MAX_RANGE_ITEMS:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "range() exceeds maximum allowed items (" + str(MAX_RANGE_ITEMS) + ")", span, "use a smaller range")
+            tracker.consume_op(span)
+            items.append(Value.VInt(cur))
+            cur = cur + step
+    return Value.VList(items)
+
+def apply_function(
+    reg: FunctionRegistry,
+    name: str,
+    args: list[Value],
+    tracker: BudgetTracker,
+    span: SourceSpan
+) -> Value:
+    tracker.consume_op(span)
+    if name == "range":
+        return _fn_range(args, tracker, span)
+    raise GlyphExtensionError(
+        GLYPH_EXTENSION_ERROR,
+        "unknown function '" + name + "'",
+        span,
+        "only registered pure helper functions may be called"
+    )

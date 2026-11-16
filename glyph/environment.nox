@@ -1,0 +1,111 @@
+# Environment and high-level compile / get_template / render / lint / inspect API.
+# Enforces AGENTS.md §16.1-16.3. Pure NOX, freestanding-safe.
+from glyph.errors import SourceSpan, GlyphError, empty_span
+from glyph.limits import BudgetTracker
+from glyph.token import Token
+from glyph.lexer import tokenize_with_budget
+from glyph.ast import TemplateAst
+from glyph.parser import parse_string, lint_tokens
+from glyph.validate import TemplateInfo, validate_ast
+from glyph.options import EnvironmentOptions, RenderOptions, TrustTier, html_safe_defaults, default_render_options, min_trust_tier
+from glyph.scope import Context
+from glyph.writer import GlyphWriter, RenderResult
+from glyph.filters import FilterRegistry, default_filters
+from glyph.tests_registry import TestRegistry, default_tests
+from glyph.functions import FunctionRegistry, default_functions
+from glyph.loader import SourceRecord
+from glyph.loader_memory import MemoryLoader, compute_fingerprint
+from glyph.runtime import Template, execute_template
+
+class Environment:
+    loader: MemoryLoader
+    options: EnvironmentOptions
+    filters: FilterRegistry
+    tests: TestRegistry
+    functions: FunctionRegistry
+
+    def __init__(
+        self: Environment,
+        loader: MemoryLoader,
+        options: EnvironmentOptions,
+        filters: FilterRegistry,
+        tests: TestRegistry,
+        functions: FunctionRegistry
+    ) -> None:
+        self.loader = loader
+        self.options = options
+        self.filters = filters
+        self.tests = tests
+        self.functions = functions
+
+def new_environment(loader: MemoryLoader, options: EnvironmentOptions) -> Environment:
+    return Environment(
+        loader,
+        options,
+        default_filters(options.allow_safe_filter),
+        default_tests(),
+        default_functions()
+    )
+
+def default_environment(loader: MemoryLoader) -> Environment:
+    return new_environment(loader, html_safe_defaults())
+
+def compile_string(source: str, logical_name: str, env: Environment) -> Template:
+    tracker: BudgetTracker = BudgetTracker(env.options.default_budget)
+    ast: TemplateAst = parse_string(source, logical_name, tracker)
+    info: TemplateInfo = validate_ast(ast, env.options.allow_dynamic_include)
+    fp: str = compute_fingerprint(source)
+    return Template(logical_name, ast, info, fp, env.options.trust_tier)
+
+def get_template(name: str, env: Environment) -> Template:
+    rec: SourceRecord = env.loader.load(name)
+    tracker: BudgetTracker = BudgetTracker(env.options.default_budget)
+    ast: TemplateAst = parse_string(rec.content, rec.logical_name, tracker)
+    info: TemplateInfo = validate_ast(ast, env.options.allow_dynamic_include)
+    eff_trust: TrustTier = min_trust_tier(env.options.trust_tier, rec.trust_tier)
+    return Template(rec.logical_name, ast, info, rec.fingerprint, eff_trust)
+
+def render_to_writer(
+    template: Template,
+    context: Context,
+    writer: GlyphWriter,
+    options: RenderOptions,
+    env: Environment
+) -> RenderResult:
+    return execute_template(
+        template,
+        context.data,
+        writer,
+        writer.tracker,
+        env.filters,
+        env.tests,
+        env.functions,
+        options
+    )
+
+def render_with_options(
+    template: Template,
+    context: Context,
+    options: RenderOptions,
+    env: Environment
+) -> str:
+    tracker: BudgetTracker = BudgetTracker(options.budget)
+    writer: GlyphWriter = GlyphWriter(tracker)
+    res: RenderResult = render_to_writer(template, context, writer, options, env)
+    writer.close()
+    return res.output
+
+def render(template: Template, context: Context, env: Environment) -> str:
+    opts: RenderOptions = default_render_options(env.options)
+    return render_with_options(template, context, opts, env)
+
+def lint(source: str, name: str, env: Environment) -> list[GlyphError]:
+    tracker: BudgetTracker = BudgetTracker(env.options.default_budget)
+    try:
+        toks: list[Token] = tokenize_with_budget(source, name, tracker)
+        return lint_tokens(toks, name, tracker)
+    except GlyphError as ge:
+        return [ge]
+
+def inspect(template: Template) -> TemplateInfo:
+    return template.info

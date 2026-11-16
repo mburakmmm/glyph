@@ -1,0 +1,54 @@
+# Pure in-memory template loader for Glyph (freestanding/WASM/test/embedded safe).
+# Enforces AGENTS.md §11.2.
+import nox.strings
+from nox.collections import OrderedDict
+from glyph.errors import SourceSpan, GlyphLoadError, empty_span, GLYPH_LOADER_NOT_FOUND
+from glyph.options import TrustTier
+from glyph.loader import SourceRecord
+
+# Deterministic non-cryptographic content fingerprint for memory-resident cache keys.
+def compute_fingerprint(content: str) -> str:
+    blen: int = nox.strings.byte_len(content)
+    h1: int = 2166136261
+    i: int = 0
+    while i < blen:
+        b: int = nox.strings.byte_at(content, i)
+        h1 = ((h1 ^ b) * 16777619) % 4294967296
+        i = i + 1
+    return "mem:" + str(blen) + ":" + str(h1)
+
+class MemoryLoader:
+    templates: OrderedDict[str, SourceRecord]
+    default_trust: TrustTier
+
+    def __init__(self: MemoryLoader) -> None:
+        m: OrderedDict[str, SourceRecord] = OrderedDict[str, SourceRecord]()
+        self.templates = m
+        self.default_trust = TrustTier.Trusted
+
+    def set_trust_tier(self: MemoryLoader, tier: TrustTier) -> None:
+        self.default_trust = tier
+
+    def put(self: MemoryLoader, logical_name: str, content: str) -> None:
+        fp: str = compute_fingerprint(content)
+        rec: SourceRecord = SourceRecord(logical_name, content, "memory://" + logical_name, fp, self.default_trust)
+        self.templates.set(logical_name, rec)
+
+    def put_with_trust(self: MemoryLoader, logical_name: str, content: str, trust: TrustTier) -> None:
+        fp: str = compute_fingerprint(content)
+        rec: SourceRecord = SourceRecord(logical_name, content, "memory://" + logical_name, fp, trust)
+        self.templates.set(logical_name, rec)
+
+    def has(self: MemoryLoader, logical_name: str) -> bool:
+        return self.templates.contains(logical_name)
+
+    def load(self: MemoryLoader, logical_name: str) -> SourceRecord:
+        if not self.templates.contains(logical_name):
+            sp: SourceSpan = empty_span(logical_name)
+            raise GlyphLoadError(
+                GLYPH_LOADER_NOT_FOUND,
+                "template '" + logical_name + "' not found",
+                sp,
+                "verify template name in MemoryLoader"
+            )
+        return self.templates.get(logical_name)

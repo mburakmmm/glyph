@@ -1,0 +1,85 @@
+# Context and lexical scope chain for Glyph template rendering.
+# Enforces AGENTS.md §5.3: child scopes shadow parents without mutating parent or global state.
+from nox.collections import OrderedDict
+from glyph.errors import SourceSpan, GlyphSecurityError, empty_span, GLYPH_SECURITY_REFLECTION
+from glyph.value import Value, is_forbidden_key, from_json_str
+
+class Context:
+    data: OrderedDict[str, Value]
+
+    def __init__(self: Context, data: OrderedDict[str, Value]) -> None:
+        self.data = data
+
+def empty_context() -> Context:
+    m: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    return Context(m)
+
+def context_from_map(entries: OrderedDict[str, Value]) -> Context:
+    return Context(entries)
+
+def context_from_json(raw: str) -> Context:
+    sp: SourceSpan = empty_span("<context>")
+    val: Value = from_json_str(raw, sp)
+    match val:
+        case Value.VMap(entries):
+            return Context(entries)
+        case _:
+            m: OrderedDict[str, Value] = OrderedDict[str, Value]()
+            return Context(m)
+
+class RenderScope:
+    frames: list[OrderedDict[str, Value]]
+
+    def __init__(self: RenderScope, root: OrderedDict[str, Value]) -> None:
+        init_frames: list[OrderedDict[str, Value]] = [root]
+        self.frames = init_frames
+
+    def push_frame(self: RenderScope) -> None:
+        fr: OrderedDict[str, Value] = OrderedDict[str, Value]()
+        cur: list[OrderedDict[str, Value]] = self.frames
+        cur.append(fr)
+        self.frames = cur
+
+    def pop_frame(self: RenderScope) -> None:
+        if len(self.frames) > 1:
+            _popped: OrderedDict[str, Value] = self.frames.pop()
+
+    # Writes only to the innermost active frame (never mutates parent scopes).
+    def set_local(self: RenderScope, name: str, val: Value, span: SourceSpan) -> None:
+        if is_forbidden_key(name):
+            raise GlyphSecurityError(
+                GLYPH_SECURITY_REFLECTION,
+                "cannot bind restricted variable name",
+                span,
+                "choose a plain identifier"
+            )
+        idx: int = len(self.frames) - 1
+        top: OrderedDict[str, Value] = self.frames[idx]
+        top.set(name, val)
+
+    def get(self: RenderScope, name: str, span: SourceSpan) -> Value:
+        if is_forbidden_key(name):
+            raise GlyphSecurityError(
+                GLYPH_SECURITY_REFLECTION,
+                "access to restricted identifier is denied",
+                span,
+                "reflection identifiers are forbidden"
+            )
+        i: int = len(self.frames) - 1
+        while i >= 0:
+            fr: OrderedDict[str, Value] = self.frames[i]
+            if fr.contains(name):
+                return fr.get(name)
+            i = i - 1
+        return Value.VUndefined(name)
+
+def make_loop_metadata(index0: int, total_len: int) -> Value:
+    m: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    m.set("index", Value.VInt(index0 + 1))
+    m.set("index0", Value.VInt(index0))
+    m.set("first", Value.VBool(index0 == 0))
+    m.set("last", Value.VBool(index0 == total_len - 1))
+    m.set("length", Value.VInt(total_len))
+    m.set("revindex", Value.VInt(total_len - index0))
+    m.set("revindex0", Value.VInt(total_len - 1 - index0))
+    return Value.VMap(m)

@@ -1,0 +1,691 @@
+# AST interpreter / runtime engine for Glyph (Phase 3 MVP).
+# Enforces AGENTS.md §2, §5.2-5.3, §7.2, §8.3, §10.3: deterministic, bounded, fail-closed.
+import nox.strings
+from nox.collections import OrderedDict
+from glyph.errors import SourceSpan, GlyphTypeError, GlyphUndefinedError, GlyphRenderError, GlyphSecurityError
+from glyph.errors import GLYPH_EVAL_TYPE, GLYPH_EVAL_UNDEFINED, GLYPH_EVAL_DIV_ZERO, GLYPH_EVAL_OVERFLOW
+from glyph.errors import GLYPH_RENDER_ERROR, GLYPH_SECURITY_POLICY
+from glyph.limits import BudgetTracker
+from glyph.value import Value, UndefinedPolicy, is_truthy, stringify, validate_float
+from glyph.value import map_get, list_get, is_forbidden_key, checked_add, checked_sub
+from glyph.value import checked_mul, checked_floordiv, checked_mod, INT64_MIN
+from glyph.expressions import Expr, ExprKind, UnaryOp, BinaryOp, CallArg, MapEntry
+from glyph.ast import Stmt, StmtKind, IfBranch, TemplateAst
+from glyph.validate import TemplateInfo
+from glyph.options import RenderOptions, TrustTier, min_trust_tier
+from glyph.scope import RenderScope, make_loop_metadata
+from glyph.writer import GlyphWriter, RenderResult
+from glyph.safety import render_value_for_mode
+from glyph.filters import FilterRegistry, FilterArgValue, apply_filter
+from glyph.tests_registry import TestRegistry, apply_test
+from glyph.functions import FunctionRegistry, apply_function
+
+class Template:
+    logical_name: str
+    ast: TemplateAst
+    info: TemplateInfo
+    fingerprint: str
+    trust_tier: TrustTier
+
+    def __init__(
+        self: Template,
+        logical_name: str,
+        ast: TemplateAst,
+        info: TemplateInfo,
+        fingerprint: str,
+        trust_tier: TrustTier
+    ) -> None:
+        self.logical_name = logical_name
+        self.ast = ast
+        self.info = info
+        self.fingerprint = fingerprint
+        self.trust_tier = trust_tier
+
+def _check_not_undef(v: Value, policy: UndefinedPolicy, span: SourceSpan) -> Value:
+    match v:
+        case Value.VUndefined(name):
+            match policy:
+                case UndefinedPolicy.StrictUndefined:
+                    raise GlyphUndefinedError(
+                        GLYPH_EVAL_UNDEFINED,
+                        "undefined variable '" + name + "'",
+                        span,
+                        "define '" + name + "' or use |default"
+                    )
+                case UndefinedPolicy.LenientUndefined:
+                    return Value.VNull
+        case _:
+            return v
+
+def _value_equals(a: Value, b: Value, policy: UndefinedPolicy, span: SourceSpan) -> bool:
+    va: Value = _check_not_undef(a, policy, span)
+    vb: Value = _check_not_undef(b, policy, span)
+    match va:
+        case Value.VNull:
+            match vb:
+                case Value.VNull:
+                    return True
+                case _:
+                    return False
+        case Value.VBool(ba):
+            match vb:
+                case Value.VBool(bb):
+                    return ba == bb
+                case _:
+                    return False
+        case Value.VInt(ia):
+            match vb:
+                case Value.VInt(ib):
+                    return ia == ib
+                case Value.VFloat(fb):
+                    return float(ia) == fb
+                case _:
+                    return False
+        case Value.VFloat(fa):
+            match vb:
+                case Value.VFloat(fb2):
+                    return fa == fb2
+                case Value.VInt(ib2):
+                    return fa == float(ib2)
+                case _:
+                    return False
+        case Value.VStr(sa):
+            match vb:
+                case Value.VStr(sb):
+                    return sa == sb
+                case Value.VTrustedMarkup(cb, _):
+                    return sa == cb
+                case _:
+                    return False
+        case Value.VTrustedMarkup(ca, _):
+            match vb:
+                case Value.VTrustedMarkup(cb2, _):
+                    return ca == cb2
+                case Value.VStr(sb2):
+                    return ca == sb2
+                case _:
+                    return False
+        case Value.VList(la):
+            match vb:
+                case Value.VList(lb):
+                    if len(la) != len(lb):
+                        return False
+                    i: int = 0
+                    while i < len(la):
+                        if not _value_equals(la[i], lb[i], policy, span):
+                            return False
+                        i = i + 1
+                    return True
+                case _:
+                    return False
+        case Value.VMap(ma):
+            match vb:
+                case Value.VMap(mb):
+                    if ma.size() != mb.size():
+                        return False
+                    keys: list[str] = ma.keys_list()
+                    j: int = 0
+                    while j < len(keys):
+                        k: str = keys[j]
+                        if not mb.contains(k):
+                            return False
+                        if not _value_equals(ma.get(k), mb.get(k), policy, span):
+                            return False
+                        j = j + 1
+                    return True
+                case _:
+                    return False
+        case Value.VUndefined(_):
+            return False
+        case Value.VCallable(na):
+            match vb:
+                case Value.VCallable(nb):
+                    return na == nb
+                case _:
+                    return False
+
+def _compare_order(a: Value, b: Value, op: BinaryOp, policy: UndefinedPolicy, span: SourceSpan) -> bool:
+    va: Value = _check_not_undef(a, policy, span)
+    vb: Value = _check_not_undef(b, policy, span)
+    cmp: int = 0
+    match va:
+        case Value.VInt(ia):
+            match vb:
+                case Value.VInt(ib):
+                    if ia < ib:
+                        cmp = -1
+                    elif ia > ib:
+                        cmp = 1
+                case Value.VFloat(fb):
+                    fa: float = float(ia)
+                    if fa < fb:
+                        cmp = -1
+                    elif fa > fb:
+                        cmp = 1
+                case _:
+                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "cannot compare integer with non-number", span, "compare matching types")
+        case Value.VFloat(fa2):
+            match vb:
+                case Value.VFloat(fb2):
+                    if fa2 < fb2:
+                        cmp = -1
+                    elif fa2 > fb2:
+                        cmp = 1
+                case Value.VInt(ib2):
+                    fb3: float = float(ib2)
+                    if fa2 < fb3:
+                        cmp = -1
+                    elif fa2 > fb3:
+                        cmp = 1
+                case _:
+                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "cannot compare float with non-number", span, "compare matching types")
+        case Value.VStr(sa):
+            match vb:
+                case Value.VStr(sb):
+                    if sa < sb:
+                        cmp = -1
+                    elif sa > sb:
+                        cmp = 1
+                case _:
+                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "cannot compare string with non-string", span, "compare matching types")
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "ordered comparison requires numbers or strings", span, "use == or != for non-orderable values")
+    match op:
+        case BinaryOp.BLt:
+            return cmp < 0
+        case BinaryOp.BLtEq:
+            return cmp <= 0
+        case BinaryOp.BGt:
+            return cmp > 0
+        case BinaryOp.BGtEq:
+            return cmp >= 0
+        case _:
+            return False
+
+def _contains_in(needle: Value, haystack: Value, policy: UndefinedPolicy, span: SourceSpan) -> bool:
+    vn: Value = _check_not_undef(needle, policy, span)
+    vh: Value = _check_not_undef(haystack, policy, span)
+    match vh:
+        case Value.VList(items):
+            i: int = 0
+            while i < len(items):
+                if _value_equals(vn, items[i], policy, span):
+                    return True
+                i = i + 1
+            return False
+        case Value.VMap(entries):
+            match vn:
+                case Value.VStr(k):
+                    return entries.contains(k)
+                case _:
+                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "map membership check requires string key", span, "check string key 'in' map")
+        case Value.VStr(s):
+            match vn:
+                case Value.VStr(sub):
+                    return nox.strings.contains(s, sub)
+                case _:
+                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "string membership check requires string needle", span, "check string 'in' string")
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "'in' expects list, map, or string", span, "pass a collection or string")
+
+class _Evaluator:
+    scope: RenderScope
+    tracker: BudgetTracker
+    writer: GlyphWriter
+    filters: FilterRegistry
+    tests: TestRegistry
+    functions: FunctionRegistry
+    options: RenderOptions
+
+    def __init__(
+        self: _Evaluator,
+        scope: RenderScope,
+        tracker: BudgetTracker,
+        writer: GlyphWriter,
+        filters: FilterRegistry,
+        tests: TestRegistry,
+        functions: FunctionRegistry,
+        options: RenderOptions
+    ) -> None:
+        self.scope = scope
+        self.tracker = tracker
+        self.writer = writer
+        self.filters = filters
+        self.tests = tests
+        self.functions = functions
+        self.options = options
+
+    def eval_expr(self: _Evaluator, expr: Expr) -> Value:
+        self.tracker.consume_op(expr.span)
+        match expr.kind:
+            case ExprKind.ENull:
+                return Value.VNull
+            case ExprKind.EBool(b):
+                return Value.VBool(b)
+            case ExprKind.EInt(i):
+                return Value.VInt(i)
+            case ExprKind.EFloat(f):
+                _vf: float = validate_float(f, expr.span)
+                return Value.VFloat(f)
+            case ExprKind.EStr(s):
+                return Value.VStr(s)
+            case ExprKind.EIdent(name):
+                return self.scope.get(name, expr.span)
+            case ExprKind.EList(items):
+                out: list[Value] = []
+                idx: int = 0
+                while idx < len(items):
+                    out.append(self.eval_expr(items[idx]))
+                    idx = idx + 1
+                return Value.VList(out)
+            case ExprKind.EMap(entries):
+                m: OrderedDict[str, Value] = OrderedDict[str, Value]()
+                j: int = 0
+                while j < len(entries):
+                    ent: MapEntry = entries[j]
+                    k_val: Value = self.eval_expr(ent.key)
+                    match k_val:
+                        case Value.VStr(ks):
+                            if is_forbidden_key(ks):
+                                raise GlyphSecurityError(GLYPH_SECURITY_POLICY, "forbidden map literal key", ent.span, "use plain key names")
+                            m.set(ks, self.eval_expr(ent.value))
+                        case _:
+                            raise GlyphTypeError(GLYPH_EVAL_TYPE, "map literal keys must be strings", ent.span, "use string keys in { ... }")
+                    j = j + 1
+                return Value.VMap(m)
+            case ExprKind.EMember(target, field):
+                tv: Value = self.eval_expr(target)
+                match tv:
+                    case Value.VMap(map_entries):
+                        return map_get(map_entries, field, expr.span)
+                    case Value.VUndefined(tname):
+                        return Value.VUndefined(tname + "." + field)
+                    case _:
+                        raise GlyphTypeError(GLYPH_EVAL_TYPE, "cannot access field '" + field + "' on non-map value", expr.span, "only map fields can be accessed with '.'")
+            case ExprKind.EIndex(target, index_expr):
+                tv2: Value = self.eval_expr(target)
+                iv2: Value = self.eval_expr(index_expr)
+                match tv2:
+                    case Value.VList(items2):
+                        match iv2:
+                            case Value.VInt(pos):
+                                return list_get(items2, pos, expr.span)
+                            case _:
+                                raise GlyphTypeError(GLYPH_EVAL_TYPE, "list index must be an integer", expr.span, "pass an integer index")
+                    case Value.VMap(entries2):
+                        match iv2:
+                            case Value.VStr(k2):
+                                return map_get(entries2, k2, expr.span)
+                            case _:
+                                raise GlyphTypeError(GLYPH_EVAL_TYPE, "map index must be a string", expr.span, "pass a string key")
+                    case Value.VStr(s2):
+                        match iv2:
+                            case Value.VInt(pos2):
+                                slen: int = len(s2)
+                                p: int = pos2
+                                if p < 0:
+                                    p = slen + p
+                                if p < 0 or p >= slen:
+                                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "string index out of range", expr.span, "check string length")
+                                return Value.VStr(s2[p:p + 1])
+                            case _:
+                                raise GlyphTypeError(GLYPH_EVAL_TYPE, "string index must be an integer", expr.span, "pass an integer index")
+                    case _:
+                        raise GlyphTypeError(GLYPH_EVAL_TYPE, "value is not indexable", expr.span, "index only lists, maps, or strings")
+            case ExprKind.EUnary(uop, operand):
+                ov: Value = self.eval_expr(operand)
+                match uop:
+                    case UnaryOp.UNot:
+                        return Value.VBool(not is_truthy(ov, self.options.undefined_policy, expr.span))
+                    case UnaryOp.UNeg:
+                        match ov:
+                            case Value.VInt(i3):
+                                if i3 == INT64_MIN:
+                                    raise GlyphTypeError(GLYPH_EVAL_OVERFLOW, "integer negation overflow", expr.span, "cannot negate INT64_MIN")
+                                return Value.VInt(0 - i3)
+                            case Value.VFloat(f3):
+                                return Value.VFloat(0.0 - f3)
+                            case _:
+                                raise GlyphTypeError(GLYPH_EVAL_TYPE, "unary '-' requires a number", expr.span, "negate an integer or float")
+                    case UnaryOp.UPos:
+                        match ov:
+                            case Value.VInt(_):
+                                return ov
+                            case Value.VFloat(_):
+                                return ov
+                            case _:
+                                raise GlyphTypeError(GLYPH_EVAL_TYPE, "unary '+' requires a number", expr.span, "apply '+' only to numbers")
+            case ExprKind.EBinary(bop, left, right):
+                return self.eval_binary(bop, left, right, expr.span)
+            case ExprKind.EConditional(cond, then_expr, else_expr):
+                cv: Value = self.eval_expr(cond)
+                if is_truthy(cv, self.options.undefined_policy, expr.span):
+                    return self.eval_expr(then_expr)
+                return self.eval_expr(else_expr)
+            case ExprKind.EFilter(target, fname, args):
+                fv: Value = self.eval_expr(target)
+                fargs: list[FilterArgValue] = []
+                ai: int = 0
+                while ai < len(args):
+                    ca: CallArg = args[ai]
+                    fargs.append(FilterArgValue(ca.name, self.eval_expr(ca.value)))
+                    ai = ai + 1
+                return apply_filter(self.filters, fname, fv, fargs, self.options.undefined_policy, self.tracker, expr.span)
+            case ExprKind.EIsTest(target, tname, negated, args):
+                tv3: Value = self.eval_expr(target)
+                targs: list[Value] = []
+                ti: int = 0
+                while ti < len(args):
+                    targs.append(self.eval_expr(args[ti].value))
+                    ti = ti + 1
+                matched: bool = apply_test(self.tests, tname, tv3, targs, self.tracker, expr.span)
+                if negated:
+                    return Value.VBool(not matched)
+                return Value.VBool(matched)
+            case ExprKind.ECall(fn_name, args):
+                cargs: list[Value] = []
+                ci: int = 0
+                while ci < len(args):
+                    ca2: CallArg = args[ci]
+                    if len(ca2.name) > 0:
+                        raise GlyphTypeError(GLYPH_EVAL_TYPE, "keyword arguments are not supported for '" + fn_name + "'", ca2.span, "pass positional arguments")
+                    cargs.append(self.eval_expr(ca2.value))
+                    ci = ci + 1
+                return apply_function(self.functions, fn_name, cargs, self.tracker, expr.span)
+
+    def eval_binary(self: _Evaluator, op: BinaryOp, left_expr: Expr, right_expr: Expr, span: SourceSpan) -> Value:
+        match op:
+            case BinaryOp.BAnd:
+                lv: Value = self.eval_expr(left_expr)
+                if not is_truthy(lv, self.options.undefined_policy, span):
+                    return lv
+                return self.eval_expr(right_expr)
+            case BinaryOp.BOr:
+                lv2: Value = self.eval_expr(left_expr)
+                if is_truthy(lv2, self.options.undefined_policy, span):
+                    return lv2
+                return self.eval_expr(right_expr)
+            case _:
+                l: Value = self.eval_expr(left_expr)
+                r: Value = self.eval_expr(right_expr)
+                return self._eval_binary_eager(op, l, r, span)
+
+    def _eval_binary_eager(self: _Evaluator, op: BinaryOp, l: Value, r: Value, span: SourceSpan) -> Value:
+        pol: UndefinedPolicy = self.options.undefined_policy
+        match op:
+            case BinaryOp.BEq:
+                return Value.VBool(_value_equals(l, r, pol, span))
+            case BinaryOp.BNotEq:
+                return Value.VBool(not _value_equals(l, r, pol, span))
+            case BinaryOp.BLt:
+                return Value.VBool(_compare_order(l, r, BinaryOp.BLt, pol, span))
+            case BinaryOp.BLtEq:
+                return Value.VBool(_compare_order(l, r, BinaryOp.BLtEq, pol, span))
+            case BinaryOp.BGt:
+                return Value.VBool(_compare_order(l, r, BinaryOp.BGt, pol, span))
+            case BinaryOp.BGtEq:
+                return Value.VBool(_compare_order(l, r, BinaryOp.BGtEq, pol, span))
+            case BinaryOp.BIn:
+                return Value.VBool(_contains_in(l, r, pol, span))
+            case BinaryOp.BNotIn:
+                return Value.VBool(not _contains_in(l, r, pol, span))
+            case BinaryOp.BAdd:
+                return self._eval_add(l, r, span)
+            case BinaryOp.BSub:
+                return self._eval_arith_num(l, r, BinaryOp.BSub, span)
+            case BinaryOp.BMul:
+                return self._eval_arith_num(l, r, BinaryOp.BMul, span)
+            case BinaryOp.BDiv:
+                return self._eval_arith_num(l, r, BinaryOp.BDiv, span)
+            case BinaryOp.BFloorDiv:
+                return self._eval_arith_num(l, r, BinaryOp.BFloorDiv, span)
+            case BinaryOp.BMod:
+                return self._eval_arith_num(l, r, BinaryOp.BMod, span)
+            case _:
+                return Value.VNull
+
+    def _eval_add(self: _Evaluator, l: Value, r: Value, span: SourceSpan) -> Value:
+        pol: UndefinedPolicy = self.options.undefined_policy
+        vl: Value = _check_not_undef(l, pol, span)
+        vr: Value = _check_not_undef(r, pol, span)
+        match vl:
+            case Value.VStr(sa):
+                match vr:
+                    case Value.VStr(sb):
+                        return Value.VStr(sa + sb)
+                    case Value.VTrustedMarkup(cb, _):
+                        # Concatenating plain string with trusted markup strips trust
+                        return Value.VStr(sa + cb)
+                    case _:
+                        raise GlyphTypeError(GLYPH_EVAL_TYPE, "cannot add string and non-string", span, "convert non-string with |string")
+            case Value.VTrustedMarkup(ca, _):
+                match vr:
+                    case Value.VStr(sb2):
+                        return Value.VStr(ca + sb2)
+                    case Value.VTrustedMarkup(cb2, _):
+                        return Value.VStr(ca + cb2)
+                    case _:
+                        raise GlyphTypeError(GLYPH_EVAL_TYPE, "cannot add markup and non-string", span, "convert non-string with |string")
+            case Value.VList(la):
+                match vr:
+                    case Value.VList(lb):
+                        merged: list[Value] = []
+                        i: int = 0
+                        while i < len(la):
+                            merged.append(la[i])
+                            i = i + 1
+                        j: int = 0
+                        while j < len(lb):
+                            merged.append(lb[j])
+                            j = j + 1
+                        return Value.VList(merged)
+                    case _:
+                        raise GlyphTypeError(GLYPH_EVAL_TYPE, "cannot add list and non-list", span, "both operands must be lists")
+            case _:
+                return self._eval_arith_num(vl, vr, BinaryOp.BAdd, span)
+
+    def _eval_arith_num(self: _Evaluator, l: Value, r: Value, op: BinaryOp, span: SourceSpan) -> Value:
+        pol: UndefinedPolicy = self.options.undefined_policy
+        vl: Value = _check_not_undef(l, pol, span)
+        vr: Value = _check_not_undef(r, pol, span)
+        match vl:
+            case Value.VInt(ia):
+                match vr:
+                    case Value.VInt(ib):
+                        match op:
+                            case BinaryOp.BAdd:
+                                return Value.VInt(checked_add(ia, ib, span))
+                            case BinaryOp.BSub:
+                                return Value.VInt(checked_sub(ia, ib, span))
+                            case BinaryOp.BMul:
+                                return Value.VInt(checked_mul(ia, ib, span))
+                            case BinaryOp.BFloorDiv:
+                                return Value.VInt(checked_floordiv(ia, ib, span))
+                            case BinaryOp.BMod:
+                                return Value.VInt(checked_mod(ia, ib, span))
+                            case BinaryOp.BDiv:
+                                if ib == 0:
+                                    raise GlyphTypeError(GLYPH_EVAL_DIV_ZERO, "division by zero", span, "ensure divisor is non-zero")
+                                return Value.VFloat(validate_float(float(ia) / float(ib), span))
+                            case _:
+                                return Value.VNull
+                    case Value.VFloat(fb):
+                        return self._eval_float_op(float(ia), fb, op, span)
+                    case _:
+                        raise GlyphTypeError(GLYPH_EVAL_TYPE, "arithmetic requires numeric operands", span, "use integer or float")
+            case Value.VFloat(fa):
+                match vr:
+                    case Value.VFloat(fb2):
+                        return self._eval_float_op(fa, fb2, op, span)
+                    case Value.VInt(ib2):
+                        return self._eval_float_op(fa, float(ib2), op, span)
+                    case _:
+                        raise GlyphTypeError(GLYPH_EVAL_TYPE, "arithmetic requires numeric operands", span, "use integer or float")
+            case _:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "arithmetic requires numeric operands", span, "use integer or float")
+
+    def _eval_float_op(self: _Evaluator, a: float, b: float, op: BinaryOp, span: SourceSpan) -> Value:
+        _va: float = validate_float(a, span)
+        _vb: float = validate_float(b, span)
+        match op:
+            case BinaryOp.BAdd:
+                return Value.VFloat(validate_float(a + b, span))
+            case BinaryOp.BSub:
+                return Value.VFloat(validate_float(a - b, span))
+            case BinaryOp.BMul:
+                return Value.VFloat(validate_float(a * b, span))
+            case BinaryOp.BDiv:
+                if b == 0.0:
+                    raise GlyphTypeError(GLYPH_EVAL_DIV_ZERO, "float division by zero", span, "ensure divisor is non-zero")
+                return Value.VFloat(validate_float(a / b, span))
+            case BinaryOp.BFloorDiv:
+                if b == 0.0:
+                    raise GlyphTypeError(GLYPH_EVAL_DIV_ZERO, "float division by zero", span, "ensure divisor is non-zero")
+                return Value.VFloat(validate_float(float(int(a / b)), span))
+            case BinaryOp.BMod:
+                if b == 0.0:
+                    raise GlyphTypeError(GLYPH_EVAL_DIV_ZERO, "float modulo by zero", span, "ensure divisor is non-zero")
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "modulo '%' is supported on integers only", span, "use integer operands with '%'")
+            case _:
+                return Value.VNull
+
+    def exec_stmts(self: _Evaluator, stmts: list[Stmt]) -> None:
+        i: int = 0
+        while i < len(stmts):
+            st: Stmt = stmts[i]
+            self.tracker.consume_op(st.span)
+            match st.kind:
+                case StmtKind.SText(txt):
+                    self.writer.write(txt, st.span)
+                case StmtKind.SOutput(expr):
+                    val: Value = self.eval_expr(expr)
+                    rendered: str = render_value_for_mode(
+                        val,
+                        self.options.autoescape,
+                        self.options.output_mode,
+                        self.options.undefined_policy,
+                        st.span
+                    )
+                    self.writer.write(rendered, st.span)
+                case StmtKind.SIf(branches, else_body):
+                    taken: bool = False
+                    bi: int = 0
+                    while bi < len(branches) and not taken:
+                        br: IfBranch = branches[bi]
+                        cond_v: Value = self.eval_expr(br.cond)
+                        if is_truthy(cond_v, self.options.undefined_policy, br.span):
+                            self.scope.push_frame()
+                            self.exec_stmts(br.body)
+                            self.scope.pop_frame()
+                            taken = True
+                        bi = bi + 1
+                    if not taken and len(else_body) > 0:
+                        self.scope.push_frame()
+                        self.exec_stmts(else_body)
+                        self.scope.pop_frame()
+                case StmtKind.SFor(targets, iterable, body, else_body):
+                    self._exec_for(targets, iterable, body, else_body, st.span)
+                case StmtKind.SSet(target, val_expr):
+                    sval: Value = self.eval_expr(val_expr)
+                    self.scope.set_local(target, sval, st.span)
+                case _:
+                    raise GlyphRenderError(
+                        GLYPH_RENDER_ERROR,
+                        "composition statements (include/extends/block/macro/import/call) require Phase 4-5 composition runtime",
+                        st.span,
+                        "use core statements in v0.1 MVP"
+                    )
+            i = i + 1
+
+    def _exec_for(
+        self: _Evaluator,
+        targets: list[str],
+        iterable: Expr,
+        body: list[Stmt],
+        else_body: list[Stmt],
+        span: SourceSpan
+    ) -> None:
+        seq_val: Value = _check_not_undef(self.eval_expr(iterable), self.options.undefined_policy, span)
+        match seq_val:
+            case Value.VList(items):
+                if len(targets) != 1:
+                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "list iteration expects 1 loop target variable", span, "use '{% for item in list %}'")
+                n: int = len(items)
+                if n == 0:
+                    if len(else_body) > 0:
+                        self.scope.push_frame()
+                        self.exec_stmts(else_body)
+                        self.scope.pop_frame()
+                    return
+                idx: int = 0
+                while idx < n:
+                    self.tracker.consume_loop_step(span)
+                    self.scope.push_frame()
+                    self.scope.set_local(targets[0], items[idx], span)
+                    self.scope.set_local("loop", make_loop_metadata(idx, n), span)
+                    self.exec_stmts(body)
+                    self.scope.pop_frame()
+                    idx = idx + 1
+            case Value.VMap(entries):
+                keys: list[str] = entries.keys_list()
+                kn: int = len(keys)
+                if kn == 0:
+                    if len(else_body) > 0:
+                        self.scope.push_frame()
+                        self.exec_stmts(else_body)
+                        self.scope.pop_frame()
+                    return
+                kidx: int = 0
+                while kidx < kn:
+                    self.tracker.consume_loop_step(span)
+                    key_s: str = keys[kidx]
+                    self.scope.push_frame()
+                    if len(targets) == 1:
+                        self.scope.set_local(targets[0], Value.VStr(key_s), span)
+                    elif len(targets) == 2:
+                        self.scope.set_local(targets[0], Value.VStr(key_s), span)
+                        self.scope.set_local(targets[1], entries.get(key_s), span)
+                    else:
+                        raise GlyphTypeError(GLYPH_EVAL_TYPE, "map iteration expects 1 or 2 target variables", span, "use '{% for k, v in map %}'")
+                    self.scope.set_local("loop", make_loop_metadata(kidx, kn), span)
+                    self.exec_stmts(body)
+                    self.scope.pop_frame()
+                    kidx = kidx + 1
+            case _:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "for-loop iterable must be a list or map", span, "iterate over a list or map")
+
+def execute_template(
+    tpl: Template,
+    root_vars: OrderedDict[str, Value],
+    writer: GlyphWriter,
+    tracker: BudgetTracker,
+    filters: FilterRegistry,
+    tests: TestRegistry,
+    functions: FunctionRegistry,
+    options: RenderOptions
+) -> RenderResult:
+    # Effective trust policy takes the most restrictive tier between template and render options.
+    eff_trust: TrustTier = min_trust_tier(tpl.trust_tier, options.trust_tier)
+    eff_allow_safe: bool = filters.allow_safe
+    match eff_trust:
+        case TrustTier.Trusted:
+            pass
+        case _:
+            eff_allow_safe = False
+
+    eff_filters: FilterRegistry = FilterRegistry(eff_allow_safe)
+    eff_filters.custom_names = filters.custom_names
+    eff_filters.custom_fns = filters.custom_fns
+    eff_filters.generation = filters.generation
+
+    scope: RenderScope = RenderScope(root_vars)
+    ev: _Evaluator = _Evaluator(scope, tracker, writer, eff_filters, tests, functions, options)
+    ev.exec_stmts(tpl.ast.body)
+    writer.flush()
+    return RenderResult(
+        writer.to_string(),
+        writer.bytes_written,
+        tracker.total_ops_used,
+        tracker.loop_steps_used,
+        True
+    )

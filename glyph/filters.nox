@@ -1,0 +1,208 @@
+# MVP FilterRegistry and built-in pure filters for Glyph (Phase 3).
+# Enforces AGENTS.md §2.5, §2.8, §13: pure, bounded, safe-by-default (`|safe` disabled by default).
+import nox.strings
+from glyph.errors import SourceSpan, GlyphTypeError, GlyphSecurityError, GlyphExtensionError
+from glyph.errors import GLYPH_EVAL_TYPE, GLYPH_SECURITY_POLICY, GLYPH_EXTENSION_ERROR
+from glyph.limits import BudgetTracker
+from glyph.value import Value, MarkupContext, UndefinedPolicy, is_truthy, stringify
+from glyph.safety import escape_html_with_span
+
+class FilterArgValue:
+    name: str
+    value: Value
+
+    def __init__(self: FilterArgValue, name: str, value: Value) -> None:
+        self.name = name
+        self.value = value
+
+class FilterRegistry:
+    allow_safe: bool
+    custom_names: list[str]
+    custom_fns: list[(Value, list[FilterArgValue], BudgetTracker, SourceSpan) -> Value]
+    generation: int
+
+    def __init__(self: FilterRegistry, allow_safe: bool) -> None:
+        self.allow_safe = allow_safe
+        empty_names: list[str] = []
+        empty_fns: list[(Value, list[FilterArgValue], BudgetTracker, SourceSpan) -> Value] = []
+        self.custom_names = empty_names
+        self.custom_fns = empty_fns
+        self.generation = 1
+
+    def register(
+        self: FilterRegistry,
+        name: str,
+        fn: (Value, list[FilterArgValue], BudgetTracker, SourceSpan) -> Value
+    ) -> None:
+        if _is_core_filter_name(name):
+            raise GlyphExtensionError(
+                GLYPH_EXTENSION_ERROR,
+                "cannot override core filter '" + name + "'",
+                SourceSpan("<registry>", 1, 1, 0, 0),
+                "register custom filters under a distinct name"
+            )
+        names: list[str] = self.custom_names
+        fns: list[(Value, list[FilterArgValue], BudgetTracker, SourceSpan) -> Value] = self.custom_fns
+        i: int = 0
+        while i < len(names):
+            if names[i] == name:
+                fns[i] = fn
+                self.custom_fns = fns
+                self.generation = self.generation + 1
+                return
+            i = i + 1
+        names.append(name)
+        fns.append(fn)
+        self.custom_names = names
+        self.custom_fns = fns
+        self.generation = self.generation + 1
+
+def default_filters(allow_safe: bool) -> FilterRegistry:
+    return FilterRegistry(allow_safe)
+
+def _is_core_filter_name(name: str) -> bool:
+    if name == "escape" or name == "e" or name == "safe" or name == "raw":
+        return True
+    if name == "default" or name == "length" or name == "join" or name == "upper" or name == "lower":
+        return True
+    return False
+
+def _expect_no_args(name: str, args: list[FilterArgValue], span: SourceSpan) -> None:
+    if len(args) > 0:
+        raise GlyphTypeError(
+            GLYPH_EVAL_TYPE,
+            "filter '" + name + "' takes no arguments",
+            span,
+            "remove extra arguments from |" + name
+        )
+
+def _get_arg(args: list[FilterArgValue], pos: int, kw_name: str, fallback: Value) -> Value:
+    i: int = 0
+    while i < len(args):
+        if len(args[i].name) > 0 and args[i].name == kw_name:
+            return args[i].value
+        i = i + 1
+    if pos < len(args) and len(args[pos].name) == 0:
+        return args[pos].value
+    return fallback
+
+def _filter_escape(val: Value, args: list[FilterArgValue], policy: UndefinedPolicy, span: SourceSpan) -> Value:
+    _expect_no_args("escape", args, span)
+    match val:
+        case Value.VTrustedMarkup(content, ctx):
+            match ctx:
+                case MarkupContext.SafeHtml:
+                    return val
+                case _:
+                    return Value.VTrustedMarkup(escape_html_with_span(content, span), MarkupContext.SafeHtml)
+        case _:
+            raw: str = stringify(val, policy, span)
+            return Value.VTrustedMarkup(escape_html_with_span(raw, span), MarkupContext.SafeHtml)
+
+def _filter_default(val: Value, args: list[FilterArgValue], policy: UndefinedPolicy, span: SourceSpan) -> Value:
+    if len(args) > 2:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "filter 'default' takes at most 2 arguments", span, "use |default(value, boolean=false)")
+    def_val: Value = _get_arg(args, 0, "default_value", Value.VStr(""))
+    bool_arg: Value = _get_arg(args, 1, "boolean", Value.VBool(False))
+    check_falsy: bool = False
+    match bool_arg:
+        case Value.VBool(b):
+            check_falsy = b
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "default() 'boolean' argument must be a boolean", span, "pass true or false")
+    match val:
+        case Value.VUndefined(_):
+            return def_val
+        case _:
+            if check_falsy:
+                if not is_truthy(val, policy, span):
+                    return def_val
+            return val
+
+def _filter_length(val: Value, args: list[FilterArgValue], span: SourceSpan) -> Value:
+    _expect_no_args("length", args, span)
+    match val:
+        case Value.VStr(s):
+            return Value.VInt(len(s))
+        case Value.VList(items):
+            return Value.VInt(len(items))
+        case Value.VMap(entries):
+            return Value.VInt(entries.size())
+        case Value.VTrustedMarkup(c, _):
+            return Value.VInt(len(c))
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "length filter expects string, list, or map", span, "pass a sized value to |length")
+
+def _filter_join(val: Value, args: list[FilterArgValue], policy: UndefinedPolicy, tracker: BudgetTracker, span: SourceSpan) -> Value:
+    if len(args) > 1:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "filter 'join' takes at most 1 argument", span, "use |join(', ')")
+    sep_val: Value = _get_arg(args, 0, "d", Value.VStr(""))
+    sep: str = stringify(sep_val, policy, span)
+    match val:
+        case Value.VList(items):
+            parts: list[str] = []
+            i: int = 0
+            while i < len(items):
+                tracker.consume_op(span)
+                parts.append(stringify(items[i], policy, span))
+                i = i + 1
+            return Value.VStr(nox.strings.join(parts, sep))
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "join filter expects a list", span, "pass a list to |join")
+
+def _filter_case(val: Value, args: list[FilterArgValue], to_upper: bool, policy: UndefinedPolicy, span: SourceSpan) -> Value:
+    fname: str = "lower"
+    if to_upper:
+        fname = "upper"
+    _expect_no_args(fname, args, span)
+    s: str = stringify(val, policy, span)
+    if to_upper:
+        return Value.VStr(nox.strings.upper(s))
+    return Value.VStr(nox.strings.lower(s))
+
+def apply_filter(
+    reg: FilterRegistry,
+    name: str,
+    val: Value,
+    args: list[FilterArgValue],
+    policy: UndefinedPolicy,
+    tracker: BudgetTracker,
+    span: SourceSpan
+) -> Value:
+    tracker.consume_op(span)
+    if name == "escape" or name == "e":
+        return _filter_escape(val, args, policy, span)
+    if name == "default":
+        return _filter_default(val, args, policy, span)
+    if name == "length":
+        return _filter_length(val, args, span)
+    if name == "join":
+        return _filter_join(val, args, policy, tracker, span)
+    if name == "upper":
+        return _filter_case(val, args, True, policy, span)
+    if name == "lower":
+        return _filter_case(val, args, False, policy, span)
+    if name == "safe" or name == "raw":
+        if not reg.allow_safe:
+            raise GlyphSecurityError(
+                GLYPH_SECURITY_POLICY,
+                "filter '" + name + "' is disabled in safe-by-default mode",
+                span,
+                "use typed TrustedMarkup from host context instead"
+            )
+        _expect_no_args(name, args, span)
+        return Value.VTrustedMarkup(stringify(val, policy, span), MarkupContext.SafeHtml)
+
+    i: int = 0
+    while i < len(reg.custom_names):
+        if reg.custom_names[i] == name:
+            fn: (Value, list[FilterArgValue], BudgetTracker, SourceSpan) -> Value = reg.custom_fns[i]
+            return fn(val, args, tracker, span)
+        i = i + 1
+
+    raise GlyphExtensionError(
+        GLYPH_EXTENSION_ERROR,
+        "unknown filter '" + name + "'",
+        span,
+        "check registered filter names"
+    )

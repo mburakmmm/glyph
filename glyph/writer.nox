@@ -1,0 +1,77 @@
+# Chunk-buffered writer with output byte budget enforcement and RenderResult.
+# Enforces AGENTS.md §8.4: avoids O(n^2) concatenation and bounds total output bytes.
+import nox.strings
+from glyph.errors import SourceSpan, GlyphRenderError, GLYPH_RENDER_ERROR
+from glyph.limits import BudgetTracker
+
+class RenderResult:
+    output: str
+    bytes_written: int
+    ops_used: int
+    loop_steps_used: int
+    completed: bool
+
+    def __init__(
+        self: RenderResult,
+        output: str,
+        bytes_written: int,
+        ops_used: int,
+        loop_steps_used: int,
+        completed: bool
+    ) -> None:
+        self.output = output
+        self.bytes_written = bytes_written
+        self.ops_used = ops_used
+        self.loop_steps_used = loop_steps_used
+        self.completed = completed
+
+class GlyphWriter:
+    chunks: list[str]
+    bytes_written: int
+    tracker: BudgetTracker
+    closed: bool
+
+    def __init__(self: GlyphWriter, tracker: BudgetTracker) -> None:
+        empty_chunks: list[str] = []
+        self.chunks = empty_chunks
+        self.bytes_written = 0
+        self.tracker = tracker
+        self.closed = False
+
+    def write(self: GlyphWriter, chunk: str, span: SourceSpan) -> None:
+        if self.closed:
+            raise GlyphRenderError(
+                GLYPH_RENDER_ERROR,
+                "cannot write to closed GlyphWriter",
+                span,
+                "check writer lifecycle"
+            )
+        blen: int = nox.strings.byte_len(chunk)
+        if blen == 0:
+            return
+        self.tracker.consume_output_bytes(blen, span)
+        cur: list[str] = self.chunks
+        cur.append(chunk)
+        if len(cur) >= 512:
+            merged: str = nox.strings.join(cur, "")
+            self.chunks = [merged]
+        else:
+            self.chunks = cur
+        self.bytes_written = self.bytes_written + blen
+
+    def flush(self: GlyphWriter) -> None:
+        if len(self.chunks) > 1:
+            merged: str = nox.strings.join(self.chunks, "")
+            self.chunks = [merged]
+
+    def close(self: GlyphWriter) -> None:
+        if not self.closed:
+            self.flush()
+            self.closed = True
+
+    def to_string(self: GlyphWriter) -> str:
+        if len(self.chunks) == 0:
+            return ""
+        if len(self.chunks) == 1:
+            return self.chunks[0]
+        return nox.strings.join(self.chunks, "")

@@ -2,7 +2,7 @@
 
 > **Kaynak Sözleşme:** [AGENTS.md](AGENTS.md)  
 > **Hedef Dil & Doğrulanan Araç Zinciri:** `noxc 2.1.186` (`C:\Users\Administrator\.nox-lang\bin\noxc.exe`)  
-> **Durum:** Faz 2 (`v0.0.3-parser-ast`) tamamlandı — Faz 3 (`v0.1.0` MVP) sıradaki iş.  
+> **Durum:** Faz 3 (`v0.1.0` MVP) tamamlandı — Faz 4 (`v0.2.0`) sıradaki iş.  
 > **Kural:** Hiçbir madde, gerçek `.nox` kodu `noxc check` ve `noxc test` ile çalıştırılıp kanıtlanmadan `[x]` işaretlenmez.
 
 ---
@@ -24,7 +24,7 @@
 | Faz 0 | `v0.0.1-audit` | NOX 2.x capability audit, PoC'lar, repo iskeleti, ADR-0001 | `[x]` Tamamlandı |
 | Faz 1 | `v0.0.2-core-lexer` | Typed `Value`, `SourceSpan`, `Errors`, `ResourceBudget`, `Lexer` | `[x]` Tamamlandı |
 | Faz 2 | `v0.0.3-parser-ast` | Pratt expression parser, AST, statement nesting, static validation | `[x]` Tamamlandı |
-| Faz 3 | `v0.1.0` **(MVP)** | AST interpreter, Writer, default HTML escape, limits, `MemoryLoader`, Slice #1 | `[ ]` Başlanmadı |
+| Faz 3 | `v0.1.0` **(MVP)** | AST interpreter, Writer, default HTML escape, limits, `MemoryLoader`, Slice #1 | `[x]` Tamamlandı |
 | Faz 4 | `v0.2.0` | `FilesystemLoader` sandbox, `include`, `ParseCache`/`CompileCache`, dependency graph | `[ ]` Başlanmadı |
 | Faz 5 | `v0.3.0` | `extends`, `block`, `super()`, `macro`, `import`, `call/caller`, Slice #2 | `[ ]` Başlanmadı |
 | Faz 6 | `v0.4.0` | Contextual HTML escaping, URL/JS/CSS engeli, `TrustedMarkup`, security corpus | `[ ]` Başlanmadı |
@@ -127,26 +127,26 @@ Her PoC derlenip `noxc check` + `noxc test` ile doğrulanmış ve sonucu `docs/c
 **Amaç:** `AGENTS.md` §29'daki ilk vertical slice'ı güvenli, bütçeli ve yeniden kullanılabilir şekilde çalışan ilk yayınlanabilir MVP (`v0.1.0`) haline getirmek.
 
 ### 3.1. Scope, Context ve Writer (`glyph/options.nox`, `glyph/scope.nox`, `glyph/writer.nox`)
-- [ ] `glyph/options.nox`: `EnvironmentOptions` (`html_safe_defaults()`), `RenderOptions` (output mode, limits, strict-undefined, locale, trust tier).
-- [ ] `glyph/scope.nox`: Immutable global env, request-local `RenderContext`, lexical child scope (parent mutate edilemez, `set` sadece yerel/izinli scope'a yazar), `loop` metadata (`index`, `index0`, `first`, `last`, `length`, `revindex`).
-- [ ] `glyph/writer.nox`: `GlyphWriter` arayüzü ve chunk-buffered string writer (iterasyon başına O(n²) string birleştirme yok, her yazmada `max_output_bytes` kontrolü, hata halinde partial output bilgisi).
+- [x] `glyph/options.nox`: `EnvironmentOptions` (`html_safe_defaults()`, `text_safe_defaults()`, `restricted_defaults()`), `RenderOptions`, `OutputMode`, `TrustTier` (`min_trust_tier`).
+- [x] `glyph/scope.nox`: `Context`, `RenderScope` (lexical child frame stack, parent mutate edilemez, `set` sadece yerel scope'a yazar), `loop` metadata (`index`, `index0`, `first`, `last`, `length`, `revindex`, `revindex0`).
+- [x] `glyph/writer.nox`: `GlyphWriter` ve `RenderResult` (chunked `list[str]` + `nox.strings.join`, `max_output_bytes` kontrolü, `close()`).
 
 ### 3.2. Temel Güvenlik ve Built-in'ler (`glyph/safety.nox`, `filters.nox`, `tests_registry.nox`, `functions.nox`)
-- [ ] `glyph/safety.nox`: Varsayılan `autoescape=ON`, HTML text & quoted attribute escaping (`&`, `<`, `>`, `"`, `'`), `TrustedMarkup` temel etiketi; untrusted modda `|safe` ve `autoescape false` kapalı.
-- [ ] MVP built-in filtreler: `escape`, `default`, `length`, `join`, `upper`, `lower` (tümü type-checked ve budget'a bağlı).
-- [ ] MVP built-in test & fonksiyonlar: `defined`, `undefined`, `none`, `empty`, bounded `range(n)` (büyük aralık limiti ile).
+- [x] `glyph/safety.nox`: Varsayılan `autoescape=ON`, O(n) `escape_html` + NUL byte reddi, context-tagged `VTrustedMarkup`; untrusted modda `|safe` kapalı.
+- [x] MVP built-in filtreler: `escape`/`e`, `default`, `length`, `join`, `upper`, `lower`, policy-gated `safe` ve custom `FilterRegistry.register(...)`.
+- [x] MVP built-in test & fonksiyonlar: `defined`, `undefined`, `none`/`null`, `empty`, type testleri, bounded `range()` (`MAX_RANGE_ITEMS = 10000` + budget).
 
 ### 3.3. MemoryLoader, Runtime ve Public API (`glyph/loader.nox`, `loader_memory.nox`, `runtime.nox`, `environment.nox`, `api.nox`)
-- [ ] `glyph/loader.nox` & `glyph/loader_memory.nox`: `SourceRecord` (`logical_name`, `content`, `origin_id`, `fingerprint`, `trust_policy`) ve salt-okunur bellek içi `MemoryLoader`.
-- [ ] `glyph/runtime.nox`: AST interpreter (`Text`, `OutputExpr`, `If`, `For/Else`, `Set`, filtre zinciri, shared `BudgetTracker`, deterministik map/list iterasyonu).
-- [ ] `glyph/environment.nox` & `glyph/api.nox`: `Environment`, `Template` (immutable, reentrant), `compile_string`, `get_template`, `render`, `render_to_writer`, `lint`, `inspect`, `escape_html`.
+- [x] `glyph/loader.nox` & `glyph/loader_memory.nox`: `SourceRecord` ve salt-okunur bellek içi `MemoryLoader`.
+- [x] `glyph/runtime.nox`: AST interpreter (`Text`, `Output`, `If/Elif/Else`, `For/Else`, `Set`, short-circuit `and`/`or`/ternary, `TrustTier` floor, shared `BudgetTracker`).
+- [x] `glyph/environment.nox` & `glyph/api.nox`: `Environment`, `Template`, `compile_string`, `get_template`, `render`, `render_with_options`, `render_to_writer`, `lint`, `inspect`, `escape_html`.
 
 ### 3.4. MVP Kabul Kapısı (`v0.1.0`)
-- [ ] **Vertical Slice #1 (`AGENTS.md` §29):** `title="<Welcome>"` ve `item.name="<script>alert(1)</script>"` girdileriyle döngü + koşul + `upper` + HTML escaping doğrulaması.
-- [ ] Eşzamanlı/ardışık render izolasyon testi (bir render diğerinin scope/budget/output durumunu etkilemez).
-- [ ] XSS baseline testleri ve `ResourceBudget` (`loop steps`, `output bytes`, `total ops`) aşım testleri.
-- [ ] `examples/hello/` oluşturuldu ve gerçek `noxc run` ile çalıştırıldı.
-- [ ] `docs/api.md` (v0.1 yüzeyi), `docs/roadmap.md`, `CHANGELOG.md` (`v0.1.0`) güncellendi.
+- [x] **Vertical Slice #1 (`AGENTS.md` §29):** `title="<Welcome>"` ve `item.name="<script>alert(1)</script>"` ile `examples/hello/main.nox` ve `tests/rendering/render_test.nox` doğrulaması.
+- [x] Eşzamanlı/ardışık render izolasyon testi (`test_reusable_template_and_scope_isolation`).
+- [x] XSS baseline testleri, NUL reddi, `|safe` policy ve `ResourceBudget` aşım testleri (`tests/security/mvp_security_test.nox`).
+- [x] `examples/hello/main.nox` oluşturuldu ve `noxc run` ile çalıştırıldı.
+- [x] `docs/api.md` (v0.1.0 yüzeyi), `docs/roadmap.md`, `CHANGELOG.md` (`v0.1.0`) güncellendi.
 
 ---
 

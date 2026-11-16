@@ -1,0 +1,16 @@
+# Vertical Slice #1 example (AGENTS.md §29)
+import glyph.api
+from glyph.api import MemoryLoader, Environment, Template, Context
+
+loader: MemoryLoader = MemoryLoader()
+loader.put(
+    "pages/hello.html",
+    "<h1>{{ title }}</h1>\n<ul>\n{% for item in items %}\n  {% if item.visible %}<li>{{ item.name | upper }}</li>{% endif %}\n{% endfor %}\n</ul>"
+)
+
+env: Environment = glyph.api.default_environment(loader)
+tpl: Template = glyph.api.get_template("pages/hello.html", env)
+ctx: Context = glyph.api.context_from_json('{"title":"<Welcome>","items":[{"name":"<script>alert(1)</script>","visible":true},{"name":"hidden","visible":false}]}')
+
+out: str = glyph.api.render(tpl, ctx, env)
+print(out)
