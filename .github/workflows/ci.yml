@@ -157,6 +157,8 @@ jobs:
                     echo "QBE binary result for $t: rc=$rc_qbe"
                   fi
                   ls -la "$HOME/Library/Logs/DiagnosticReports/" 2>/dev/null || true
+                  python3 -c 'import glob,json,os; fs=sorted(glob.glob(os.path.expanduser("~/Library/Logs/DiagnosticReports/*.ips")),key=os.path.getmtime); d=json.loads("\n".join(open(fs[-1],encoding="utf-8",errors="replace").read().splitlines()[1:])) if fs else {}; print("ips:", fs[-1] if fs else None, "exc:", d.get("exception"), "term:", d.get("termination"), "frames:", d.get("threads",[{}])[d.get("faultingThread",0)].get("frames",[])[:15])' || true
+                  if command -v lldb >/dev/null 2>&1; then lldb -b -o run -o bt -- /tmp/diag_test_bin || true; fi
                 fi
               else
                 echo "FAILED compile (default backend): $t"
