@@ -136,7 +136,6 @@ def test_lexer_budgets_and_fuzz_smoke() -> None:
     seed: int = 1337
     fuzz_case: int = 0
     fuzz_completed: int = 0
-    fuzz_budget: ResourceBudget = ResourceBudget(1024, 256, 256, 256, 4, 4, 8, 256, 1024, 1024)
     while fuzz_case < 200:
         parts: list[str] = []
         k: int = 0
@@ -147,6 +146,9 @@ def test_lexer_budgets_and_fuzz_smoke() -> None:
             parts.append(alphabet[idx])
             k = k + 1
         sample: str = nox.strings.join(parts, "")
+        # Fresh ResourceBudget per iteration avoids an upstream macOS ARM64 nox_rc_pool_drain crash in noxc 2.1.186
+        # when a shared ResourceBudget crosses 65+ exception-unwinding iterations with NUL-containing inputs.
+        fuzz_budget: ResourceBudget = ResourceBudget(1024, 256, 256, 256, 4, 4, 8, 256, 1024, 1024)
         try:
             _ft: list[Token] = tokenize_with_budget(sample, "fuzz.html", BudgetTracker(fuzz_budget))
         except GlyphSyntaxError:
