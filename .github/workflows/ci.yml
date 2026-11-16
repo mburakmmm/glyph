@@ -141,11 +141,25 @@ jobs:
           if ! noxc test; then
             echo "::group::Re-running failing tests individually for diagnostics"
             for t in tests/*/*_test.nox; do
-              echo "==> Diagnostic run (default backend): $t"
-              if ! noxc run "$t"; then
-                echo "FAILED (default backend): $t (exit $?)"
-                echo "==> Retrying with --backend qbe: $t"
-                noxc run --backend qbe "$t" || echo "FAILED (--backend qbe): $t (exit $?)"
+              echo "==> Diagnostic build+run (default backend): $t"
+              if noxc build -o /tmp/diag_test_bin "$t"; then
+                set +e
+                /tmp/diag_test_bin
+                rc=$?
+                set -e
+                if [ "$rc" -ne 0 ]; then
+                  echo "FAILED binary (default backend): $t (rc=$rc)"
+                  if noxc build --backend qbe -o /tmp/diag_test_bin_qbe "$t"; then
+                    set +e
+                    /tmp/diag_test_bin_qbe
+                    rc_qbe=$?
+                    set -e
+                    echo "QBE binary result for $t: rc=$rc_qbe"
+                  fi
+                  ls -la "$HOME/Library/Logs/DiagnosticReports/" 2>/dev/null || true
+                fi
+              else
+                echo "FAILED compile (default backend): $t"
               fi
             done
             echo "::endgroup::"
