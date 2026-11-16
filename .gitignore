@@ -1,0 +1,30 @@
+# Compiled binaries & build artifacts
+*.exe
+*.out
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.pdb
+*.ilk
+*.wasm
+zig-out/
+nox-out/
+.nox/
+build/
+dist/
+
+# Test / scratch / temporary outputs
+*.junit.xml
+*.tmp
+*.nox-tmp
+
+# Editor & OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

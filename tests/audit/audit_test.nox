@@ -1,0 +1,103 @@
+# Phase 0 Capability Audit Test Suite for noxc 2.1.186
+import nox.test
+import nox.json
+import nox.strings
+import nox.unicode
+import nox.regex
+import nox.path
+from nox.path import PathError
+from nox.collections import OrderedDict, LRUCache
+import glyph.api
+from glyph.api import Value
+
+class AuditBaseError(Exception):
+    code: str
+
+    def __init__(self: AuditBaseError, code: str, msg: str) -> None:
+        self.code = code
+        self.message = msg
+
+class AuditSubError(AuditBaseError):
+    line: int
+
+    def __init__(self: AuditSubError, code: str, msg: str, line: int) -> None:
+        self.code = code
+        self.message = msg
+        self.line = line
+
+def _make_filter(suffix: str) -> (str) -> str:
+    def apply_suffix(s: str) -> str:
+        return s + suffix
+    return apply_suffix
+
+# 1. Core package import & version
+nox.test.assert_eq_str(glyph.api.engine_version(), "0.0.1-audit", "engine version")
+nox.test.assert_eq_str(glyph.api.min_nox_version(), "2.1.186", "min nox version")
+
+# 2. Enum Value + OrderedDict + list[Value] + match exhaustiveness
+entries: OrderedDict[str, Value] = OrderedDict[str, Value]()
+entries.set("name", Value.VStr("<Ada>"))
+entries.set("count", Value.VInt(42))
+items: list[Value] = [Value.VBool(True), Value.VNull, Value.VUndefined]
+entries.set("flags", Value.VList(items))
+root_val: Value = Value.VMap(entries)
+
+matched_name: str = ""
+match root_val:
+    case Value.VMap(m):
+        match m.get("name"):
+            case Value.VStr(s):
+                matched_name = s
+            case _:
+                matched_name = "err"
+    case _:
+        matched_name = "err"
+nox.test.assert_eq_str(matched_name, "<Ada>", "Value VMap/VStr lookup")
+
+# 3. JsonValue precision (as_int + number_text)
+jv: JsonValue = nox.json.parse('{"big":9007199254740993,"small":42,"ok":true}')
+nox.test.assert_true(nox.json.is_object(jv), "json is object")
+nox.test.assert_eq_str(nox.json.number_text(nox.json.get(jv, "big")), "9007199254740993", "64-bit integer precision via number_text")
+nox.test.assert_eq_int(nox.json.as_int(nox.json.get(jv, "small")), 42, "small int via as_int")
+nox.test.assert_true(nox.json.as_bool(nox.json.get(jv, "ok")), "json bool")
+
+# 4. Closure callback capability
+fn: (str) -> str = _make_filter("!")
+nox.test.assert_eq_str(fn("glyph"), "glyph!", "closure callback")
+
+# 5. Exception inheritance hierarchy
+caught_code: str = ""
+try:
+    raise AuditSubError("GLYPH_AUDIT_ERR", "redacted", 12)
+except AuditBaseError as err:
+    caught_code = err.code
+nox.test.assert_eq_str(caught_code, "GLYPH_AUDIT_ERR", "exception inheritance catch")
+
+# 6. UTF-8 byte length vs codepoint length & Turkish casing
+nox.test.assert_eq_int(nox.strings.byte_len("ğ"), 2, "utf-8 byte_len")
+nox.test.assert_eq_int(len("ğ"), 1, "utf-8 codepoint len")
+nox.test.assert_eq_str(nox.unicode.upper_tr("istanbul"), "İSTANBUL", "turkish upper")
+nox.test.assert_eq_str(nox.unicode.lower_tr("İSTANBUL"), "istanbul", "turkish lower")
+
+# 7. Regex bounded search
+rx_match: nox.regex.Match | None = nox.regex.search("[0-9]+", "item-42-ok")
+rx_found: bool = False
+if rx_match != None:
+    rx_found = True
+nox.test.assert_true(rx_found, "regex match found")
+
+# 8. LRUCache smoke
+lru: LRUCache[str, str] = LRUCache[str, str](2)
+lru.put("a", "1")
+lru.put("b", "2")
+lru.put("c", "3")
+nox.test.assert_true(not lru.contains("a"), "lru evicted oldest")
+nox.test.assert_eq_str(lru.get("c"), "3", "lru retained newest")
+
+# 9. Path safe_join traversal rejection
+escaped: bool = False
+try:
+    _bad: str = nox.path.safe_join(".", "../outside.html")
+except PathError as pe:
+    escaped = True
+nox.test.assert_true(escaped, "safe_join rejects parent traversal")

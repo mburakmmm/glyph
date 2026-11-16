@@ -1,0 +1,151 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NOX_VERSION: "2.1.186"
+
+jobs:
+  policy-and-boundaries:
+    name: Manifest & Dependency Boundaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate nox.json manifest
+        run: python3 -m json.tool nox.json > /dev/null
+
+      - name: Enforce core dependency isolation (AGENTS.md §2.18 & ADR-0001)
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+
+          core_dir = pathlib.Path("glyph")
+          if not core_dir.is_dir():
+              print("ERROR: glyph/ directory missing", file=sys.stderr)
+              sys.exit(1)
+
+          forbidden_framework = re.compile(r"^\s*(import|from)\s+(integrations|nyx|aether|aura)\b", re.M)
+          forbidden_hosted = re.compile(r"^\s*(import|from)\s+(nox\.fs|nox\.unicode)\b", re.M)
+          hosted_allowlist = {"loader_fs.nox", "locale.nox"}
+
+          errors = []
+          for path in sorted(core_dir.rglob("*.nox")):
+              text = path.read_text(encoding="utf-8")
+              if forbidden_framework.search(text):
+                  errors.append(f"{path}: core module must never import framework/integration modules")
+              if path.name not in hosted_allowlist and forbidden_hosted.search(text):
+                  errors.append(f"{path}: core module must remain freestanding-safe (no nox.fs / nox.unicode)")
+
+          if errors:
+              for err in errors:
+                  print("BOUNDARY ERROR:", err, file=sys.stderr)
+              sys.exit(1)
+          print(f"Verified dependency boundaries across {len(list(core_dir.rglob('*.nox')))} core file(s).")
+          PY
+
+  test-matrix:
+    name: Check & Test (${{ matrix.os }})
+    needs: policy-and-boundaries
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install NOX toolchain (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          curl -fsSL https://noxlang.com/install.sh | sh
+          echo "$HOME/.nox-lang/bin" >> "$GITHUB_PATH"
+
+      - name: Install NOX toolchain (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          irm https://noxlang.com/install.ps1 | iex
+          echo "$env:USERPROFILE\.nox-lang\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Pin NOX version
+        shell: bash
+        run: |
+          CURRENT=$(noxc --version)
+          echo "Installed: $CURRENT"
+          if [ "$CURRENT" != "noxc $NOX_VERSION" ]; then
+            noxc upgrade "v$NOX_VERSION"
+          fi
+          noxc --version
+
+      - name: Check core modules (LLVM, QBE, freestanding, spawn lint)
+        shell: bash
+        run: |
+          for f in glyph/*.nox; do
+            echo "Checking $f"
+            noxc check "$f"
+            noxc check --backend qbe "$f"
+            noxc check --strict-spawn-shared "$f"
+          done
+          noxc check --profile freestanding glyph/api.nox
+
+      - name: Run NOX test suite
+        shell: bash
+        run: noxc test
+
+      - name: Check and run examples
+        shell: bash
+        run: |
+          for ex in examples/*/main.nox; do
+            echo "Running example: $ex"
+            noxc check "$ex"
+            noxc run "$ex"
+          done
+
+  wasm-and-supply-chain:
+    name: WASM Smoke & SBOM
+    needs: policy-and-boundaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install NOX toolchain
+        run: |
+          curl -fsSL https://noxlang.com/install.sh | sh
+          echo "$HOME/.nox-lang/bin" >> "$GITHUB_PATH"
+
+      - name: Pin NOX version
+        run: |
+          CURRENT=$(noxc --version)
+          if [ "$CURRENT" != "noxc $NOX_VERSION" ]; then
+            noxc upgrade "v$NOX_VERSION"
+          fi
+          noxc --version
+
+      - name: Build wasm32-freestanding smoke targets
+        run: |
+          mkdir -p dist
+          noxc build --target wasm32-freestanding -o dist/glyph_api.wasm glyph/api.nox
+          noxc build --target wasm32-freestanding -o dist/audit_consumer.wasm examples/audit_consumer/main.nox
+          ls -lh dist/*.wasm
+
+      - name: Verify SBOM & lock signature check
+        run: |
+          mkdir -p dist
+          noxc sbom . -o dist/glyph.sbom.json
+          python3 -m json.tool dist/glyph.sbom.json > /dev/null
+          noxc sign check .

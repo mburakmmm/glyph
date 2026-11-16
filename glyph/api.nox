@@ -1,0 +1,20 @@
+# Public entry point for Glyph (`import glyph.api`).
+# Phase 0 baseline: exposes version helpers and verifies the tagged-union `Value` representation.
+from nox.collections import OrderedDict
+import glyph.version
+
+enum Value:
+    VNull
+    VUndefined
+    VBool(b: bool)
+    VInt(i: int)
+    VFloat(f: float)
+    VStr(s: str)
+    VList(items: list[Value])
+    VMap(entries: OrderedDict[str, Value])
+
+def engine_version() -> str:
+    return glyph.version.version()
+
+def min_nox_version() -> str:
+    return glyph.version.min_nox_version()

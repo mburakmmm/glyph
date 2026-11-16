@@ -1,0 +1,18 @@
+# Standalone consumer example verifying `import glyph.api`
+import glyph.api
+from glyph.api import Value
+from nox.collections import OrderedDict
+
+ctx: OrderedDict[str, Value] = OrderedDict[str, Value]()
+ctx.set("greeting", Value.VStr("Hello Glyph"))
+v: Value = Value.VMap(ctx)
+
+match v:
+    case Value.VMap(m):
+        match m.get("greeting"):
+            case Value.VStr(msg):
+                print(msg, glyph.api.engine_version())
+            case _:
+                print("unexpected")
+    case _:
+        print("unexpected")

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security Vulnerability (Private Advisory)
+    url: https://github.com/mburakmmm/glyph/security/advisories/new
+    about: Please report XSS, path traversal, sandbox escape, or DoS vulnerabilities privately here.
+  - name: NOX Language Repository
+    url: https://github.com/mburakmmm/nox-lang
+    about: Report upstream noxc compiler or stdlib issues in nox-lang.

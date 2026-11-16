@@ -1,0 +1,358 @@
+# TODO — Glyph: NOX Advanced Template Engine
+
+> **Kaynak Sözleşme:** [AGENTS.md](AGENTS.md)  
+> **Hedef Dil & Doğrulanan Araç Zinciri:** `noxc 2.1.186` (`C:\Users\Administrator\.nox-lang\bin\noxc.exe`)  
+> **Durum:** Faz 0 (`v0.0.1-audit`) tamamlandı — Faz 1 (`v0.0.2-core-lexer`) sıradaki iş.  
+> **Kural:** Hiçbir madde, gerçek `.nox` kodu `noxc check` ve `noxc test` ile çalıştırılıp kanıtlanmadan `[x]` işaretlenmez.
+
+---
+
+## Çalışma Kuralları ve Faz Geçiş Kapıları (Özet)
+
+1. **Sıra:** `Spesifikasyon → Sınır/Tehdit Analizi → Minimal .nox Kod → Pozitif/Negatif/Güvenlik Testi → Performans Kontrolü → Dokümantasyon`.
+2. **NOX Gerçekliği:** Bellekten veya Python'dan API/semantik uydurulmaz. Her stdlib/dil özelliği önce küçük bir `.nox` PoC ile kanıtlanır ve `docs/compatibility.md` dosyasında `verified | experimental | unavailable | planned` olarak işaretlenir.
+3. **Bağımlılık Yönü:** `glyph/` (core) hiçbir web framework'ünü (`nyx`, `aether`, `aura`) import etmez. Adaptörler `integrations/` altında core'u import eder.
+4. **Güvenlik Önceliği:** `güvenlik invariants > derlenen NOX gerçeği > belgelenmiş public contract > ADR > roadmap > öneri`.
+5. **Faz Sonu Zorunluluğu:** Her faz/alt-görev sonunda `todo.md`, `docs/roadmap.md`, `CHANGELOG.md` ve ilgili ADR güncellenir; `AGENTS.md` §28 formatında raporlanır.
+
+---
+
+## Sürüm Takip Özeti
+
+| Faz | Hedef Sürüm | Odak | Durum |
+|---|---|---|---|
+| Faz 0 | `v0.0.1-audit` | NOX 2.x capability audit, PoC'lar, repo iskeleti, ADR-0001 | `[x]` Tamamlandı |
+| Faz 1 | `v0.0.2-core-lexer` | Typed `Value`, `SourceSpan`, `Errors`, `ResourceBudget`, `Lexer` | `[ ]` Başlanmadı |
+| Faz 2 | `v0.0.3-parser-ast` | Pratt expression parser, AST, statement nesting, static validation | `[ ]` Başlanmadı |
+| Faz 3 | `v0.1.0` **(MVP)** | AST interpreter, Writer, default HTML escape, limits, `MemoryLoader`, Slice #1 | `[ ]` Başlanmadı |
+| Faz 4 | `v0.2.0` | `FilesystemLoader` sandbox, `include`, `ParseCache`/`CompileCache`, dependency graph | `[ ]` Başlanmadı |
+| Faz 5 | `v0.3.0` | `extends`, `block`, `super()`, `macro`, `import`, `call/caller`, Slice #2 | `[ ]` Başlanmadı |
+| Faz 6 | `v0.4.0` | Contextual HTML escaping, URL/JS/CSS engeli, `TrustedMarkup`, security corpus | `[ ]` Başlanmadı |
+| Faz 7 | `v0.5.0` | Tam Filter/Test/Function registry kataloğu, cost metering, `HelperContext` | `[ ]` Başlanmadı |
+| Faz 8 | `v0.6.0` | i18n/locale/plural, çıkış profilleri (HTML/Text/XML/MD/JSON/Email), Streaming Writer | `[ ]` Başlanmadı |
+| Faz 9 | `v0.7.0` | `integrations/nyx`, `integrations/aether`, `glyph` CLI, diagnostic JSON, Slice #3 | `[ ]` Başlanmadı |
+| Faz 10 | `v1.0.0` **(STABLE)** | Fuzz, race/concurrency stress, benchmark, WASM, CI/provenance, **v1.0 Release Gate** | `[ ]` Başlanmadı |
+| Faz 11 | `v1.1.0+` / `v2.0` | ADV (`with`, `filter` blok, component/slot, const-fold, LSP) & RESEARCH (AOT, multi-tenant) | `[ ]` Başlanmadı |
+
+---
+
+## Faz 0 — `v0.0.1-audit`: Feasibility & Gerçek NOX Capability Audit
+
+**Amaç:** `noxc 2.1.186` üzerinde dil ve stdlib kabiliyetlerini varsayımsız kanıtlamak, paket/modül yapısını kilitlemek ve temel proje dokümanlarını kurmak.
+
+### 0.1. Araç Zinciri ve Repo İskeleti
+- [x] `noxc` araç zinciri profil/backend doğrulaması: `noxc --version` (`2.1.186`), `noxc check`, `noxc test`, `--backend llvm` vs `--backend qbe`, `--profile hosted` vs `--profile freestanding` (`--target wasm32-wasi` / `wasm32-freestanding` LLVM ile doğrulandı).
+- [x] `nox.json` (`name: glyph`, `entry: glyph/api.nox`, `requires: []`) oluşturma; `noxc fetch` / `noxc update` / `noxc sbom` / `noxc sign check` doğrulandı (`requires` boşken `nox.lock` üretilmez).
+- [x] Temel repo ve GitHub dosyalarını oluşturma: `README.md`, `LICENSE`, `CHANGELOG.md`, `SECURITY.md`, `CONTRIBUTING.md`, `.gitignore`, `.github/ISSUE_TEMPLATE/*`, `.github/PULL_REQUEST_TEMPLATE.md`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`.
+- [x] Temel dokümantasyon dosyalarını oluşturma: `docs/ARCHITECTURE.md`, `docs/compatibility.md`, `docs/roadmap.md`.
+
+### 0.2. Zorunlu `.nox` Proof-of-Concept (PoC) Doğrulamaları
+Her PoC derlenip `noxc check` + `noxc test` ile doğrulanmış ve sonucu `docs/compatibility.md` içine işlenmiştir:
+- [x] **PoC-1 (Modül/Paket Import & Consumer Build):** `glyph/api.nox` + `examples/audit_consumer/main.nox` `noxc check` ve `noxc run` ile doğrulandı.
+- [x] **PoC-2 (Value & AST Temsili):** Recursive `enum Value` (`list[Value]`, `OrderedDict[str, Value]`) ve `match` kapsamlılığı doğrulandı (`tests/audit/audit_test.nox`).
+- [x] **PoC-3 (`nox.json` & Sayısal Hassasiyet):** `JsonValue` (`nox.core` yerleşik tipi), `parse`, `as_int`, `number_text` (`9007199254740993`) doğrulandı.
+- [x] **PoC-4 (Callback / Registry Dispatch):** First-class closure `(str) -> str` derlendi ve çalıştı.
+- [x] **PoC-5 (Hata & Exception Modeli):** `Exception` alt sınıfları (`AuditSubError(AuditBaseError)`) ve base yakalama doğrulandı (`except` için unqualified `from ... import Err` gerektiği saptandı).
+- [x] **PoC-6 (Strings, Unicode, Regex, Collections):** `nox.strings.byte_len` vs `len`, `nox.unicode.upper_tr`/`lower_tr`, `nox.regex.search`, `OrderedDict`/`LRUCache` doğrulandı.
+- [x] **PoC-7 (Path & FS Sandbox):** `nox.path.safe_join` `..` reddi doğrulandı; mutlak `/` ve fiziksel yol sızdıran hata mesajı kısıtı `docs/compatibility.md`ye işlendi.
+- [x] **PoC-8 (WASM & Concurrency Smoke):** `--profile freestanding` (`nox.unicode` hariç), `--target wasm32-freestanding` (`glyph/api.nox` + consumer `.wasm` build), `--strict-spawn-shared` doğrulandı.
+- [ ] **PoC-9 (Nyx İncelemesi):** `nyx` (`>= 0.29.0`) canlı paket uyumu Faz 9'da `integrations/nyx` oluşturulurken doğrulanacak (core `glyph/` bağımsızlığı CI kuralıyla kilitlendi).
+
+### 0.3. Karar & Kabul (Faz 0 Gate)
+- [x] `docs/adr/0001-min-nox-version-and-value-repr.md` (**ADR-0001**) yazımı.
+- [x] `tests/audit/audit_test.nox` dosyasının `noxc test` ile yeşil geçmesi (`1 passed, 0 failed`).
+- [x] Consumer örneğinin (`examples/audit_consumer/main.nox`) `noxc run` ile derlenip çalışması.
+
+---
+
+## Faz 1 — `v0.0.2-core-lexer`: Value Sistemi, Hata/Bütçe Çekirdeği ve Lexer
+
+**Amaç:** Template motorunun deterministik veri modelini, hata/span altyapısını, kaynak bütçesi iskeletini ve O(n) güvenli tarayıcısını üretmek.
+
+### 1.1. Çekirdek Tipler ve Bütçe (`glyph/version.nox`, `errors.nox`, `limits.nox`)
+- [ ] `glyph/version.nox`: Engine sürüm sabitleri (`GLYPH_VERSION` — cache key bileşeni).
+- [ ] `glyph/errors.nox`: `SourceSpan` (`logical_name`, `line`, `column`, `byte_start`, `byte_end`), `RelatedSpan`, stable error kodları (`GLYPH_SYNTAX_*`, `GLYPH_EVAL_*`, `GLYPH_SECURITY_*`, `GLYPH_LIMIT_*`, `GLYPH_LOADER_*`, `GLYPH_RENDER_*`), `GlyphError` tipleri ve redaction politikası (context değeri/secret/absolute path sızıntısı yok).
+- [ ] `glyph/limits.nox`: `ResourceBudget` ve `BudgetTracker` (`max_source_bytes`, `max_tokens`, `max_ast_nodes`, `max_include_depth`, `max_macro_depth`, `max_expr_depth`, `max_loop_steps`, `max_output_bytes`, `max_total_ops`, opsiyonel explicit wall-clock). Alt render'da paylaşılan ve resetlenemeyen bütçe sözleşmesi.
+
+### 1.2. Tipli Value Modeli (`glyph/value.nox`)
+- [ ] `Value` varyantları: `Null`, `Undefined` (ayrı tür, `Null` değildir), `Bool`, `Int`, `Float`, `String`, `List`, `Map` (deterministik sıralama politikası), `TrustedMarkup` (bağlam etiketli), `Callable` (yalnızca registry referansı).
+- [ ] `JsonValue -> Value` dönüşümü (`as_int` / `number_text` hassasiyet korumalı; JSON'dan gelen veri asla `TrustedMarkup` olmaz).
+- [ ] Açık `stringify`, `truthiness` tablosu (`null`, `false`, `0`, `""`, `[]`, `{}`), `StrictUndefined` vs `LenientUndefined`, taşma/NaN/Infinity kuralları.
+- [ ] Güvenlik kuralı: `__class__`, `__dict__` vb. reflection lookup yok; yalnızca explicit map alanı erişimi.
+
+### 1.3. Token ve Lexer (`glyph/token.nox`, `glyph/lexer.nox`)
+- [ ] Delimiter tarama: `{{ ... }}`, `{% ... %}`, `{# ... #}`, `{% raw %}...{% endraw %}`.
+- [ ] Whitespace trim kontrolleri: `{{-`, `-}}`, `{%-`, `-%}` (`\r\n`, `\n`, `\t` ve desteklenen Unicode whitespace).
+- [ ] String literal, escape dizileri (`\"`, `\'`, `\\`, `\n`, `\t`), int/float literaller, operatör ve anahtar sözcük tokenları.
+- [ ] String/comment/raw içinde yanlış delimiter algılamama; nested `raw` politikası; kötü biçimli UTF-8 reddi; kapanmayan delimiter'da kesin line/col hata raporu.
+- [ ] O(n) tek geçişli tarama (tekrarlı string birleştirme yok) + `max_source_bytes` / `max_tokens` / token uzunluğu limitleri.
+
+### 1.4. Faz 1 Testleri ve Kabul
+- [ ] `tests/value/` birim ve edge-case testleri (JSON -> Value, NaN/Inf, large int, truthiness, `Undefined != Null`).
+- [ ] `tests/lexer/` deterministik token golden fixture'ları, CRLF/UTF-8 byte-line-col testleri, string içi `}}` çarpışma testleri, malformed UTF-8 & kapanmayan blok negatif testleri.
+- [ ] Sınırlandırılmış rastgele byte dizileriyle lexer fuzz-smoke testi (panic/hang/OOM yok).
+
+---
+
+## Faz 2 — `v0.0.3-parser-ast`: Parser, Expression Dili ve Statik Doğrulama
+
+**Amaç:** Güvenli expression gramerini, AST yapısını, kontrol bloklarını ve çalışma öncesi statik doğrulamayı tamamlamak.
+
+### 2.1. Spesifikasyon ve ADR
+- [ ] `docs/adr/0002-expression-grammar-and-truthiness.md` (**ADR-0002**): Pratt precedence tablosu, `is [not]` bağlanması, `in`/`not in`, ternary `a if cond else b`, truthiness ve tip hata kuralları.
+- [ ] `docs/syntax.md` ve `docs/expressions.md` ilk kararlı taslakları.
+
+### 2.2. AST ve Expression Modelleri (`glyph/ast.nox`, `glyph/expressions.nox`)
+- [ ] Immutable AST düğümleri + `SourceSpan`: `Text`, `OutputExpr`, `If`, `For`, `Assign` (`set`), `Include`, `Extends`, `Block`, `MacroDef`, `Import`, `FromImport`, `CallBlock`, `Raw`.
+- [ ] Expression AST düğümleri: `Literal`, `Identifier`, `ListLit`, `MapLit`, `MemberAccess` (`.field`), `IndexAccess` (`[expr]`), `UnaryOp`, `BinaryOp`, `Conditional`, `FilterPipe`, `IsTest`, `RegistryCall`.
+
+### 2.3. İki Aşamalı Parser (`glyph/parser.nox`)
+- [ ] Statement nesting parser: `if / elif / else / endif`, `for / else / endfor` (tuple/iki-değişken unpack desteği netleştirilmiş), `set name = expr`.
+- [ ] Pratt / precedence-climbing expression parser (whitelist gramer, `lambda`/`await`/`comprehension`/method call reddi).
+- [ ] `max_ast_nodes` ve `max_expr_depth` limitleri; hatalı iç içe bloklarda deterministic hata önceliği (`invalid token -> nesting -> expr -> policy -> limits`).
+- [ ] Lint modu için recoverable diagnostics toplama (render'da asla düzeltilmiş/sahte AST yürütmeme).
+
+### 2.4. Statik Doğrulama (`glyph/validate.nox`)
+- [ ] Bilinmeyen tag/ifade yapısı, yasak anahtar/özellik (`__class__`, `__dict__`, `constructor`, `prototype`), geçersiz `set` hedefi kontrolleri.
+- [ ] `TemplateInfo` çıkarımı (referans alınan değişkenler, bloklar, include/import bağımlılıkları, makrolar).
+
+### 2.5. Faz 2 Testleri ve Kabul
+- [ ] `tests/parser/` tüm AST node ve precedence testleri, `max_expr_depth` / `max_ast_nodes` taşma testleri, yanlış nesting negatif testleri.
+- [ ] `tests/expression/` tip uyumsuzluğu, short-circuit (`and`/`or`/conditional), bölme/sıfıra bölme, taşma, reflection/method-call engelleme testleri.
+
+---
+
+## Faz 3 — `v0.1.0` (MVP): Render Motoru, Temel HTML Safety ve MemoryLoader
+
+**Amaç:** `AGENTS.md` §29'daki ilk vertical slice'ı güvenli, bütçeli ve yeniden kullanılabilir şekilde çalışan ilk yayınlanabilir MVP (`v0.1.0`) haline getirmek.
+
+### 3.1. Scope, Context ve Writer (`glyph/options.nox`, `glyph/scope.nox`, `glyph/writer.nox`)
+- [ ] `glyph/options.nox`: `EnvironmentOptions` (`html_safe_defaults()`), `RenderOptions` (output mode, limits, strict-undefined, locale, trust tier).
+- [ ] `glyph/scope.nox`: Immutable global env, request-local `RenderContext`, lexical child scope (parent mutate edilemez, `set` sadece yerel/izinli scope'a yazar), `loop` metadata (`index`, `index0`, `first`, `last`, `length`, `revindex`).
+- [ ] `glyph/writer.nox`: `GlyphWriter` arayüzü ve chunk-buffered string writer (iterasyon başına O(n²) string birleştirme yok, her yazmada `max_output_bytes` kontrolü, hata halinde partial output bilgisi).
+
+### 3.2. Temel Güvenlik ve Built-in'ler (`glyph/safety.nox`, `filters.nox`, `tests_registry.nox`, `functions.nox`)
+- [ ] `glyph/safety.nox`: Varsayılan `autoescape=ON`, HTML text & quoted attribute escaping (`&`, `<`, `>`, `"`, `'`), `TrustedMarkup` temel etiketi; untrusted modda `|safe` ve `autoescape false` kapalı.
+- [ ] MVP built-in filtreler: `escape`, `default`, `length`, `join`, `upper`, `lower` (tümü type-checked ve budget'a bağlı).
+- [ ] MVP built-in test & fonksiyonlar: `defined`, `undefined`, `none`, `empty`, bounded `range(n)` (büyük aralık limiti ile).
+
+### 3.3. MemoryLoader, Runtime ve Public API (`glyph/loader.nox`, `loader_memory.nox`, `runtime.nox`, `environment.nox`, `api.nox`)
+- [ ] `glyph/loader.nox` & `glyph/loader_memory.nox`: `SourceRecord` (`logical_name`, `content`, `origin_id`, `fingerprint`, `trust_policy`) ve salt-okunur bellek içi `MemoryLoader`.
+- [ ] `glyph/runtime.nox`: AST interpreter (`Text`, `OutputExpr`, `If`, `For/Else`, `Set`, filtre zinciri, shared `BudgetTracker`, deterministik map/list iterasyonu).
+- [ ] `glyph/environment.nox` & `glyph/api.nox`: `Environment`, `Template` (immutable, reentrant), `compile_string`, `get_template`, `render`, `render_to_writer`, `lint`, `inspect`, `escape_html`.
+
+### 3.4. MVP Kabul Kapısı (`v0.1.0`)
+- [ ] **Vertical Slice #1 (`AGENTS.md` §29):** `title="<Welcome>"` ve `item.name="<script>alert(1)</script>"` girdileriyle döngü + koşul + `upper` + HTML escaping doğrulaması.
+- [ ] Eşzamanlı/ardışık render izolasyon testi (bir render diğerinin scope/budget/output durumunu etkilemez).
+- [ ] XSS baseline testleri ve `ResourceBudget` (`loop steps`, `output bytes`, `total ops`) aşım testleri.
+- [ ] `examples/hello/` oluşturuldu ve gerçek `noxc run` ile çalıştırıldı.
+- [ ] `docs/api.md` (v0.1 yüzeyi), `docs/roadmap.md`, `CHANGELOG.md` (`v0.1.0`) güncellendi.
+
+---
+
+## Faz 4 — `v0.2.0`: Loaders, Include ve Compile Cache
+
+**Amaç:** Güvenli dosya sistemi şablon yüklemeyi, şablonlar arası `include` bileşimini ve politika-izoleli derleme önbelleğini eklemek.
+
+### 4.1. Karar Kayıtları
+- [ ] `docs/adr/0005-loader-root-and-fs-toctou.md` (**ADR-0005**): Canonical root zorunluluğu, `nox.path.safe_join` + açma sonrası doğrulama, TOCTOU sınırlarının belgelenmesi.
+- [ ] `docs/adr/0007-cache-invalidation-and-isolation.md` (**ADR-0007**): Composite cache key, atomic replace, tenant/policy/locale izolasyonu.
+
+### 4.2. Güvenli Loader Sistemi (`glyph/loader_fs.nox` + composite loader'lar)
+- [ ] `FilesystemLoader`: İzinli canonical root kilidi; mutlak yol, `.`, `..`, `%2e%2e`, NUL, drive-letter, Windows UNC, karışık `/` ve `\`, sibling-prefix (`/app/tpl` vs `/app/tpl_secret`) ve symlink escape engelleme.
+- [ ] `ChoiceLoader` ve `PrefixLoader`: Trust zone karıştırmadan açık sıralı çözümleme (yetki hatasında başka root'a fallback yok).
+- [ ] Public hatalarda fiziksel disk yolunun gizlenmesi (`logical_name` raporlama).
+
+### 4.3. `include` Semantiği ve Cycle Tespiti
+- [ ] `{% include "partial.html" %}` literal ad zorunluluğu (dinamik ad yalnızca trusted-template policy + allowlist ile).
+- [ ] `with context` / `without context` desteği; `ignore missing` yalnızca literal ad ve izinli politikada.
+- [ ] Paylaşılan `max_include_depth` bütçesi ve döngüsel include tespiti (`A -> B -> A`).
+
+### 4.4. Cache ve Dependency Graph (`glyph/cache.nox`)
+- [ ] `ParseCache` ve `CompileCache`: Anahtar bileşenleri = `origin_id + fingerprint + mode/autoescape/policy + engine_version + registry_generation + locale` (asla sadece template adı değil).
+- [ ] Dependency graph takibi: Bağımlı partial değiştiğinde üst şablonun invalidate edilmesi.
+- [ ] Bounded cache (LRU / max entries / max bytes) ve immutable compile artifact paylaşımı (render state asla cache nesnesinde tutulmaz).
+
+### 4.5. Faz 4 Testleri ve Kabul (`v0.2.0`)
+- [ ] `docs/loaders.md` dokümantasyonu.
+- [ ] `tests/loaders/`: Path traversal, sibling-prefix, UNC/drive-letter, symlink escape, WASM/freestanding modda FS loader ayrımı testleri.
+- [ ] `tests/cache/`: Kaynak güncelleme invalidation, policy/autoescape/trust/locale değişiminde cache ayrımı (sıfır sızıntı), eviction ve eşzamanlı okuma testleri.
+
+---
+
+## Faz 5 — `v0.3.0`: Inheritance, Blocks ve Makro Sistemi
+
+**Amaç:** Şablon kalıtımı (`extends`/`block`/`super`) ve yeniden kullanılabilir, kapsam-izoleli makroları üretmek.
+
+### 5.1. Karar Kaydı
+- [ ] `docs/adr/0006-macro-scope-caller-and-includes.md` (**ADR-0006**): Macro closure yakalama kuralları, `call/caller` reentrancy modeli ve `include` varsayılan context politikası.
+
+### 5.2. Kalıtım (`glyph/inheritance.nox`)
+- [ ] `{% extends "base.html" %}` yalnızca top-level konumda; cross-root inheritance engeli; security policy devralımı.
+- [ ] `{% block name %}...{% endblock %}` override çözümleme zinciri; `{{ super() }}` ile üst blok render'ı (parent yoksa deterministik hata).
+- [ ] Duplicate block, ambiguous override, missing parent/block ve inheritance cycle (`A -> B -> A`) hataları.
+
+### 5.3. Makrolar ve İçe Aktarma (`glyph/macros.nox`)
+- [ ] `{% macro name(a, b=default) %}...{% endmacro %}`: Positional, keyword ve default argümanlar; arity/duplicate/unknown keyword hata kontrolü.
+- [ ] `{% import "helpers.html" as h %}` ve `{% from "helpers.html" import x %}`: Immutable namespace, explicit export policy, circular import tespiti.
+- [ ] `{% call macro(...) %}...{% endcall %}` ve `caller()` callback desteği (bounded depth).
+- [ ] Güvenlik kuralı: Macro çıktı fragmanında güven etiketi korunur; güvenilmeyen parametre otomatik `TrustedMarkup` olmaz.
+
+### 5.4. Faz 5 Testleri ve Kabul (`v0.3.0`)
+- [ ] **Vertical Slice #2:** `examples/blog_layout/` (`base.html` + `extends` + `block` + `super()` + `include` + `macro` + cache invalidation) `noxc run` ile doğrulanır.
+- [ ] `tests/composition/`: Çok katmanlı kalıtım, cycle, super() hataları, macro recursive budget aşımı ve kapsam sızıntısı testleri.
+
+---
+
+## Faz 6 — `v0.4.0`: Contextual Escaping, Trust Model ve Güvenlik Kapısı
+
+**Amaç:** `AGENTS.md` §10'daki tüm bağlamsal XSS korumalarını, güven etiketlerini, URL/JS/CSS politikalarını ve saldırı test kümesini tamamlamak.
+
+### 6.1. Karar Kayıtları ve Dokümanlar
+- [ ] `docs/adr/0003-contextual-html-escaping.md` (**ADR-0003**)
+- [ ] `docs/adr/0004-trusted-markup-and-safe-policy.md` (**ADR-0004**)
+- [ ] `docs/adr/0012-user-created-templates-threat-model.md` (**ADR-0012**)
+- [ ] `docs/security.md` ve `SECURITY.md` güncellemesi (threat model: Trusted / Restricted / Untrusted templates).
+
+### 6.2. Bağlamsal HTML Tracker ve Güven Etiketleri
+- [ ] `OutputContext` durum makinesi / minimal HTML tokenizer:
+  - `HtmlText`, `HtmlAttributeQuoted` (izinli)
+  - `HtmlAttributeUnquoted` (varsayılan reddedilir)
+  - `HtmlUrlAttribute` (`href`, `src`, `action`, `formaction`, `srcset` — scheme allowlist: `http`, `https`, `mailto`, `tel`, relative; `javascript:`, `vbscript:`, `data:`, whitespace/percent/entity bypass reddi)
+  - `HtmlJs` / `HtmlEventHandler` (`<script>`, `on*` — untrusted interpolasyon reddi)
+  - `HtmlCss` / `StyleAttribute` (untrusted interpolasyon reddi)
+  - `HtmlTagOrAttrName` (dinamik tag/attr adı reddi)
+  - `Unknown` (fail-closed)
+- [ ] `TrustedMarkup` ayrımı: `SafeHtml`, `SafeAttr`, `SafeUrl`, `SafeJs` — bağlamlar arası otomatik geçiş yok (`SafeHtml` attribute/URL/JS içinde güvenli sayılmaz).
+- [ ] Concat/split kuralı: Trusted değer untrusted string ile birleşince güven etiketi düşer.
+- [ ] `|tojson`: `<`, `>`, `&`, `U+2028`, `U+2029` ve `</script` kaçış sözleşmesi.
+- [ ] Trust tier birleştirme: Parent/child şablonlarda **en kısıtlayıcı policy** kazanır; template içi `|safe`/`raw`/`autoescape false` untrusted modda yasak.
+
+### 6.3. Zorunlu Güvenlik Test Kümesi (`tests/security/`)
+- [ ] HTML text/attr quote bypass, malformed delimiter, NUL, entity/double-encoding, SVG/MathML payload'ları.
+- [ ] `<script>`, `</script>`, `onerror`, `style`, `srcdoc`, dinamik tag/attribute enjeksiyon denemeleri.
+- [ ] Case/whitespace/percent-encoded/HTML-entity-encoded `javascript:` URL bypass corpus'u.
+- [ ] `SafeHtml`'in URL/JS/attr'e taşınması ve macro/include sırasında trust düşüşü testleri.
+- [ ] Expression üzerinden `__class__`, `__dict__`, `constructor`, `prototype`, host method erişim denemeleri.
+- [ ] Hata mesajlarında context değeri / secret / absolute path redaction testleri.
+
+---
+
+## Faz 7 — `v0.5.0`: Tam Built-in Filter/Test Kataloğu ve Genişletilebilirlik
+
+**Amaç:** `AGENTS.md` §13 kapsamındaki onaylı tüm built-in filtre, test ve helper sözleşmelerini tam tip/bütçe/güvenlik denetimiyle sunmak.
+
+### 7.1. Registry Sözleşmesi (`glyph/filters.nox`, `tests_registry.nox`, `functions.nox`)
+- [ ] `FilterSpec`, `TestSpec`, `FunctionSpec`: `namespace/name`, `arity/range`, beklenen/dönen `Value` tipleri, `pure/deterministic`, `allowed_contexts`, `needs_locale`, `cost_class`, `maximum_expansion`, `policy_requirement`.
+- [ ] `HelperContext` izolasyonu (tam `RenderContext` yerine locale + immutable config + shared budget + diagnostics).
+- [ ] Core güvenlik helper'larının override edilmesini yasaklama; render başladıktan sonra registry mutasyon yasağı; `registry_generation` artışı.
+
+### 7.2. Onaylı Built-in Filtreler ve Testler
+- [ ] **Strings:** `upper`, `lower`, `capitalize`, `title`, `trim`, `replace`, `truncate`, `wordcount`, `indent`, `center`, `pad`, `striptags` (sanitizer değil uyarısı ile), `normalize_unicode`, `urlencode`, `slugify`.
+- [ ] **Escaping:** `escape`, `forceescape`, `tojson`, `urlencode`, `xml_escape` (ve policy kontrollü `safe`).
+- [ ] **Collections:** `length`, `first`, `last`, `reverse`, `sort` (heterojen türlerde açık comparator/hata), `unique`, `join`, `map(attribute=...)`, `select`, `reject`, `batch`, `slice`, `sum`, `min`, `max`, `groupby`, `dictsort`.
+- [ ] **Numbers / Dates / Markdown:** `abs`, `round`, `int`, `float`, `number`, `currency`, `percent`, `filesize`, `default`, `string`; `date`, `datetime`, `relative_time` (explicit reference time); `md_escape`.
+- [ ] **Tests (`is`):** `defined`, `undefined`, `none`, `boolean`, `number`, `integer`, `float`, `string`, `sequence`, `mapping`, `iterable`, `empty`, `equalto`, `odd`, `even`, `divisibleby`, `in`, `escaped`, `safe_for`.
+
+### 7.3. Faz 7 Testleri ve Dokümantasyon (`v0.5.0`)
+- [ ] `docs/filters.md`: Tüm built-in filtre/test imzaları, maliyet sınıfları ve güvenlik sınırları.
+- [ ] Her filtre ve test için pozitif, tip hatası, boş/sınır değer, expansion/budget aşımı ve locale testi.
+
+---
+
+## Faz 8 — `v0.6.0`: i18n, Çıktı Profilleri ve Streaming Writer
+
+**Amaç:** Deterministik çok-dillilik, HTML dışındaki resmi çıktı modları ve büyük çıktılar için akışlı writer protokolünü tamamlamak.
+
+### 8.1. Karar Kayıtları
+- [ ] `docs/adr/0008-streaming-writer-and-partial-errors.md` (**ADR-0008**)
+- [ ] `docs/adr/0009-locale-catalog-and-plural-format.md` (**ADR-0009**)
+
+### 8.2. i18n ve Locale (`glyph/locale.nox`, `glyph/catalog.nox`)
+- [ ] `RenderOptions.locale` üzerinden explicit locale seçimi (process-global locale/timezone okuma yok).
+- [ ] Read-only translation catalog adapter'ı + catalog sürümünün cache key'e dahil edilmesi.
+- [ ] Locale fallback zinciri (`tr-TR -> tr -> default`), `strict` / fallback missing policy.
+- [ ] `trans` / `plural` (veriye bağlı kural seti) ve interpolated parametrelerin mevcut çıktı bağlamında escape edilmesi.
+- [ ] Türkçe casing (`nox.unicode.upper_tr` / `lower_tr`) ve belgeli deterministik date/number/currency alt kümesi.
+
+### 8.3. Çıktı Profilleri (`AGENTS.md` §15)
+- [ ] `OutputMode.Html` (default)
+- [ ] `OutputMode.Text` (PlainText — escape kapalı, resource/policy kuralları aktif)
+- [ ] `OutputMode.Xml` (XML text/attr escape + illegal XML karakter reddi + dinamik tag/attr yasağı)
+- [ ] `OutputMode.Markdown` (literal üretimi + `md_escape` sınırları belgeli)
+- [ ] `OutputMode.Json` / inline JSON embedding guard'ları
+- [ ] Email profil desteği (HTML + plain-text çifti, subject CR/LF header injection koruması) + `examples/email/`.
+
+### 8.4. Streaming Writer ve İptal
+- [ ] `GlyphWriter` chunk/batch flush, backpressure dönüşleri, cancellation (`GlyphCancelledError`), no double-close garantisi.
+- [ ] 16 MiB çıktı sınırı stres testi ve streamed vs buffered çıktı birebir denklik testi.
+
+---
+
+## Faz 9 — `v0.7.0`: Ekosistem Entegrasyonları (Nyx, Aether) ve CLI / Tooling
+
+**Amaç:** Core'u kirletmeden framework adaptörlerini ve geliştirici CLI aracını (`glyph`) yayınlamak.
+
+### 9.1. Karar Kaydı
+- [ ] `docs/adr/0010-nyx-adapter-and-migration-rules.md` (**ADR-0010**)
+
+### 9.2. Framework Adaptörleri (`integrations/`)
+- [ ] `integrations/nyx/`: Opt-in `glyph_nyx.render_view(...)`; mevcut `nyx.view.render` davranışı değişmez; HTTP `Content-Type`, status, CSP nonce ve streaming preflight Nyx tarafında yönetilir.
+- [ ] `integrations/aether/`: `text/html`, `text/plain`, `application/xml` content-negotiation adaptörü (JSON API için `nox.json` kullanımı korunur).
+- [ ] `docs/integration-nyx.md`, `docs/integration-aether.md`, `examples/nyx/`, `examples/aether/`.
+- [ ] Doğrulama: `glyph/` çekirdeğinin `integrations/` veya `nyx`/`aether` import etmediğinin statik kontrolü.
+
+### 9.3. Diagnostics ve CLI (`glyph/diagnostics.nox`, `cli/main.nox`)
+- [ ] `nox.json` `bin` desteği ve gerekiyorsa `Rune` uyumu doğrulaması.
+- [ ] Alt komutlar: `glyph check`, `glyph lint`, `glyph render` (sadece JSON `--context`), `glyph inspect`, `glyph deps`, `glyph bench`, `glyph version`.
+- [ ] `--format human|json`, stdout/stderr ayrımı, secret redaction uyarıları ve kararlı çıkış kodları (`0 OK`, `2 usage`, `3 syntax`, `4 loader`, `5 security`, `6 resource`, `7 runtime`, `8 internal`).
+- [ ] **Vertical Slice #3:** Malicious URL/context injection reddeden SSR view + Nyx adaptörü + streaming writer + CLI smoke testi (`tests/integration/`).
+
+---
+
+## Faz 10 — `v1.0.0` (STABLE): Üretim Sertleştirmesi ve v1.0 Release Gate
+
+**Amaç:** `AGENTS.md` §21, §22, §23 ve §27'deki tüm kalite, güvenlik, performans ve çapraz platform kapılarını kanıtlı biçimde geçerek `v1.0.0` yayımlamak.
+
+### 10.1. İleri Doğrulama: Property, Fuzz, Mutation, Concurrency
+- [ ] **Property-based & Roundtrip:** Rastgele geçerli AST -> serialize -> parse -> render denkliği; escaper idempotence/double-escape testleri.
+- [ ] **Differential Reference Semantics:** Expression AST evaluator vs projedeki küçük trusted reference evaluator karşılaştırması.
+- [ ] **Fuzzing (`tests/fuzz/`):** Arbitrary bytes -> lexer/parser (panic/hang/OOM yok, budget enforced).
+- [ ] **Mutation Testleri:** Parser ve security mutantlarının mevcut test paketi tarafından yakalandığının kanıtlanması.
+- [ ] **Concurrency & Stress:** 1/4/16/64 eşzamanlı render, cache stampede/eviction stresi, `--strict-spawn-shared` doğrulaması, sızıntı/OOM kontrolü.
+
+### 10.2. Benchmark ve Performans (`benchmarks/`, `docs/performance.md`)
+- [ ] Tekrar üretilebilir benchmark scriptleri (AGENTS §22 tablosu: küçük template, 10/1K/100K döngü, 3/10 kat inheritance, nested include/macro, contextual escape yükü, cold/warm cache, 1KB/1MB/16MB writer).
+- [ ] O(n²) string construction regresyon testleri (büyük döngüde lineer davranış).
+- [ ] `nox.template` ile baseline karşılaştırması (3+ bağımsız koşu, pinned `noxc` sürümü ve donanım/OS kaydı ile).
+
+### 10.3. Cross-Platform, WASM, CI ve Paketleme
+- [ ] Platform & backend matrisi: Windows x64, Linux x64, macOS arm64; `--backend llvm` ve `--backend qbe`.
+- [ ] WASM hedefi: `examples/wasm_memory/` (`MemoryLoader` + sıkı limits, FS varsayımı olmadan) derleme ve boyut/bellek raporu.
+- [ ] `examples/static_site/` oluşturma ve `noxc run` doğrulaması.
+- [ ] `.github/workflows/`: `noxc check`, `noxc test`, security suite, fuzz smoke, consumer package build, examples, benchmark nightly, `noxc sign`/`sbom` (desteklenen akışla) ve release provenance.
+
+### 10.4. v1.0.0 Release Gate (AGENTS.md §27 — Eksiksiz Onay)
+- [ ] Public API kararlılık etiketleri (`Stable`, `Experimental`, `Deprecated`, `Internal`) ve SemVer/deprecation politikası (`docs/api.md`).
+- [ ] Tüm dokümanlar tamam: `README`, `ARCHITECTURE`, `compatibility`, `syntax`, `expressions`, `security`, `api`, `filters`, `loaders`, `integration-nyx`, `integration-aether`, `performance`, `testing`, `roadmap`, `CHANGELOG`, `LICENSE`, `SECURITY`.
+- [ ] Güvenlik corpus'u %100 yeşil; sıfır kritik/triajlanmamış güvenlik açığı.
+- [ ] Tüm core/example/consumer/integration testleri `noxc check` ve `noxc test` ile son düzenlemeden sonra geçmiş.
+
+---
+
+## Faz 11 — `v1.1.0+` / `v2.0`: İleri Özellikler (ADV) ve Araştırma (RESEARCH)
+
+> Not: Bu faz `v1.0.0` önkoşulu değildir. Her madde için ayrı ADR, güvenlik modeli, compatibility proof ve benchmark gerekir.
+
+### 11.1. Advanced (`v1.x`)
+- [ ] `{% with x = expr %}...{% endwith %}` ve `{% filter name %}...{% endfilter %}` blokları.
+- [ ] Namespace modülleri ve `PackageLoader` / read-only `DatabaseLoader` adaptör örnekleri.
+- [ ] Component / slot DSL (`{% component %}...{% slot %}`) — yalnızca macro+block karşılaştırmalı ADR sonrası, SSR HTML odaklı (Aura widget'ı değil).
+- [ ] Yan etkisiz ifadelerde sabit katlama (constant folding) + diferansiyel (optimize vs non-optimize) doğrulama testleri.
+- [ ] Geliştirici araçları: Source-map, editor grammar (tree-sitter), opsiyonel LSP entegrasyonu.
+- [ ] Ekosistem hook'ları: `integrations/aura_export/` (e-posta/HTML export), `Obsidian` redacted log sink, `Pulse` trace/metrics hook'ları.
+
+### 11.2. Research (`v2.0` Adayları)
+- [ ] Async writer / platform-bağımlı async cancellation araştırması.
+- [ ] **ADR-0011:** Ahead-of-Time (AOT) template -> typed NOX source code generation fizibilitesi (compiler yaması olmadan).
+- [ ] **ADR-0012 Uygulaması:** Hostile multi-tenant ortamda kullanıcı kaynaklı template çalıştırma (WASM / ayrı process host izolasyonu ile).
