@@ -137,7 +137,20 @@ jobs:
 
       - name: Run NOX test suite
         shell: bash
-        run: noxc test
+        run: |
+          if ! noxc test; then
+            echo "::group::Re-running failing tests individually for diagnostics"
+            for t in tests/*/*_test.nox; do
+              echo "==> Diagnostic run (default backend): $t"
+              if ! noxc run "$t"; then
+                echo "FAILED (default backend): $t (exit $?)"
+                echo "==> Retrying with --backend qbe: $t"
+                noxc run --backend qbe "$t" || echo "FAILED (--backend qbe): $t (exit $?)"
+              fi
+            done
+            echo "::endgroup::"
+            exit 1
+          fi
 
       - name: Check and run examples
         shell: bash
@@ -169,6 +182,12 @@ jobs:
             noxc upgrade "$NOX_VERSION"
           fi
           noxc --version
+
+      - name: Install Zig 0.16.0 (required for wasm32-freestanding)
+        run: |
+          curl -sSL -o /tmp/zig.tar.xz "https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz"
+          tar xf /tmp/zig.tar.xz -C /tmp
+          echo "/tmp/zig-x86_64-linux-0.16.0" >> "$GITHUB_PATH"
 
       - name: Build wasm32-freestanding smoke targets
         run: |

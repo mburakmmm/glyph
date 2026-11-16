@@ -63,6 +63,12 @@ jobs:
           fi
           noxc --version
 
+      - name: Install Zig 0.16.0 (required for wasm32-freestanding)
+        run: |
+          curl -sSL -o /tmp/zig.tar.xz "https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz"
+          tar xf /tmp/zig.tar.xz -C /tmp
+          echo "/tmp/zig-x86_64-linux-0.16.0" >> "$GITHUB_PATH"
+
       - name: Build release artifacts & CycloneDX SBOM
         run: |
           TAG="${{ steps.meta.outputs.tag }}"
