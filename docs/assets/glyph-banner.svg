@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 220" width="920" height="220" role="img" aria-label="Glyph — NOX Security-First Template Engine">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b1220"/>
+      <stop offset="55%" stop-color="#111b2e"/>
+      <stop offset="100%" stop-color="#0d2238"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#34d399"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#1e293b" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="920" height="220" rx="18" fill="url(#bg)"/>
+  <rect width="920" height="220" rx="18" fill="url(#grid)" opacity="0.55"/>
+  <rect x="1.5" y="1.5" width="917" height="217" rx="17" fill="none" stroke="#1e3a5f" stroke-width="1.5"/>
+
+  <!-- Emblem: Curly-brace Shield + Template Braces -->
+  <g transform="translate(64, 46)">
+    <path d="M64 4 L118 22 V66 C118 98 94 118 64 128 C34 118 10 98 10 66 V22 Z" fill="#0f172a" stroke="url(#accent)" stroke-width="3.5"/>
+    <path d="M46 44 C38 44 35 48 35 55 V60 C35 64 32 66 28 66 C32 66 35 68 35 72 V77 C35 84 38 88 46 88" fill="none" stroke="#38bdf8" stroke-width="4" stroke-linecap="round"/>
+    <path d="M82 44 C90 44 93 48 93 55 V60 C93 64 96 66 100 66 C96 66 93 68 93 72 V77 C93 84 90 88 82 88" fill="none" stroke="#34d399" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="64" cy="66" r="6" fill="url(#accent)"/>
+  </g>
+
+  <!-- Title & Tagline -->
+  <text x="220" y="98" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="54" font-weight="800" letter-spacing="-1.2" fill="#f8fafc">Glyph</text>
+  <rect x="380" y="64" width="84" height="28" rx="14" fill="#0f2942" stroke="#38bdf8" stroke-width="1.2"/>
+  <text x="422" y="83" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" font-weight="700" fill="#7dd3fc">v0.7.0</text>
+
+  <text x="220" y="138" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="19" fill="#cbd5e1">Statically typed, security-first template engine for NOX</text>
+  <text x="220" y="168" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13.5" fill="#64748b">Contextual Escaping  ·  TrustedMarkup Provenance  ·  ResourceBudget  ·  i18n &amp; Streaming  ·  WASM</text>
+</svg>

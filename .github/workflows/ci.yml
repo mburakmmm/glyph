@@ -56,12 +56,20 @@ jobs:
           PY
 
   test-matrix:
-    name: Check & Test (${{ matrix.os }})
+    name: Check & Test (${{ matrix.label }})
     needs: policy-and-boundaries
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - label: Linux x86_64
+            os: ubuntu-latest
+          - label: Linux ARM64
+            os: ubuntu-24.04-arm
+          - label: macOS ARM64
+            os: macos-14
+          - label: Windows x86_64
+            os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
@@ -106,8 +114,12 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          noxc build -o dist/glyph-cli cli/main.nox
-          ./dist/glyph-cli version --format json
+          BIN_EXT=""
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            BIN_EXT=".exe"
+          fi
+          noxc build -o "dist/glyph-cli${BIN_EXT}" cli/main.nox
+          "./dist/glyph-cli${BIN_EXT}" version --format json
           rm -rf dist
 
       - name: Run NOX test suite
