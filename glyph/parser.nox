@@ -205,10 +205,17 @@ class _Parser:
             t_tok: Token = self.expect_kind(TokenKind.TIdent, "expected test name after 'is'")
             if is_forbidden_key(t_tok.text):
                 raise GlyphSecurityError(GLYPH_SECURITY_REFLECTION, "restricted test name", t_tok.span, "use a registered test name")
+            t_full_name: str = t_tok.text
+            if self.check_kind(TokenKind.TDot):
+                _tdot: Token = self.advance()
+                t_sub: Token = self.expect_kind(TokenKind.TIdent, "expected test member name after '.'")
+                if is_forbidden_key(t_sub.text):
+                    raise GlyphSecurityError(GLYPH_SECURITY_REFLECTION, "restricted test name", t_sub.span, "use a registered test name")
+                t_full_name = t_tok.text + "." + t_sub.text
             t_args: list[CallArg] = []
             if self.check_kind(TokenKind.TLParen):
                 t_args = self.parse_call_args()
-            res = self._make_expr(ExprKind.EIsTest(left, t_tok.text, negated, t_args), sp)
+            res = self._make_expr(ExprKind.EIsTest(left, t_full_name, negated, t_args), sp)
         elif self.check_ident("not") and self.check_ident_at(1, "in"):
             sp_ni: SourceSpan = self.advance().span
             _in_tok: Token = self.advance()
@@ -288,10 +295,17 @@ class _Parser:
             name_tok: Token = self.expect_kind(TokenKind.TIdent, "expected filter name after '|'")
             if _is_blocked_call_name(name_tok.text):
                 raise GlyphSecurityError(GLYPH_SECURITY_REFLECTION, "restricted filter name '" + name_tok.text + "'", name_tok.span, "use an approved filter")
+            f_full_name: str = name_tok.text
+            if self.check_kind(TokenKind.TDot):
+                _fdot: Token = self.advance()
+                f_sub: Token = self.expect_kind(TokenKind.TIdent, "expected filter member name after '.'")
+                if _is_blocked_call_name(f_sub.text):
+                    raise GlyphSecurityError(GLYPH_SECURITY_REFLECTION, "restricted filter name '" + f_sub.text + "'", f_sub.span, "use an approved filter")
+                f_full_name = name_tok.text + "." + f_sub.text
             args: list[CallArg] = []
             if self.check_kind(TokenKind.TLParen):
                 args = self.parse_call_args()
-            expr = self._make_expr(ExprKind.EFilter(expr, name_tok.text, args), pipe_sp)
+            expr = self._make_expr(ExprKind.EFilter(expr, f_full_name, args), pipe_sp)
         return expr
 
     def parse_postfix(self: _Parser) -> Expr:

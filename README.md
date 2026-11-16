@@ -14,7 +14,7 @@
 
 ---
 
-> **Project Status:** **Phase 6 (`v0.4.0`) Complete** — Fail-closed contextual HTML/URL/JS/CSS escaping (`HtmlContextTracker`, `|tojson`, `TrustedMarkup` provenance, URL allowlist + anti-obfuscation) verified (`noxc test`: 11/11 suites passing on LLVM & QBE, freestanding & WASM smoke verified). Next up: Phase 7 (`v0.5.0` Full Built-in Filter/Test Registry & `HelperContext` — see [todo.md](todo.md) and [docs/roadmap.md](docs/roadmap.md)).
+> **Project Status:** **Phase 7 (`v0.5.0`) Complete** — Full built-in filter/test catalog, `FilterSpec`/`TestSpec`/`FunctionSpec` metadata, `HelperContext` isolation, expansion caps, and render-time registry locking verified (`noxc test`: 12/12 suites passing on LLVM & QBE, freestanding & WASM smoke verified). Next up: Phase 8 (`v0.6.0` i18n, Output Profiles & Streaming Writer — see [todo.md](todo.md) and [docs/roadmap.md](docs/roadmap.md)).
 
 ---
 
@@ -96,7 +96,7 @@ noxc sbom . -o glyph.sbom.json
 | **Phase 4** | `v0.2.0` | `FilesystemLoader` sandbox, `include`, `ParseCache`/`CompileCache` | Done |
 | **Phase 5** | `v0.3.0` | `extends`, `block`, `super()`, `macro`, `import`, `call/caller` | Done |
 | **Phase 6** | `v0.4.0` | Contextual escaping, URL/JS/CSS denial, `TrustedMarkup`, XSS corpus | Done |
-| **Phase 7** | `v0.5.0` | Full built-in filter/test registry, `HelperContext`, cost metering | Planned |
+| **Phase 7** | `v0.5.0` | Full built-in filter/test registry, `HelperContext`, cost metering | Done |
 | **Phase 8** | `v0.6.0` | i18n/locale/plural, HTML/Text/XML/MD/JSON/Email modes, Streaming `Writer` | Planned |
 | **Phase 9** | `v0.7.0` | `integrations/nyx`, `integrations/aether`, `glyph` CLI, JSON diagnostics | Planned |
 | **Phase 10** | `v1.0.0` **(STABLE)** | Fuzzing, race/stress, benchmarks, WASM verification, Release Gate | Planned |

@@ -1,6 +1,6 @@
 # Glyph Public API Reference (`docs/api.md`)
 
-> **Version:** `0.4.0` (Phase 6)  
+> **Version:** `0.5.0` (Phase 7)  
 > **Entry Module:** `import glyph.api`  
 > **Stability Legend:** `Stable` (contract frozen in SemVer), `Experimental` (v0.x shape subject to refinement before `v1.0`), `Internal` (implementation detail).
 
@@ -41,7 +41,10 @@
 - `environment_with_loader(loader: Loader, options: EnvironmentOptions) -> Environment`
 - `ParseCache`, `CompileCache`, `clear_cache(env)` (composite policy/version/locale/registry keys + transitive dependency invalidation)
 - `html_safe_defaults()`, `text_safe_defaults()`, `restricted_defaults()`, `default_render_options(env_opts)`
-- `FilterRegistry` (`register` — core security/built-in filters cannot be overridden)
+- `FilterRegistry` (`register`, `register_with_spec`, `freeze`, `all_specs`) — core built-in filters cannot be overridden; mutations are blocked during active renders.
+- `TestRegistry` & `FunctionRegistry` (`register`, `register_with_spec`, `freeze`, `all_specs`) — `is` tests and pure helper functions with `HelperContext` isolation.
+- `FilterSpec`, `TestSpec`, `FunctionSpec`, `HelperContext`, `CostClass` & `builtin_filter_specs()`, `builtin_test_specs()`, `builtin_function_specs()`.
+- Full built-in catalog reference: [docs/filters.md](filters.md).
 - `ResourceBudget` (`default_budget()`, `restricted_budget()`)
 
 ## 5. Error Hierarchy

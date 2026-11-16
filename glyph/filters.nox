@@ -1,94 +1,210 @@
-# MVP FilterRegistry and built-in pure filters for Glyph (Phase 3).
-# Enforces AGENTS.md §2.5, §2.8, §13: pure, bounded, safe-by-default (`|safe` disabled by default).
+# FilterRegistry, FilterSpec catalog, and full built-in filter dispatch for Glyph (Phase 7).
+# Enforces AGENTS.md §2.5, §2.8, §13.1-13.2: pure/deterministic/bounded filters, HelperContext isolation, immutable during active renders.
 import nox.strings
 import nox.json
 from glyph.errors import SourceSpan, GlyphTypeError, GlyphSecurityError, GlyphExtensionError
 from glyph.errors import GLYPH_EVAL_TYPE, GLYPH_SECURITY_POLICY, GLYPH_EXTENSION_ERROR
+from glyph.helpers import CostClass, FilterSpec, HelperContext
 from glyph.limits import BudgetTracker
+from glyph.options import OutputMode, TrustTier
 from glyph.value import Value, MarkupContext, UndefinedPolicy, is_truthy, stringify, validate_float
 from glyph.safety import escape_html_with_span, escape_json_for_html_script
+from glyph.filters_text import FilterArgValue, expect_no_filter_args, expect_max_filter_args, get_filter_arg, expect_bool_arg
+from glyph.filters_text import filter_case, filter_capitalize, filter_title, filter_trim, filter_replace, filter_truncate
+from glyph.filters_text import filter_wordcount, filter_indent, filter_center, filter_pad, filter_striptags
+from glyph.filters_text import filter_normalize_unicode, filter_urlencode, filter_slugify, filter_xml_escape
+from glyph.filters_text import filter_forceescape, filter_md_escape, filter_abs, filter_round, filter_to_int, filter_to_float
+from glyph.filters_text import filter_number, filter_currency, filter_percent, filter_filesize, filter_date, filter_relative_time
+from glyph.filters_collections import filter_length, filter_first_last, filter_reverse, filter_join, filter_sort
+from glyph.filters_collections import filter_unique, filter_map, filter_select_reject, filter_batch, filter_slice
+from glyph.filters_collections import filter_sum, filter_extremum, filter_groupby, filter_dictsort
 
-class FilterArgValue:
-    name: str
-    value: Value
+def _is_core_filter_name(name: str) -> bool:
+    if name == "escape" or name == "e" or name == "forceescape" or name == "safe" or name == "raw" or name == "tojson" or name == "xml_escape":
+        return True
+    if name == "upper" or name == "lower" or name == "capitalize" or name == "title" or name == "trim" or name == "replace":
+        return True
+    if name == "truncate" or name == "wordcount" or name == "indent" or name == "center" or name == "pad" or name == "striptags":
+        return True
+    if name == "normalize_unicode" or name == "urlencode" or name == "slugify" or name == "md_escape":
+        return True
+    if name == "length" or name == "first" or name == "last" or name == "reverse" or name == "sort" or name == "unique" or name == "join":
+        return True
+    if name == "map" or name == "select" or name == "reject" or name == "batch" or name == "slice" or name == "sum" or name == "min" or name == "max" or name == "groupby" or name == "dictsort":
+        return True
+    if name == "abs" or name == "round" or name == "int" or name == "float" or name == "number" or name == "currency" or name == "percent" or name == "filesize":
+        return True
+    if name == "default" or name == "string" or name == "date" or name == "datetime" or name == "relative_time":
+        return True
+    return False
 
-    def __init__(self: FilterArgValue, name: str, value: Value) -> None:
-        self.name = name
-        self.value = value
+def _mk_fspec(
+    name: str,
+    min_a: int,
+    max_a: int,
+    in_t: str,
+    res_t: str,
+    ctxs: str,
+    loc: bool,
+    cost: CostClass,
+    max_exp: int,
+    trust: TrustTier
+) -> FilterSpec:
+    return FilterSpec("core", name, min_a, max_a, in_t, res_t, True, True, ctxs, loc, cost, max_exp, trust)
+
+def builtin_filter_specs() -> list[FilterSpec]:
+    return [
+        _mk_fspec("escape", 0, 0, "any", "SafeHtml", "html", False, CostClass.Linear, 6, TrustTier.Untrusted),
+        _mk_fspec("forceescape", 0, 0, "any", "SafeHtml", "html", False, CostClass.Linear, 6, TrustTier.Untrusted),
+        _mk_fspec("safe", 0, 0, "any", "SafeHtml", "html", False, CostClass.Trivial, 1, TrustTier.Trusted),
+        _mk_fspec("tojson", 0, 0, "any", "SafeJs", "html_script", False, CostClass.Linear, 6, TrustTier.Untrusted),
+        _mk_fspec("xml_escape", 0, 0, "any", "string", "xml", False, CostClass.Linear, 6, TrustTier.Untrusted),
+        _mk_fspec("upper", 0, 0, "any", "string", "any", True, CostClass.Linear, 2, TrustTier.Untrusted),
+        _mk_fspec("lower", 0, 0, "any", "string", "any", True, CostClass.Linear, 2, TrustTier.Untrusted),
+        _mk_fspec("capitalize", 0, 0, "any", "string", "any", True, CostClass.Linear, 2, TrustTier.Untrusted),
+        _mk_fspec("title", 0, 0, "any", "string", "any", True, CostClass.Linear, 2, TrustTier.Untrusted),
+        _mk_fspec("trim", 0, 0, "any", "string", "any", False, CostClass.Linear, 1, TrustTier.Untrusted),
+        _mk_fspec("replace", 2, 3, "any", "string", "any", False, CostClass.Linear, 1048576, TrustTier.Untrusted),
+        _mk_fspec("truncate", 0, 3, "any", "string", "any", False, CostClass.Linear, 1, TrustTier.Untrusted),
+        _mk_fspec("wordcount", 0, 0, "any", "integer", "any", False, CostClass.Linear, 1, TrustTier.Untrusted),
+        _mk_fspec("indent", 0, 3, "any", "string", "any", False, CostClass.Linear, 1048576, TrustTier.Untrusted),
+        _mk_fspec("center", 0, 2, "any", "string", "any", False, CostClass.Linear, 4096, TrustTier.Untrusted),
+        _mk_fspec("pad", 1, 3, "any", "string", "any", False, CostClass.Linear, 4096, TrustTier.Untrusted),
+        _mk_fspec("striptags", 0, 0, "any", "string", "any", False, CostClass.Linear, 1, TrustTier.Untrusted),
+        _mk_fspec("normalize_unicode", 0, 1, "any", "string", "any", False, CostClass.Linear, 1, TrustTier.Untrusted),
+        _mk_fspec("urlencode", 0, 0, "any", "string", "any", False, CostClass.Linear, 3, TrustTier.Untrusted),
+        _mk_fspec("slugify", 0, 1, "any", "string", "any", True, CostClass.Linear, 2, TrustTier.Untrusted),
+        _mk_fspec("md_escape", 0, 0, "any", "string", "markdown", False, CostClass.Linear, 2, TrustTier.Untrusted),
+        _mk_fspec("length", 0, 0, "string|list|map", "integer", "any", False, CostClass.Trivial, 1, TrustTier.Untrusted),
+        _mk_fspec("first", 0, 0, "string|list", "any", "any", False, CostClass.Trivial, 1, TrustTier.Untrusted),
+        _mk_fspec("last", 0, 0, "string|list", "any", "any", False, CostClass.Trivial, 1, TrustTier.Untrusted),
+        _mk_fspec("reverse", 0, 0, "string|list", "string|list", "any", False, CostClass.Linear, 1, TrustTier.Untrusted),
+        _mk_fspec("sort", 0, 2, "list", "list", "any", False, CostClass.Sorting, 1, TrustTier.Untrusted),
+        _mk_fspec("unique", 0, 1, "list", "list", "any", False, CostClass.QuadraticBounded, 1, TrustTier.Untrusted),
+        _mk_fspec("join", 0, 1, "list", "string", "any", False, CostClass.Linear, 1048576, TrustTier.Untrusted),
+        _mk_fspec("map", 1, 1, "list", "list", "any", False, CostClass.Linear, 1, TrustTier.Untrusted),
+        _mk_fspec("select", 1, 3, "list", "list", "any", False, CostClass.Linear, 1, TrustTier.Untrusted),
+        _mk_fspec("reject", 1, 3, "list", "list", "any", False, CostClass.Linear, 1, TrustTier.Untrusted),
+        _mk_fspec("batch", 1, 2, "list", "list", "any", False, CostClass.Linear, 1, TrustTier.Untrusted),
+        _mk_fspec("slice", 1, 2, "list", "list", "any", False, CostClass.Linear, 1, TrustTier.Untrusted),
+        _mk_fspec("sum", 0, 2, "list", "number", "any", False, CostClass.Linear, 1, TrustTier.Untrusted),
+        _mk_fspec("min", 0, 1, "list", "any", "any", False, CostClass.Linear, 1, TrustTier.Untrusted),
+        _mk_fspec("max", 0, 1, "list", "any", "any", False, CostClass.Linear, 1, TrustTier.Untrusted),
+        _mk_fspec("groupby", 1, 1, "list", "list", "any", False, CostClass.QuadraticBounded, 1, TrustTier.Untrusted),
+        _mk_fspec("dictsort", 0, 3, "map", "list", "any", False, CostClass.Sorting, 1, TrustTier.Untrusted),
+        _mk_fspec("abs", 0, 0, "number", "number", "any", False, CostClass.Trivial, 1, TrustTier.Untrusted),
+        _mk_fspec("round", 0, 2, "number", "float", "any", False, CostClass.Trivial, 1, TrustTier.Untrusted),
+        _mk_fspec("int", 0, 1, "any", "integer", "any", False, CostClass.Trivial, 1, TrustTier.Untrusted),
+        _mk_fspec("float", 0, 1, "any", "float", "any", False, CostClass.Trivial, 1, TrustTier.Untrusted),
+        _mk_fspec("string", 0, 0, "any", "string", "any", False, CostClass.Linear, 1, TrustTier.Untrusted),
+        _mk_fspec("default", 0, 2, "any", "any", "any", False, CostClass.Trivial, 1, TrustTier.Untrusted),
+        _mk_fspec("number", 0, 1, "number", "string", "any", True, CostClass.Linear, 2, TrustTier.Untrusted),
+        _mk_fspec("currency", 0, 2, "number", "string", "any", True, CostClass.Linear, 2, TrustTier.Untrusted),
+        _mk_fspec("percent", 0, 1, "number", "string", "any", True, CostClass.Linear, 2, TrustTier.Untrusted),
+        _mk_fspec("filesize", 0, 1, "number", "string", "any", False, CostClass.Trivial, 1, TrustTier.Untrusted),
+        _mk_fspec("date", 0, 1, "int|string", "string", "any", False, CostClass.Trivial, 1, TrustTier.Untrusted),
+        _mk_fspec("datetime", 0, 1, "int|string", "string", "any", False, CostClass.Trivial, 1, TrustTier.Untrusted),
+        _mk_fspec("relative_time", 1, 1, "int|string", "string", "any", False, CostClass.Trivial, 1, TrustTier.Untrusted)
+    ]
 
 class FilterRegistry:
     allow_safe: bool
     custom_names: list[str]
-    custom_fns: list[(Value, list[FilterArgValue], BudgetTracker, SourceSpan) -> Value]
+    custom_fns: list[(Value, list[FilterArgValue], HelperContext, SourceSpan) -> Value]
+    custom_specs: list[FilterSpec]
     generation: int
+    active_renders: int
+    frozen: bool
 
     def __init__(self: FilterRegistry, allow_safe: bool) -> None:
         self.allow_safe = allow_safe
         empty_names: list[str] = []
-        empty_fns: list[(Value, list[FilterArgValue], BudgetTracker, SourceSpan) -> Value] = []
+        empty_fns: list[(Value, list[FilterArgValue], HelperContext, SourceSpan) -> Value] = []
+        empty_specs: list[FilterSpec] = []
         self.custom_names = empty_names
         self.custom_fns = empty_fns
+        self.custom_specs = empty_specs
         self.generation = 1
+        self.active_renders = 0
+        self.frozen = False
+
+    def begin_use(self: FilterRegistry) -> None:
+        self.active_renders = self.active_renders + 1
+
+    def end_use(self: FilterRegistry) -> None:
+        if self.active_renders > 0:
+            self.active_renders = self.active_renders - 1
+
+    def freeze(self: FilterRegistry) -> None:
+        self.frozen = True
+
+    def register_with_spec(
+        self: FilterRegistry,
+        spec: FilterSpec,
+        fn: (Value, list[FilterArgValue], HelperContext, SourceSpan) -> Value
+    ) -> None:
+        reg_sp: SourceSpan = SourceSpan("<registry>", 1, 1, 0, 0)
+        if self.frozen or self.active_renders > 0:
+            raise GlyphExtensionError(
+                GLYPH_EXTENSION_ERROR,
+                "cannot modify FilterRegistry while rendering is active or frozen",
+                reg_sp,
+                "register filters on Environment before rendering begins"
+            )
+        full_name: str = spec.name
+        if len(spec.namespace_name) > 0 and spec.namespace_name != "custom" and spec.namespace_name != "core" and not nox.strings.contains(full_name, "."):
+            full_name = spec.namespace_name + "." + spec.name
+        if _is_core_filter_name(full_name):
+            raise GlyphExtensionError(
+                GLYPH_EXTENSION_ERROR,
+                "cannot override core filter '" + full_name + "'",
+                reg_sp,
+                "register custom filters under a distinct name"
+            )
+        names: list[str] = self.custom_names
+        fns: list[(Value, list[FilterArgValue], HelperContext, SourceSpan) -> Value] = self.custom_fns
+        specs: list[FilterSpec] = self.custom_specs
+        i: int = 0
+        while i < len(names):
+            if names[i] == full_name:
+                fns[i] = fn
+                specs[i] = spec
+                self.custom_fns = fns
+                self.custom_specs = specs
+                self.generation = self.generation + 1
+                return
+            i = i + 1
+        names.append(full_name)
+        fns.append(fn)
+        specs.append(spec)
+        self.custom_names = names
+        self.custom_fns = fns
+        self.custom_specs = specs
+        self.generation = self.generation + 1
 
     def register(
         self: FilterRegistry,
         name: str,
         fn: (Value, list[FilterArgValue], BudgetTracker, SourceSpan) -> Value
     ) -> None:
-        if _is_core_filter_name(name):
-            raise GlyphExtensionError(
-                GLYPH_EXTENSION_ERROR,
-                "cannot override core filter '" + name + "'",
-                SourceSpan("<registry>", 1, 1, 0, 0),
-                "register custom filters under a distinct name"
-            )
-        names: list[str] = self.custom_names
-        fns: list[(Value, list[FilterArgValue], BudgetTracker, SourceSpan) -> Value] = self.custom_fns
+        def wrapped(v: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+            return fn(v, args, hctx.tracker, span)
+        sp: FilterSpec = FilterSpec("custom", name, 0, 8, "any", "any", True, True, "any", False, CostClass.Linear, 65536, TrustTier.Untrusted)
+        self.register_with_spec(sp, wrapped)
+
+    def all_specs(self: FilterRegistry) -> list[FilterSpec]:
+        out: list[FilterSpec] = builtin_filter_specs()
         i: int = 0
-        while i < len(names):
-            if names[i] == name:
-                fns[i] = fn
-                self.custom_fns = fns
-                self.generation = self.generation + 1
-                return
+        while i < len(self.custom_specs):
+            out.append(self.custom_specs[i])
             i = i + 1
-        names.append(name)
-        fns.append(fn)
-        self.custom_names = names
-        self.custom_fns = fns
-        self.generation = self.generation + 1
+        return out
 
 def default_filters(allow_safe: bool) -> FilterRegistry:
     return FilterRegistry(allow_safe)
 
-def _is_core_filter_name(name: str) -> bool:
-    if name == "escape" or name == "e" or name == "safe" or name == "raw" or name == "tojson":
-        return True
-    if name == "default" or name == "length" or name == "join" or name == "upper" or name == "lower":
-        return True
-    return False
-
-def _expect_no_args(name: str, args: list[FilterArgValue], span: SourceSpan) -> None:
-    if len(args) > 0:
-        raise GlyphTypeError(
-            GLYPH_EVAL_TYPE,
-            "filter '" + name + "' takes no arguments",
-            span,
-            "remove extra arguments from |" + name
-        )
-
-def _get_arg(args: list[FilterArgValue], pos: int, kw_name: str, fallback: Value) -> Value:
-    i: int = 0
-    while i < len(args):
-        if len(args[i].name) > 0 and args[i].name == kw_name:
-            return args[i].value
-        i = i + 1
-    if pos < len(args) and len(args[pos].name) == 0:
-        return args[pos].value
-    return fallback
-
 def _filter_escape(val: Value, args: list[FilterArgValue], policy: UndefinedPolicy, span: SourceSpan) -> Value:
-    _expect_no_args("escape", args, span)
+    expect_no_filter_args("escape", args, span)
     match val:
         case Value.VTrustedMarkup(content, ctx):
             match ctx:
@@ -101,16 +217,9 @@ def _filter_escape(val: Value, args: list[FilterArgValue], policy: UndefinedPoli
             return Value.VTrustedMarkup(escape_html_with_span(raw, span), MarkupContext.SafeHtml)
 
 def _filter_default(val: Value, args: list[FilterArgValue], policy: UndefinedPolicy, span: SourceSpan) -> Value:
-    if len(args) > 2:
-        raise GlyphTypeError(GLYPH_EVAL_TYPE, "filter 'default' takes at most 2 arguments", span, "use |default(value, boolean=false)")
-    def_val: Value = _get_arg(args, 0, "default_value", Value.VStr(""))
-    bool_arg: Value = _get_arg(args, 1, "boolean", Value.VBool(False))
-    check_falsy: bool = False
-    match bool_arg:
-        case Value.VBool(b):
-            check_falsy = b
-        case _:
-            raise GlyphTypeError(GLYPH_EVAL_TYPE, "default() 'boolean' argument must be a boolean", span, "pass true or false")
+    expect_max_filter_args("default", args, 2, span)
+    def_val: Value = get_filter_arg(args, 0, "default_value", Value.VStr(""))
+    check_falsy: bool = expect_bool_arg(get_filter_arg(args, 1, "boolean", Value.VBool(False)), "default", "boolean", span)
     match val:
         case Value.VUndefined(_):
             return def_val
@@ -120,56 +229,10 @@ def _filter_default(val: Value, args: list[FilterArgValue], policy: UndefinedPol
                     return def_val
             return val
 
-def _filter_length(val: Value, args: list[FilterArgValue], span: SourceSpan) -> Value:
-    _expect_no_args("length", args, span)
-    match val:
-        case Value.VStr(s):
-            return Value.VInt(len(s))
-        case Value.VList(items):
-            return Value.VInt(len(items))
-        case Value.VMap(entries):
-            return Value.VInt(entries.size())
-        case Value.VTrustedMarkup(c, _):
-            return Value.VInt(len(c))
-        case _:
-            raise GlyphTypeError(GLYPH_EVAL_TYPE, "length filter expects string, list, or map", span, "pass a sized value to |length")
-
-def _filter_join(val: Value, args: list[FilterArgValue], policy: UndefinedPolicy, tracker: BudgetTracker, span: SourceSpan) -> Value:
-    if len(args) > 1:
-        raise GlyphTypeError(GLYPH_EVAL_TYPE, "filter 'join' takes at most 1 argument", span, "use |join(', ')")
-    sep_val: Value = _get_arg(args, 0, "d", Value.VStr(""))
-    sep: str = stringify(sep_val, policy, span)
-    match val:
-        case Value.VList(items):
-            parts: list[str] = []
-            i: int = 0
-            while i < len(items):
-                tracker.consume_op(span)
-                parts.append(stringify(items[i], policy, span))
-                i = i + 1
-            return Value.VStr(nox.strings.join(parts, sep))
-        case _:
-            raise GlyphTypeError(GLYPH_EVAL_TYPE, "join filter expects a list", span, "pass a list to |join")
-
-def _filter_case(val: Value, args: list[FilterArgValue], to_upper: bool, policy: UndefinedPolicy, span: SourceSpan) -> Value:
-    fname: str = "lower"
-    if to_upper:
-        fname = "upper"
-    _expect_no_args(fname, args, span)
-    s: str = stringify(val, policy, span)
-    if to_upper:
-        return Value.VStr(nox.strings.upper(s))
-    return Value.VStr(nox.strings.lower(s))
-
 def _value_to_json(val: Value, policy: UndefinedPolicy, tracker: BudgetTracker, depth: int, span: SourceSpan) -> str:
     tracker.consume_op(span)
     if depth > 64:
-        raise GlyphTypeError(
-            GLYPH_EVAL_TYPE,
-            "tojson nesting depth exceeded maximum limit (64)",
-            span,
-            "flatten deeply nested structures before calling |tojson"
-        )
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "tojson nesting depth exceeded maximum limit (64)", span, "flatten deeply nested structures before calling |tojson")
     match val:
         case Value.VNull:
             return "null"
@@ -208,25 +271,164 @@ def _value_to_json(val: Value, policy: UndefinedPolicy, tracker: BudgetTracker, 
                 case UndefinedPolicy.LenientUndefined:
                     return "null"
                 case _:
-                    raise GlyphTypeError(
-                        GLYPH_EVAL_TYPE,
-                        "cannot serialize undefined variable '" + name + "' with |tojson",
-                        span,
-                        "define '" + name + "' or apply |default before |tojson"
-                    )
+                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "cannot serialize undefined variable '" + name + "' with |tojson", span, "define '" + name + "' or apply |default before |tojson")
         case Value.VCallable(cname):
-            raise GlyphTypeError(
-                GLYPH_EVAL_TYPE,
-                "cannot serialize callable '" + cname + "' with |tojson",
-                span,
-                "pass data values rather than callables to |tojson"
-            )
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "cannot serialize callable '" + cname + "' with |tojson", span, "pass data values rather than callables to |tojson")
 
 def _filter_tojson(val: Value, args: list[FilterArgValue], policy: UndefinedPolicy, tracker: BudgetTracker, span: SourceSpan) -> Value:
-    _expect_no_args("tojson", args, span)
+    expect_no_filter_args("tojson", args, span)
     raw_json: str = _value_to_json(val, policy, tracker, 0, span)
     safe_json: str = escape_json_for_html_script(raw_json)
     return Value.VTrustedMarkup(safe_json, MarkupContext.SafeJs)
+
+def apply_filter_with_context(
+    reg: FilterRegistry,
+    name: str,
+    val: Value,
+    args: list[FilterArgValue],
+    hctx: HelperContext,
+    span: SourceSpan
+) -> Value:
+    hctx.consume_op(span)
+    # Escaping & Policy
+    if name == "escape" or name == "e":
+        return _filter_escape(val, args, hctx.undefined_policy, span)
+    if name == "forceescape":
+        return filter_forceescape(val, args, hctx, span)
+    if name == "tojson":
+        return _filter_tojson(val, args, hctx.undefined_policy, hctx.tracker, span)
+    if name == "xml_escape":
+        return filter_xml_escape(val, args, hctx, span)
+    if name == "safe" or name == "raw":
+        can_safe: bool = reg.allow_safe
+        match hctx.trust_tier:
+            case TrustTier.Trusted:
+                pass
+            case _:
+                can_safe = False
+        if not can_safe:
+            raise GlyphSecurityError(
+                GLYPH_SECURITY_POLICY,
+                "filter '" + name + "' is disabled in safe-by-default/restricted mode",
+                span,
+                "use typed TrustedMarkup from host context instead"
+            )
+        expect_no_filter_args(name, args, span)
+        return Value.VTrustedMarkup(stringify(val, hctx.undefined_policy, span), MarkupContext.SafeHtml)
+
+    # Strings & Markdown
+    if name == "upper":
+        return filter_case(val, args, True, hctx, span)
+    if name == "lower":
+        return filter_case(val, args, False, hctx, span)
+    if name == "capitalize":
+        return filter_capitalize(val, args, hctx, span)
+    if name == "title":
+        return filter_title(val, args, hctx, span)
+    if name == "trim":
+        return filter_trim(val, args, hctx, span)
+    if name == "replace":
+        return filter_replace(val, args, hctx, span)
+    if name == "truncate":
+        return filter_truncate(val, args, hctx, span)
+    if name == "wordcount":
+        return filter_wordcount(val, args, hctx, span)
+    if name == "indent":
+        return filter_indent(val, args, hctx, span)
+    if name == "center":
+        return filter_center(val, args, hctx, span)
+    if name == "pad":
+        return filter_pad(val, args, hctx, span)
+    if name == "striptags":
+        return filter_striptags(val, args, hctx, span)
+    if name == "normalize_unicode":
+        return filter_normalize_unicode(val, args, hctx, span)
+    if name == "urlencode":
+        return filter_urlencode(val, args, hctx, span)
+    if name == "slugify":
+        return filter_slugify(val, args, hctx, span)
+    if name == "md_escape":
+        return filter_md_escape(val, args, hctx, span)
+
+    # Collections
+    if name == "length":
+        return filter_length(val, args, hctx, span)
+    if name == "first":
+        return filter_first_last(val, args, False, hctx, span)
+    if name == "last":
+        return filter_first_last(val, args, True, hctx, span)
+    if name == "reverse":
+        return filter_reverse(val, args, hctx, span)
+    if name == "sort":
+        return filter_sort(val, args, hctx, span)
+    if name == "unique":
+        return filter_unique(val, args, hctx, span)
+    if name == "join":
+        return filter_join(val, args, hctx, span)
+    if name == "map":
+        return filter_map(val, args, hctx, span)
+    if name == "select":
+        return filter_select_reject(val, args, True, hctx, span)
+    if name == "reject":
+        return filter_select_reject(val, args, False, hctx, span)
+    if name == "batch":
+        return filter_batch(val, args, hctx, span)
+    if name == "slice":
+        return filter_slice(val, args, hctx, span)
+    if name == "sum":
+        return filter_sum(val, args, hctx, span)
+    if name == "min":
+        return filter_extremum(val, args, False, hctx, span)
+    if name == "max":
+        return filter_extremum(val, args, True, hctx, span)
+    if name == "groupby":
+        return filter_groupby(val, args, hctx, span)
+    if name == "dictsort":
+        return filter_dictsort(val, args, hctx, span)
+
+    # Numbers, Formatting & Explicit Dates
+    if name == "default":
+        return _filter_default(val, args, hctx.undefined_policy, span)
+    if name == "string":
+        expect_no_filter_args("string", args, span)
+        return Value.VStr(stringify(val, hctx.undefined_policy, span))
+    if name == "abs":
+        return filter_abs(val, args, hctx, span)
+    if name == "round":
+        return filter_round(val, args, hctx, span)
+    if name == "int":
+        return filter_to_int(val, args, hctx, span)
+    if name == "float":
+        return filter_to_float(val, args, hctx, span)
+    if name == "number":
+        return filter_number(val, args, hctx, span)
+    if name == "currency":
+        return filter_currency(val, args, hctx, span)
+    if name == "percent":
+        return filter_percent(val, args, hctx, span)
+    if name == "filesize":
+        return filter_filesize(val, args, hctx, span)
+    if name == "date":
+        return filter_date(val, args, False, hctx, span)
+    if name == "datetime":
+        return filter_date(val, args, True, hctx, span)
+    if name == "relative_time":
+        return filter_relative_time(val, args, hctx, span)
+
+    # Custom registered filters
+    i: int = 0
+    while i < len(reg.custom_names):
+        if reg.custom_names[i] == name:
+            fn: (Value, list[FilterArgValue], HelperContext, SourceSpan) -> Value = reg.custom_fns[i]
+            return fn(val, args, hctx, span)
+        i = i + 1
+
+    raise GlyphExtensionError(
+        GLYPH_EXTENSION_ERROR,
+        "unknown filter '" + name + "'",
+        span,
+        "check registered filter names"
+    )
 
 def apply_filter(
     reg: FilterRegistry,
@@ -237,42 +439,5 @@ def apply_filter(
     tracker: BudgetTracker,
     span: SourceSpan
 ) -> Value:
-    tracker.consume_op(span)
-    if name == "escape" or name == "e":
-        return _filter_escape(val, args, policy, span)
-    if name == "tojson":
-        return _filter_tojson(val, args, policy, tracker, span)
-    if name == "default":
-        return _filter_default(val, args, policy, span)
-    if name == "length":
-        return _filter_length(val, args, span)
-    if name == "join":
-        return _filter_join(val, args, policy, tracker, span)
-    if name == "upper":
-        return _filter_case(val, args, True, policy, span)
-    if name == "lower":
-        return _filter_case(val, args, False, policy, span)
-    if name == "safe" or name == "raw":
-        if not reg.allow_safe:
-            raise GlyphSecurityError(
-                GLYPH_SECURITY_POLICY,
-                "filter '" + name + "' is disabled in safe-by-default mode",
-                span,
-                "use typed TrustedMarkup from host context instead"
-            )
-        _expect_no_args(name, args, span)
-        return Value.VTrustedMarkup(stringify(val, policy, span), MarkupContext.SafeHtml)
-
-    i: int = 0
-    while i < len(reg.custom_names):
-        if reg.custom_names[i] == name:
-            fn: (Value, list[FilterArgValue], BudgetTracker, SourceSpan) -> Value = reg.custom_fns[i]
-            return fn(val, args, tracker, span)
-        i = i + 1
-
-    raise GlyphExtensionError(
-        GLYPH_EXTENSION_ERROR,
-        "unknown filter '" + name + "'",
-        span,
-        "check registered filter names"
-    )
+    hctx: HelperContext = HelperContext("en-US", OutputMode.Html, True, policy, TrustTier.Trusted, tracker)
+    return apply_filter_with_context(reg, name, val, args, hctx, span)

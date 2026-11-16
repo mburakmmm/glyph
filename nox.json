@@ -1,6 +1,6 @@
 {
   "name": "glyph",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Independent, statically typed, security-first template engine for NOX",
   "license": "MIT",
   "repository": "https://github.com/mburakmmm/glyph",

@@ -1,0 +1,900 @@
+# Built-in string, escaping, formatting, number, markdown, and explicit-time filters for Glyph (Phase 7).
+# Enforces AGENTS.md §13.1-13.2, §14, and BudgetTracker expansion bounds. Pure NOX, freestanding-safe.
+import nox.strings
+from glyph.errors import SourceSpan, GlyphTypeError, GlyphSecurityError, GLYPH_EVAL_TYPE, GLYPH_EVAL_OVERFLOW, GLYPH_SECURITY_CONTEXT
+from glyph.helpers import HelperContext
+from glyph.safety import escape_html_with_span
+from glyph.value import Value, MarkupContext, UndefinedPolicy, check_not_undef, stringify, validate_float, checked_add, INT64_MIN
+
+MAX_FILTER_OUTPUT_BYTES: int = 1048576
+
+class FilterArgValue:
+    name: str
+    value: Value
+
+    def __init__(self: FilterArgValue, name: str, value: Value) -> None:
+        self.name = name
+        self.value = value
+
+def expect_no_filter_args(name: str, args: list[FilterArgValue], span: SourceSpan) -> None:
+    if len(args) > 0:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "filter '" + name + "' takes no arguments", span, "remove extra arguments from |" + name)
+
+def expect_max_filter_args(name: str, args: list[FilterArgValue], max_n: int, span: SourceSpan) -> None:
+    if len(args) > max_n:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "filter '" + name + "' takes at most " + str(max_n) + " arguments", span, "check arguments passed to |" + name)
+
+def get_filter_arg(args: list[FilterArgValue], pos: int, kw_name: str, fallback: Value) -> Value:
+    i: int = 0
+    while i < len(args):
+        if len(args[i].name) > 0 and args[i].name == kw_name:
+            return args[i].value
+        i = i + 1
+    if pos >= 0 and pos < len(args) and len(args[pos].name) == 0:
+        return args[pos].value
+    return fallback
+
+def has_filter_arg(args: list[FilterArgValue], pos: int, kw_name: str) -> bool:
+    i: int = 0
+    while i < len(args):
+        if len(args[i].name) > 0 and args[i].name == kw_name:
+            return True
+        i = i + 1
+    return pos >= 0 and pos < len(args) and len(args[pos].name) == 0
+
+def expect_bool_arg(v: Value, fname: str, aname: str, span: SourceSpan) -> bool:
+    match v:
+        case Value.VBool(b):
+            return b
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, fname + " '" + aname + "' argument must be a boolean", span, "pass true or false")
+
+def expect_int_arg(v: Value, fname: str, aname: str, span: SourceSpan) -> int:
+    match v:
+        case Value.VInt(i):
+            return i
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, fname + " '" + aname + "' argument must be an integer", span, "pass an integer")
+
+def expect_str_arg(v: Value, fname: str, aname: str, policy: UndefinedPolicy, span: SourceSpan) -> str:
+    vc: Value = check_not_undef(v, policy, span)
+    match vc:
+        case Value.VStr(s):
+            return s
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, fname + " '" + aname + "' argument must be a string", span, "pass a string")
+
+def check_output_cap(byte_n: int, hctx: HelperContext, fname: str, span: SourceSpan) -> None:
+    max_b: int = hctx.tracker.budget.max_output_bytes
+    if MAX_FILTER_OUTPUT_BYTES < max_b:
+        max_b = MAX_FILTER_OUTPUT_BYTES
+    if byte_n > max_b:
+        raise GlyphTypeError(
+            GLYPH_EVAL_TYPE,
+            "filter '" + fname + "' output size (" + str(byte_n) + " bytes) exceeds maximum expansion limit (" + str(max_b) + ")",
+            span,
+            "reduce string expansion size in |" + fname
+        )
+
+def _is_tr_locale(loc: str) -> bool:
+    ll: str = nox.strings.lower(loc)
+    return nox.strings.starts_with(ll, "tr") or nox.strings.starts_with(ll, "az")
+
+def _to_upper_locale(s: str, loc: str) -> str:
+    if _is_tr_locale(loc):
+        s1: str = nox.strings.replace(s, "i", "İ")
+        s2: str = nox.strings.replace(s1, "ı", "I")
+        return nox.strings.upper(s2)
+    return nox.strings.upper(s)
+
+def _to_lower_locale(s: str, loc: str) -> str:
+    if _is_tr_locale(loc):
+        s1: str = nox.strings.replace(s, "I", "ı")
+        s2: str = nox.strings.replace(s1, "İ", "i")
+        return nox.strings.lower(s2)
+    return nox.strings.lower(s)
+
+def _is_ws_byte(b: int) -> bool:
+    return b == 32 or b == 9 or b == 10 or b == 13
+
+def _is_alnum_ascii(b: int) -> bool:
+    if b >= 48 and b <= 57:
+        return True
+    if b >= 65 and b <= 90:
+        return True
+    if b >= 97 and b <= 122:
+        return True
+    return False
+
+def _hex_upper(n: int) -> str:
+    hex_chars: str = "0123456789ABCDEF"
+    hi: int = n // 16
+    lo: int = n % 16
+    return hex_chars[hi:hi + 1] + hex_chars[lo:lo + 1]
+
+def filter_case(val: Value, args: list[FilterArgValue], to_upper: bool, hctx: HelperContext, span: SourceSpan) -> Value:
+    fname: str = "lower"
+    if to_upper:
+        fname = "upper"
+    expect_no_filter_args(fname, args, span)
+    s: str = stringify(val, hctx.undefined_policy, span)
+    if to_upper:
+        return Value.VStr(_to_upper_locale(s, hctx.locale))
+    return Value.VStr(_to_lower_locale(s, hctx.locale))
+
+def filter_capitalize(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_no_filter_args("capitalize", args, span)
+    s: str = stringify(val, hctx.undefined_policy, span)
+    if len(s) == 0:
+        return Value.VStr("")
+    head: str = _to_upper_locale(s[0:1], hctx.locale)
+    tail: str = _to_lower_locale(s[1:len(s)], hctx.locale)
+    return Value.VStr(head + tail)
+
+def filter_title(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_no_filter_args("title", args, span)
+    s: str = stringify(val, hctx.undefined_policy, span)
+    n: int = len(s)
+    parts: list[str] = []
+    at_start: bool = True
+    i: int = 0
+    while i < n:
+        hctx.consume_op(span)
+        ch: str = s[i:i + 1]
+        is_sep: bool = (ch == " " or ch == "\t" or ch == "\n" or ch == nox.strings.char_from_byte(13) or ch == "-" or ch == "_")
+        if is_sep:
+            parts.append(ch)
+            at_start = True
+        else:
+            if at_start:
+                parts.append(_to_upper_locale(ch, hctx.locale))
+                at_start = False
+            else:
+                parts.append(_to_lower_locale(ch, hctx.locale))
+        i = i + 1
+    return Value.VStr(nox.strings.join(parts, ""))
+
+def filter_trim(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_no_filter_args("trim", args, span)
+    s: str = stringify(val, hctx.undefined_policy, span)
+    return Value.VStr(nox.strings.trim(s))
+
+def filter_replace(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("replace", args, 3, span)
+    if len(args) < 2:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "filter 'replace' requires old and new arguments", span, "use |replace('old', 'new')")
+    src: str = stringify(val, hctx.undefined_policy, span)
+    old_s: str = expect_str_arg(get_filter_arg(args, 0, "old", Value.VStr("")), "replace", "old", hctx.undefined_policy, span)
+    new_s: str = expect_str_arg(get_filter_arg(args, 1, "new", Value.VStr("")), "replace", "new", hctx.undefined_policy, span)
+    limit: int = expect_int_arg(get_filter_arg(args, 2, "count", Value.VInt(-1)), "replace", "count", span)
+    if len(old_s) == 0:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "replace() 'old' pattern must not be empty", span, "pass a non-empty search string")
+    if limit == 0:
+        return Value.VStr(src)
+
+    parts: list[str] = []
+    pos: int = 0
+    total_bytes: int = 0
+    done_count: int = 0
+    old_len: int = len(old_s)
+    src_len: int = len(src)
+    more: bool = True
+    while pos <= src_len and more:
+        hctx.consume_op(span)
+        if limit >= 0 and done_count >= limit:
+            rest: str = src[pos:src_len]
+            total_bytes = total_bytes + nox.strings.byte_len(rest)
+            check_output_cap(total_bytes, hctx, "replace", span)
+            parts.append(rest)
+            more = False
+        else:
+            rem: str = src[pos:src_len]
+            found: int = nox.strings.index_of(rem, old_s)
+            if found < 0:
+                total_bytes = total_bytes + nox.strings.byte_len(rem)
+                check_output_cap(total_bytes, hctx, "replace", span)
+                parts.append(rem)
+                more = False
+            else:
+                seg: str = rem[0:found]
+                total_bytes = total_bytes + nox.strings.byte_len(seg) + nox.strings.byte_len(new_s)
+                check_output_cap(total_bytes, hctx, "replace", span)
+                parts.append(seg)
+                parts.append(new_s)
+                pos = pos + found + old_len
+                done_count = done_count + 1
+    return Value.VStr(nox.strings.join(parts, ""))
+
+def filter_truncate(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("truncate", args, 3, span)
+    max_len: int = expect_int_arg(get_filter_arg(args, 0, "length", Value.VInt(255)), "truncate", "length", span)
+    killwords: bool = expect_bool_arg(get_filter_arg(args, 1, "killwords", Value.VBool(False)), "truncate", "killwords", span)
+    end_marker: str = expect_str_arg(get_filter_arg(args, 2, "end", Value.VStr("...")), "truncate", "end", hctx.undefined_policy, span)
+    if max_len < 0:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "truncate() length cannot be negative", span, "pass length >= 0")
+    s: str = stringify(val, hctx.undefined_policy, span)
+    if len(s) <= max_len:
+        return Value.VStr(s)
+    end_len: int = len(end_marker)
+    if max_len <= end_len:
+        return Value.VStr(end_marker[0:max_len])
+    cut: int = max_len - end_len
+    prefix: str = s[0:cut]
+    if not killwords:
+        # Step back to last space if mid-word
+        next_ch: str = s[cut:cut + 1]
+        if next_ch != " " and nox.strings.contains(prefix, " "):
+            sp_idx: int = cut - 1
+            while sp_idx >= 0 and prefix[sp_idx:sp_idx + 1] != " ":
+                sp_idx = sp_idx - 1
+            if sp_idx > 0:
+                prefix = prefix[0:sp_idx]
+        prefix = nox.strings.trim_end(prefix)
+    return Value.VStr(prefix + end_marker)
+
+def filter_wordcount(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_no_filter_args("wordcount", args, span)
+    s: str = stringify(val, hctx.undefined_policy, span)
+    blen: int = nox.strings.byte_len(s)
+    words: int = 0
+    in_word: bool = False
+    i: int = 0
+    while i < blen:
+        hctx.consume_op(span)
+        b: int = nox.strings.byte_at(s, i)
+        if _is_ws_byte(b):
+            in_word = False
+        else:
+            if not in_word:
+                words = words + 1
+                in_word = True
+        i = i + 1
+    return Value.VInt(words)
+
+def filter_indent(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("indent", args, 3, span)
+    width: int = expect_int_arg(get_filter_arg(args, 0, "width", Value.VInt(4)), "indent", "width", span)
+    first: bool = expect_bool_arg(get_filter_arg(args, 1, "first", Value.VBool(False)), "indent", "first", span)
+    blank: bool = expect_bool_arg(get_filter_arg(args, 2, "blank", Value.VBool(False)), "indent", "blank", span)
+    if width < 0 or width > 64:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "indent() width must be between 0 and 64", span, "pass 0 <= width <= 64")
+    s: str = stringify(val, hctx.undefined_policy, span)
+    pad: str = nox.strings.repeat(" ", width)
+    lines: list[str] = nox.strings.split(s, "\n")
+    out: list[str] = []
+    total_b: int = 0
+    i: int = 0
+    while i < len(lines):
+        hctx.consume_op(span)
+        ln: str = lines[i]
+        should_ind: bool = (i > 0 or first) and (len(ln) > 0 or blank)
+        res_ln: str = ln
+        if should_ind:
+            res_ln = pad + ln
+        total_b = total_b + nox.strings.byte_len(res_ln) + 1
+        check_output_cap(total_b, hctx, "indent", span)
+        out.append(res_ln)
+        i = i + 1
+    return Value.VStr(nox.strings.join(out, "\n"))
+
+def filter_center(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("center", args, 2, span)
+    width: int = expect_int_arg(get_filter_arg(args, 0, "width", Value.VInt(80)), "center", "width", span)
+    fill: str = expect_str_arg(get_filter_arg(args, 1, "fillchar", Value.VStr(" ")), "center", "fillchar", hctx.undefined_policy, span)
+    if width < 0 or width > 4096:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "center() width must be between 0 and 4096", span, "pass 0 <= width <= 4096")
+    if len(fill) != 1:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "center() fillchar must be a single character", span, "pass a 1-char string")
+    s: str = stringify(val, hctx.undefined_policy, span)
+    slen: int = len(s)
+    if slen >= width:
+        return Value.VStr(s)
+    rem: int = width - slen
+    left_n: int = rem // 2
+    right_n: int = rem - left_n
+    res: str = nox.strings.repeat(fill, left_n) + s + nox.strings.repeat(fill, right_n)
+    check_output_cap(nox.strings.byte_len(res), hctx, "center", span)
+    return Value.VStr(res)
+
+def filter_pad(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("pad", args, 3, span)
+    if len(args) < 1:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "filter 'pad' requires width argument", span, "use |pad(10, ' ', 'left')")
+    width: int = expect_int_arg(get_filter_arg(args, 0, "width", Value.VInt(0)), "pad", "width", span)
+    fill: str = expect_str_arg(get_filter_arg(args, 1, "fillchar", Value.VStr(" ")), "pad", "fillchar", hctx.undefined_policy, span)
+    align: str = expect_str_arg(get_filter_arg(args, 2, "align", Value.VStr("left")), "pad", "align", hctx.undefined_policy, span)
+    if width < 0 or width > 4096:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "pad() width must be between 0 and 4096", span, "pass 0 <= width <= 4096")
+    if len(fill) != 1:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "pad() fillchar must be a single character", span, "pass a 1-char string")
+    s: str = stringify(val, hctx.undefined_policy, span)
+    slen: int = len(s)
+    if slen >= width:
+        return Value.VStr(s)
+    need: int = width - slen
+    res: str = ""
+    if align == "left":
+        res = s + nox.strings.repeat(fill, need)
+    elif align == "right":
+        res = nox.strings.repeat(fill, need) + s
+    elif align == "center":
+        l: int = need // 2
+        res = nox.strings.repeat(fill, l) + s + nox.strings.repeat(fill, need - l)
+    else:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "pad() align must be 'left', 'right', or 'center'", span, "use align='left', 'right', or 'center'")
+    check_output_cap(nox.strings.byte_len(res), hctx, "pad", span)
+    return Value.VStr(res)
+
+# Plain-text tag stripper (NOT an HTML sanitizer; always returns VStr so HTML context still escapes output).
+def filter_striptags(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_no_filter_args("striptags", args, span)
+    hctx.add_warning("striptags performs plain-text tag removal and is not an HTML sanitizer")
+    s: str = stringify(val, hctx.undefined_policy, span)
+    n: int = len(s)
+    out: list[str] = []
+    in_tag: bool = False
+    seg_start: int = 0
+    i: int = 0
+    while i < n:
+        hctx.consume_op(span)
+        ch: str = s[i:i + 1]
+        if not in_tag:
+            if ch == "<":
+                if i > seg_start:
+                    out.append(s[seg_start:i])
+                in_tag = True
+        else:
+            if ch == ">":
+                in_tag = False
+                seg_start = i + 1
+        i = i + 1
+    if not in_tag and n > seg_start:
+        out.append(s[seg_start:n])
+    return Value.VStr(nox.strings.join(out, ""))
+
+def filter_normalize_unicode(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("normalize_unicode", args, 1, span)
+    form: str = _to_upper_locale(expect_str_arg(get_filter_arg(args, 0, "form", Value.VStr("NFC")), "normalize_unicode", "form", hctx.undefined_policy, span), "en")
+    if form != "NFC" and form != "NFD" and form != "NFKC" and form != "NFKD":
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "invalid Unicode normalization form '" + form + "'", span, "use NFC, NFD, NFKC, or NFKD")
+    s: str = stringify(val, hctx.undefined_policy, span)
+    # Check whether string contains non-ASCII bytes in freestanding mode
+    blen: int = nox.strings.byte_len(s)
+    ascii_only: bool = True
+    i: int = 0
+    while i < blen and ascii_only:
+        if nox.strings.byte_at(s, i) >= 128:
+            ascii_only = False
+        i = i + 1
+    if not ascii_only:
+        hctx.add_warning("normalize_unicode ran in freestanding ASCII-identity fallback without full UAX #15 tables")
+    return Value.VStr(s)
+
+def filter_urlencode(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_no_filter_args("urlencode", args, span)
+    s: str = stringify(val, hctx.undefined_policy, span)
+    blen: int = nox.strings.byte_len(s)
+    check_output_cap(blen * 3, hctx, "urlencode", span)
+    out: list[str] = []
+    i: int = 0
+    while i < blen:
+        hctx.consume_op(span)
+        b: int = nox.strings.byte_at(s, i)
+        unreserved: bool = _is_alnum_ascii(b) or b == 45 or b == 46 or b == 95 or b == 126
+        if unreserved:
+            out.append(nox.strings.char_from_byte(b))
+        else:
+            out.append("%" + _hex_upper(b))
+        i = i + 1
+    return Value.VStr(nox.strings.join(out, ""))
+
+def filter_slugify(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("slugify", args, 1, span)
+    sep: str = expect_str_arg(get_filter_arg(args, 0, "separator", Value.VStr("-")), "slugify", "separator", hctx.undefined_policy, span)
+    if len(sep) == 0 or len(sep) > 4:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "slugify() separator length must be 1..4", span, "pass a short separator like '-'")
+    raw_s: str = stringify(val, hctx.undefined_policy, span)
+    raw_s = nox.strings.replace(raw_s, "İ", "i")
+    raw_s = nox.strings.replace(raw_s, "Ç", "c")
+    raw_s = nox.strings.replace(raw_s, "Ğ", "g")
+    raw_s = nox.strings.replace(raw_s, "Ö", "o")
+    raw_s = nox.strings.replace(raw_s, "Ş", "s")
+    raw_s = nox.strings.replace(raw_s, "Ü", "u")
+    s: str = _to_lower_locale(raw_s, hctx.locale)
+    # Transliterate lowercase Turkish/extended Latin characters cleanly
+    s = nox.strings.replace(s, "ç", "c")
+    s = nox.strings.replace(s, "ğ", "g")
+    s = nox.strings.replace(s, "ı", "i")
+    s = nox.strings.replace(s, "ö", "o")
+    s = nox.strings.replace(s, "ş", "s")
+    s = nox.strings.replace(s, "ü", "u")
+    blen: int = nox.strings.byte_len(s)
+    out: list[str] = []
+    need_sep: bool = False
+    has_any: bool = False
+    i: int = 0
+    while i < blen:
+        hctx.consume_op(span)
+        b: int = nox.strings.byte_at(s, i)
+        if _is_alnum_ascii(b):
+            if need_sep and has_any:
+                out.append(sep)
+            out.append(nox.strings.char_from_byte(b))
+            need_sep = False
+            has_any = True
+        else:
+            need_sep = True
+        i = i + 1
+    return Value.VStr(nox.strings.join(out, ""))
+
+def filter_xml_escape(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_no_filter_args("xml_escape", args, span)
+    s: str = stringify(val, hctx.undefined_policy, span)
+    blen: int = nox.strings.byte_len(s)
+    i: int = 0
+    while i < blen:
+        b: int = nox.strings.byte_at(s, i)
+        if b < 32 and b != 9 and b != 10 and b != 13:
+            raise GlyphSecurityError(
+                GLYPH_SECURITY_CONTEXT,
+                "illegal XML 1.0 control character (byte " + str(b) + ") rejected by xml_escape",
+                span,
+                "strip control bytes before XML output"
+            )
+        i = i + 1
+    return Value.VStr(escape_html_with_span(s, span))
+
+def filter_forceescape(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_no_filter_args("forceescape", args, span)
+    s: str = stringify(val, hctx.undefined_policy, span)
+    return Value.VTrustedMarkup(escape_html_with_span(s, span), MarkupContext.SafeHtml)
+
+def filter_md_escape(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_no_filter_args("md_escape", args, span)
+    s: str = stringify(val, hctx.undefined_policy, span)
+    n: int = len(s)
+    out: list[str] = []
+    i: int = 0
+    while i < n:
+        hctx.consume_op(span)
+        ch: str = s[i:i + 1]
+        if nox.strings.byte_len(ch) == 1:
+            b: int = nox.strings.byte_at(ch, 0)
+            need_esc: bool = (
+                b == 92 or b == 96 or b == 42 or b == 95 or
+                b == 123 or b == 125 or b == 91 or b == 93 or
+                b == 40 or b == 41 or b == 35 or b == 43 or
+                b == 45 or b == 46 or b == 33 or b == 124 or
+                b == 126 or b == 62
+            )
+            if need_esc:
+                out.append("\\" + ch)
+            else:
+                out.append(ch)
+        else:
+            out.append(ch)
+        i = i + 1
+    return Value.VStr(nox.strings.join(out, ""))
+
+def filter_abs(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_no_filter_args("abs", args, span)
+    vc: Value = check_not_undef(val, hctx.undefined_policy, span)
+    match vc:
+        case Value.VInt(iv):
+            if iv < 0:
+                if iv == INT64_MIN:
+                    raise GlyphTypeError(GLYPH_EVAL_OVERFLOW, "abs(INT64_MIN) integer overflow", span, "value too small to negate")
+                return Value.VInt(0 - iv)
+            return vc
+        case Value.VFloat(fv):
+            vf: float = validate_float(fv, span)
+            if vf < 0.0:
+                return Value.VFloat(0.0 - vf)
+            return Value.VFloat(vf)
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "abs filter expects a number", span, "pass int or float to |abs")
+
+def _pow10_float(prec: int) -> float:
+    p: float = 1.0
+    i: int = 0
+    while i < prec:
+        p = p * 10.0
+        i = i + 1
+    return p
+
+def _round_scaled(x: float, method: str) -> float:
+    if method == "common":
+        if x >= 0.0:
+            return float(int(x + 0.5))
+        return float(int(x - 0.5))
+    elif method == "floor":
+        ti: int = int(x)
+        if x < 0.0 and float(ti) != x:
+            return float(ti - 1)
+        return float(ti)
+    elif method == "ceil":
+        ti2: int = int(x)
+        if x > 0.0 and float(ti2) != x:
+            return float(ti2 + 1)
+        return float(ti2)
+    return x
+
+def filter_round(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("round", args, 2, span)
+    prec: int = expect_int_arg(get_filter_arg(args, 0, "precision", Value.VInt(0)), "round", "precision", span)
+    method: str = expect_str_arg(get_filter_arg(args, 1, "method", Value.VStr("common")), "round", "method", hctx.undefined_policy, span)
+    if prec < 0 or prec > 9:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "round() precision must be between 0 and 9", span, "pass 0 <= precision <= 9")
+    if method != "common" and method != "floor" and method != "ceil":
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "round() method must be 'common', 'floor', or 'ceil'", span, "use common, floor, or ceil")
+    vc: Value = check_not_undef(val, hctx.undefined_policy, span)
+    fv: float = 0.0
+    match vc:
+        case Value.VInt(iv):
+            fv = float(iv)
+        case Value.VFloat(f):
+            fv = validate_float(f, span)
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "round filter expects a number", span, "pass int or float to |round")
+    scale: float = _pow10_float(prec)
+    res: float = _round_scaled(fv * scale, method) / scale
+    return Value.VFloat(validate_float(res, span))
+
+def filter_to_int(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("int", args, 1, span)
+    has_def: bool = has_filter_arg(args, 0, "default")
+    def_v: int = 0
+    if has_def:
+        def_v = expect_int_arg(get_filter_arg(args, 0, "default", Value.VInt(0)), "int", "default", span)
+    vc: Value = check_not_undef(val, hctx.undefined_policy, span)
+    match vc:
+        case Value.VInt(iv):
+            return vc
+        case Value.VBool(b):
+            if b:
+                return Value.VInt(1)
+            return Value.VInt(0)
+        case Value.VFloat(fv):
+            vf: float = validate_float(fv, span)
+            return Value.VInt(int(vf))
+        case Value.VStr(s):
+            tr: str = nox.strings.trim(s)
+            try:
+                return Value.VInt(int(tr))
+            except ValueError:
+                if has_def:
+                    return Value.VInt(def_v)
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "cannot parse integer string '" + tr + "'", span, "pass default=0 or a valid integer string")
+        case _:
+            if has_def:
+                return Value.VInt(def_v)
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "int filter cannot convert value", span, "pass int, float, bool, or numeric string")
+
+def filter_to_float(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("float", args, 1, span)
+    has_def: bool = has_filter_arg(args, 0, "default")
+    def_f: float = 0.0
+    if has_def:
+        dv: Value = check_not_undef(get_filter_arg(args, 0, "default", Value.VFloat(0.0)), hctx.undefined_policy, span)
+        match dv:
+            case Value.VFloat(df):
+                def_f = validate_float(df, span)
+            case Value.VInt(di):
+                def_f = float(di)
+            case _:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "float() default must be numeric", span, "pass numeric default")
+    vc: Value = check_not_undef(val, hctx.undefined_policy, span)
+    match vc:
+        case Value.VFloat(fv):
+            return Value.VFloat(validate_float(fv, span))
+        case Value.VInt(iv):
+            return Value.VFloat(float(iv))
+        case Value.VBool(b):
+            if b:
+                return Value.VFloat(1.0)
+            return Value.VFloat(0.0)
+        case Value.VStr(s):
+            tr: str = nox.strings.trim(s)
+            try:
+                pf: float = float(tr)
+                return Value.VFloat(validate_float(pf, span))
+            except ValueError:
+                if has_def:
+                    return Value.VFloat(def_f)
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "cannot parse float string '" + tr + "'", span, "pass default=0.0 or a valid float string")
+        case _:
+            if has_def:
+                return Value.VFloat(def_f)
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "float filter cannot convert value", span, "pass numeric or numeric string value")
+
+def _group_digits(digits: str, grp_sep: str) -> str:
+    n: int = len(digits)
+    if n <= 3:
+        return digits
+    out: list[str] = []
+    rem: int = n % 3
+    idx: int = 0
+    if rem > 0:
+        out.append(digits[0:rem])
+        idx = rem
+    while idx < n:
+        if len(out) > 0:
+            out.append(grp_sep)
+        out.append(digits[idx:idx + 3])
+        idx = idx + 3
+    return nox.strings.join(out, "")
+
+def _pad2(n: int) -> str:
+    if n < 10:
+        return "0" + str(n)
+    return str(n)
+
+def _pad4(n: int) -> str:
+    if n < 10:
+        return "000" + str(n)
+    if n < 100:
+        return "00" + str(n)
+    if n < 1000:
+        return "0" + str(n)
+    return str(n)
+
+def _format_num_locale(fv: float, decimals: int, locale: str, span: SourceSpan) -> str:
+    vf: float = validate_float(fv, span)
+    neg: bool = vf < 0.0
+    mag: float = vf
+    if neg:
+        mag = 0.0 - mag
+    grp_sep: str = ","
+    dec_sep: str = "."
+    ll: str = nox.strings.lower(locale)
+    if nox.strings.starts_with(ll, "tr") or nox.strings.starts_with(ll, "de") or nox.strings.starts_with(ll, "fr") or nox.strings.starts_with(ll, "es"):
+        grp_sep = "."
+        dec_sep = ","
+    if decimals == 0:
+        int_val: int = int(_round_scaled(mag, "common"))
+        res0: str = _group_digits(str(int_val), grp_sep)
+        if neg and int_val > 0:
+            return "-" + res0
+        return res0
+    if decimals > 0:
+        if decimals > 9:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "decimal places must be <= 9", span, "use decimals <= 9")
+        scale: int = 1
+        di: int = 0
+        while di < decimals:
+            scale = scale * 10
+            di = di + 1
+        scaled: int = int(_round_scaled(mag * float(scale), "common"))
+        whole_i: int = scaled // scale
+        frac_i: int = scaled % scale
+        frac_s: str = str(frac_i)
+        while len(frac_s) < decimals:
+            frac_s = "0" + frac_s
+        res_f: str = _group_digits(str(whole_i), grp_sep) + dec_sep + frac_s
+        if neg and scaled > 0:
+            return "-" + res_f
+        return res_f
+    # Auto decimals when decimals < 0
+    raw_s: str = str(mag)
+    dot_p: int = nox.strings.index_of(raw_s, ".")
+    if dot_p < 0:
+        res_a: str = _group_digits(raw_s, grp_sep)
+        if neg:
+            return "-" + res_a
+        return res_a
+    wh: str = raw_s[0:dot_p]
+    fr: str = raw_s[dot_p + 1:len(raw_s)]
+    res_d: str = _group_digits(wh, grp_sep) + dec_sep + fr
+    if neg:
+        return "-" + res_d
+    return res_d
+
+def _to_number_float(val: Value, fname: str, policy: UndefinedPolicy, span: SourceSpan) -> float:
+    vc: Value = check_not_undef(val, policy, span)
+    match vc:
+        case Value.VInt(iv):
+            return float(iv)
+        case Value.VFloat(fv):
+            return validate_float(fv, span)
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "filter '" + fname + "' expects an int or float", span, "pass a number to |" + fname)
+
+def filter_number(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("number", args, 1, span)
+    dec: int = expect_int_arg(get_filter_arg(args, 0, "decimals", Value.VInt(-1)), "number", "decimals", span)
+    fv: float = _to_number_float(val, "number", hctx.undefined_policy, span)
+    return Value.VStr(_format_num_locale(fv, dec, hctx.locale, span))
+
+def filter_currency(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("currency", args, 2, span)
+    sym: str = expect_str_arg(get_filter_arg(args, 0, "symbol", Value.VStr("$")), "currency", "symbol", hctx.undefined_policy, span)
+    dec: int = expect_int_arg(get_filter_arg(args, 1, "decimals", Value.VInt(2)), "currency", "decimals", span)
+    if dec < 0 or dec > 6:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "currency() decimals must be 0..6", span, "pass 0 <= decimals <= 6")
+    fv: float = _to_number_float(val, "currency", hctx.undefined_policy, span)
+    formatted: str = _format_num_locale(fv, dec, hctx.locale, span)
+    if nox.strings.starts_with(formatted, "-"):
+        return Value.VStr("-" + sym + formatted[1:len(formatted)])
+    return Value.VStr(sym + formatted)
+
+def filter_percent(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("percent", args, 1, span)
+    dec: int = expect_int_arg(get_filter_arg(args, 0, "decimals", Value.VInt(0)), "percent", "decimals", span)
+    if dec < 0 or dec > 6:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "percent() decimals must be 0..6", span, "pass 0 <= decimals <= 6")
+    fv: float = _to_number_float(val, "percent", hctx.undefined_policy, span) * 100.0
+    return Value.VStr(_format_num_locale(fv, dec, hctx.locale, span) + "%")
+
+def filter_filesize(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("filesize", args, 1, span)
+    binary: bool = expect_bool_arg(get_filter_arg(args, 0, "binary", Value.VBool(False)), "filesize", "binary", span)
+    fv: float = _to_number_float(val, "filesize", hctx.undefined_policy, span)
+    if fv < 0.0:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "filesize() expects a non-negative byte count", span, "pass bytes >= 0")
+    base: float = 1000.0
+    units: list[str] = ["B", "KB", "MB", "GB", "TB"]
+    if binary:
+        base = 1024.0
+        units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    if fv < base:
+        return Value.VStr(str(int(fv)) + " B")
+    cur: float = fv
+    uidx: int = 0
+    while cur >= base and uidx < 4:
+        cur = cur / base
+        uidx = uidx + 1
+    return Value.VStr(_format_num_locale(cur, 1, "en", span) + " " + units[uidx])
+
+# Deterministic pure Gregorian conversions (Howard Hinnant algorithm) — zero OS clock dependency.
+def _days_from_civil(y: int, m: int, d: int) -> int:
+    yr: int = y
+    if m <= 2:
+        yr = yr - 1
+    era: int = 0
+    if yr >= 0:
+        era = yr // 400
+    else:
+        era = (yr - 399) // 400
+    yoe: int = yr - era * 400
+    mm: int = m - 3
+    if m <= 2:
+        mm = m + 9
+    doy: int = (153 * mm + 2) // 5 + d - 1
+    doe: int = yoe * 365 + yoe // 4 - yoe // 100 + doy
+    return era * 146097 + doe - 719468
+
+def _civil_from_days(z_in: int) -> list[int]:
+    z: int = z_in + 719468
+    era: int = 0
+    if z >= 0:
+        era = z // 146097
+    else:
+        era = (z - 146096) // 146097
+    doe: int = z - era * 146097
+    yoe: int = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+    y: int = yoe + era * 400
+    doy: int = doe - (365 * yoe + yoe // 4 - yoe // 100)
+    mp: int = (5 * doy + 2) // 153
+    d: int = doy - (153 * mp + 2) // 5 + 1
+    m: int = mp + 3
+    if mp >= 10:
+        m = mp - 9
+    if m <= 2:
+        y = y + 1
+    return [y, m, d]
+
+def _parse_int_field(s: str, fname: str, span: SourceSpan) -> int:
+    try:
+        return int(s)
+    except ValueError:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "invalid timestamp format in " + fname, span, "use Unix seconds or ISO-8601 YYYY-MM-DD[THH:MM:SS[Z]]")
+
+def _parse_epoch_seconds(v: Value, fname: str, policy: UndefinedPolicy, span: SourceSpan) -> int:
+    vc: Value = check_not_undef(v, policy, span)
+    match vc:
+        case Value.VInt(iv):
+            return iv
+        case Value.VStr(s):
+            tr: str = nox.strings.trim(s)
+            if nox.strings.ends_with(tr, "Z") or nox.strings.ends_with(tr, "z"):
+                tr = tr[0:len(tr) - 1]
+            # Expect YYYY-MM-DD or YYYY-MM-DD[T| ]HH:MM:SS
+            if len(tr) < 10 or tr[4:5] != "-" or tr[7:8] != "-":
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "invalid ISO-8601 date string '" + s + "'", span, "pass YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ or epoch int")
+            yr: int = _parse_int_field(tr[0:4], fname, span)
+            mo: int = _parse_int_field(tr[5:7], fname, span)
+            da: int = _parse_int_field(tr[8:10], fname, span)
+            if mo < 1 or mo > 12 or da < 1 or da > 31:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "date field out of range", span, "check month and day values")
+            hr: int = 0
+            mn: int = 0
+            sc: int = 0
+            if len(tr) > 10:
+                sep_ch: str = tr[10:11]
+                if (sep_ch != "T" and sep_ch != "t" and sep_ch != " ") or len(tr) < 19 or tr[13:14] != ":" or tr[16:17] != ":":
+                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "invalid ISO-8601 time string '" + s + "'", span, "use YYYY-MM-DDTHH:MM:SSZ")
+                hr = _parse_int_field(tr[11:13], fname, span)
+                mn = _parse_int_field(tr[14:16], fname, span)
+                sc = _parse_int_field(tr[17:19], fname, span)
+                if hr < 0 or hr > 23 or mn < 0 or mn > 59 or sc < 0 or sc > 59:
+                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "time field out of range", span, "check hour/minute/second values")
+            days: int = _days_from_civil(yr, mo, da)
+            return days * 86400 + hr * 3600 + mn * 60 + sc
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, fname + " expects Unix timestamp integer or ISO-8601 UTC string", span, "pass int epoch seconds or ISO string")
+
+def _format_utc_epoch(epoch: int, fmt: str) -> str:
+    days: int = epoch // 86400
+    rem: int = epoch % 86400
+    if rem < 0:
+        days = days - 1
+        rem = rem + 86400
+    hr: int = rem // 3600
+    rem2: int = rem % 3600
+    mn: int = rem2 // 60
+    sc: int = rem2 % 60
+    ymd: list[int] = _civil_from_days(days)
+    marker: str = nox.strings.char_from_byte(1)
+    res: str = nox.strings.replace(fmt, "%%", marker)
+    res = nox.strings.replace(res, "%Y", _pad4(ymd[0]))
+    res = nox.strings.replace(res, "%m", _pad2(ymd[1]))
+    res = nox.strings.replace(res, "%d", _pad2(ymd[2]))
+    res = nox.strings.replace(res, "%H", _pad2(hr))
+    res = nox.strings.replace(res, "%M", _pad2(mn))
+    res = nox.strings.replace(res, "%S", _pad2(sc))
+    return nox.strings.replace(res, marker, "%")
+
+def filter_date(val: Value, args: list[FilterArgValue], is_dt: bool, hctx: HelperContext, span: SourceSpan) -> Value:
+    fname: str = "date"
+    def_fmt: str = "%Y-%m-%d"
+    if is_dt:
+        fname = "datetime"
+        def_fmt = "%Y-%m-%d %H:%M:%S"
+    expect_max_filter_args(fname, args, 1, span)
+    fmt: str = expect_str_arg(get_filter_arg(args, 0, "format", Value.VStr(def_fmt)), fname, "format", hctx.undefined_policy, span)
+    if len(fmt) > 128:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, fname + " format pattern too long", span, "keep format string <= 128 chars")
+    epoch: int = _parse_epoch_seconds(val, fname, hctx.undefined_policy, span)
+    return Value.VStr(_format_utc_epoch(epoch, fmt))
+
+def filter_relative_time(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("relative_time", args, 1, span)
+    if not has_filter_arg(args, 0, "ref"):
+        raise GlyphTypeError(
+            GLYPH_EVAL_TYPE,
+            "relative_time() requires an explicit 'ref' reference timestamp (deterministic mode forbids reading OS clock)",
+            span,
+            "pass explicit reference time: {{ ts | relative_time(ref=now_ts) }}"
+        )
+    ref_val: Value = get_filter_arg(args, 0, "ref", Value.VNull)
+    t_epoch: int = _parse_epoch_seconds(val, "relative_time", hctx.undefined_policy, span)
+    r_epoch: int = _parse_epoch_seconds(ref_val, "relative_time", hctx.undefined_policy, span)
+    diff: int = t_epoch - r_epoch
+    future: bool = diff > 0
+    mag: int = diff
+    if mag < 0:
+        mag = 0 - mag
+    if mag < 60:
+        return Value.VStr("just now")
+    label: str = ""
+    if mag < 3600:
+        m: int = mag // 60
+        if m == 1:
+            label = "1 minute"
+        else:
+            label = str(m) + " minutes"
+    elif mag < 86400:
+        h: int = mag // 3600
+        if h == 1:
+            label = "1 hour"
+        else:
+            label = str(h) + " hours"
+    else:
+        d: int = mag // 86400
+        if d == 1:
+            label = "1 day"
+        else:
+            label = str(d) + " days"
+    if future:
+        return Value.VStr("in " + label)
+    return Value.VStr(label + " ago")

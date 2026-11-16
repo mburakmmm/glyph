@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-16
+
+### Added
+- `glyph/helpers.nox`: `CostClass`, `FilterSpec`, `TestSpec`, `FunctionSpec`, and isolated `HelperContext` (locale, immutable policy, shared `BudgetTracker`, bounded diagnostics — never exposes `RenderScope`).
+- `glyph/filters_text.nox`, `glyph/filters_collections.nox`, `glyph/filters.nox`: Full pure/deterministic built-in filter catalog (`capitalize`, `title`, `trim`, `replace`, `truncate`, `wordcount`, `indent`, `center`, `pad`, `striptags`, `normalize_unicode`, `urlencode`, `slugify`, `forceescape`, `xml_escape`, `md_escape`, `first`, `last`, `reverse`, `sort`, `unique`, `map`, `select`, `reject`, `batch`, `slice`, `sum`, `min`, `max`, `groupby`, `dictsort`, `abs`, `round`, `int`, `float`, `string`, `number`, `currency`, `percent`, `filesize`, `date`, `datetime`, explicit-`ref` `relative_time`).
+- `glyph/tests_registry.nox` & `glyph/functions.nox`: Full `is` test catalog (`iterable`, `odd`, `even`, `divisibleby`, `equalto`, `in`, `escaped`, `safe_for`, `true`, `false`), `register_with_spec`, `all_specs`, core override rejection, active-render mutation lock, and `.freeze()`.
+- `glyph/parser.nox` & `glyph/value.nox` & `glyph/runtime.nox`: Namespaced `| ns.filter` / `is ns.test` syntax, shared `check_not_undef` / `values_equal` / `values_compare` / `values_contains` helpers, and render-scoped registry locking.
+- `docs/filters.md`, updated `docs/api.md`, and `tests/filters/filters_tests_registry_test.nox`.
+
 ## [0.4.0] - 2026-11-16
 
 ### Added

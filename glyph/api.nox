@@ -16,6 +16,9 @@ import glyph.options
 import glyph.scope
 import glyph.writer
 import glyph.safety
+import glyph.helpers
+import glyph.filters_text
+import glyph.filters_collections
 import glyph.filters
 import glyph.tests_registry
 import glyph.functions
@@ -39,7 +42,9 @@ from glyph.options import OutputMode, TrustTier, EnvironmentOptions, RenderOptio
 from glyph.scope import Context
 from glyph.writer import GlyphWriter, RenderResult
 from glyph.safety import OutputContext
-from glyph.filters import FilterRegistry, FilterArgValue
+from glyph.helpers import CostClass, FilterSpec, TestSpec, FunctionSpec, HelperContext
+from glyph.filters_text import FilterArgValue
+from glyph.filters import FilterRegistry
 from glyph.tests_registry import TestRegistry
 from glyph.functions import FunctionRegistry
 from glyph.loader import SourceRecord, Loader, ChoiceLoader, PrefixLoader
@@ -138,3 +143,12 @@ def trust_url(url: str) -> Value:
 
 def trust_js_literal(js: str) -> Value:
     return Value.VTrustedMarkup(js, MarkupContext.SafeJs)
+
+def builtin_filter_specs() -> list[FilterSpec]:
+    return glyph.filters.builtin_filter_specs()
+
+def builtin_test_specs() -> list[TestSpec]:
+    return glyph.tests_registry.builtin_test_specs()
+
+def builtin_function_specs() -> list[FunctionSpec]:
+    return glyph.functions.builtin_function_specs()

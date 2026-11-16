@@ -1,0 +1,540 @@
+# Built-in bounded collection filters for Glyph (Phase 7).
+# Enforces AGENTS.md §13.2, §5.2 (homogeneous ordering, no reflection, shared BudgetTracker). Pure NOX, freestanding-safe.
+import nox.strings
+from nox.collections import OrderedDict
+from glyph.errors import SourceSpan, GlyphTypeError, GLYPH_EVAL_TYPE, GLYPH_EVAL_OUT_OF_RANGE
+from glyph.filters_text import FilterArgValue, expect_no_filter_args, expect_max_filter_args
+from glyph.filters_text import get_filter_arg, has_filter_arg, expect_bool_arg, expect_int_arg, expect_str_arg, check_output_cap
+from glyph.helpers import HelperContext
+from glyph.value import Value, UndefinedPolicy, check_not_undef, is_truthy, stringify, validate_float
+from glyph.value import map_get, checked_add, values_equal, values_compare
+
+MAX_COLLECTION_ITEMS: int = 10000
+
+def _expect_list(val: Value, fname: str, policy: UndefinedPolicy, span: SourceSpan) -> list[Value]:
+    vc: Value = check_not_undef(val, policy, span)
+    match vc:
+        case Value.VList(items):
+            if len(items) > MAX_COLLECTION_ITEMS:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, fname + " exceeds max collection size (" + str(MAX_COLLECTION_ITEMS) + ")", span, "pass a smaller list")
+            return items
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "filter '" + fname + "' expects a list", span, "pass a list to |" + fname)
+
+def _extract_attr_or_self(item: Value, attr: str, has_attr: bool, policy: UndefinedPolicy, span: SourceSpan) -> Value:
+    if not has_attr:
+        return item
+    vi: Value = check_not_undef(item, policy, span)
+    match vi:
+        case Value.VMap(entries):
+            return map_get(entries, attr, span)
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "attribute '" + attr + "' access requires a map item", span, "pass a list of maps")
+
+def filter_length(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_no_filter_args("length", args, span)
+    vc: Value = check_not_undef(val, hctx.undefined_policy, span)
+    match vc:
+        case Value.VStr(s):
+            return Value.VInt(len(s))
+        case Value.VList(items):
+            return Value.VInt(len(items))
+        case Value.VMap(entries):
+            return Value.VInt(entries.size())
+        case Value.VTrustedMarkup(c, _):
+            return Value.VInt(len(c))
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "length filter expects string, list, or map", span, "pass a sized value to |length")
+
+def filter_first_last(val: Value, args: list[FilterArgValue], pick_last: bool, hctx: HelperContext, span: SourceSpan) -> Value:
+    fname: str = "first"
+    if pick_last:
+        fname = "last"
+    expect_no_filter_args(fname, args, span)
+    vc: Value = check_not_undef(val, hctx.undefined_policy, span)
+    match vc:
+        case Value.VList(items):
+            n: int = len(items)
+            if n == 0:
+                raise GlyphTypeError(GLYPH_EVAL_OUT_OF_RANGE, fname + " filter cannot inspect an empty list", span, "check list is non-empty before |" + fname)
+            if pick_last:
+                return items[n - 1]
+            return items[0]
+        case Value.VStr(s):
+            sn: int = len(s)
+            if sn == 0:
+                raise GlyphTypeError(GLYPH_EVAL_OUT_OF_RANGE, fname + " filter cannot inspect an empty string", span, "check string is non-empty before |" + fname)
+            if pick_last:
+                return Value.VStr(s[sn - 1:sn])
+            return Value.VStr(s[0:1])
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, fname + " filter expects a list or string", span, "pass a list or string to |" + fname)
+
+def filter_reverse(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_no_filter_args("reverse", args, span)
+    vc: Value = check_not_undef(val, hctx.undefined_policy, span)
+    match vc:
+        case Value.VList(items):
+            if len(items) > MAX_COLLECTION_ITEMS:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "reverse exceeds max collection size", span, "pass a smaller list")
+            out: list[Value] = []
+            i: int = len(items) - 1
+            while i >= 0:
+                hctx.consume_op(span)
+                out.append(items[i])
+                i = i - 1
+            return Value.VList(out)
+        case Value.VStr(s):
+            sn: int = len(s)
+            parts: list[str] = []
+            j: int = sn - 1
+            while j >= 0:
+                hctx.consume_op(span)
+                parts.append(s[j:j + 1])
+                j = j - 1
+            return Value.VStr(nox.strings.join(parts, ""))
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "reverse filter expects a list or string", span, "pass a list or string to |reverse")
+
+def filter_join(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("join", args, 1, span)
+    sep_val: Value = get_filter_arg(args, 0, "d", Value.VStr(""))
+    sep: str = stringify(sep_val, hctx.undefined_policy, span)
+    items: list[Value] = _expect_list(val, "join", hctx.undefined_policy, span)
+    parts: list[str] = []
+    total_b: int = 0
+    sep_b: int = nox.strings.byte_len(sep)
+    i: int = 0
+    while i < len(items):
+        hctx.consume_op(span)
+        part: str = stringify(items[i], hctx.undefined_policy, span)
+        total_b = total_b + nox.strings.byte_len(part)
+        if i > 0:
+            total_b = total_b + sep_b
+        check_output_cap(total_b, hctx, "join", span)
+        parts.append(part)
+        i = i + 1
+    return Value.VStr(nox.strings.join(parts, sep))
+
+def filter_sort(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("sort", args, 2, span)
+    rev: bool = expect_bool_arg(get_filter_arg(args, 0, "reverse", Value.VBool(False)), "sort", "reverse", span)
+    attr: str = expect_str_arg(get_filter_arg(args, 1, "attribute", Value.VStr("")), "sort", "attribute", hctx.undefined_policy, span)
+    has_attr: bool = len(attr) > 0
+    items: list[Value] = _expect_list(val, "sort", hctx.undefined_policy, span)
+    n: int = len(items)
+    work: list[Value] = []
+    keys: list[Value] = []
+    i: int = 0
+    while i < n:
+        hctx.consume_op(span)
+        work.append(items[i])
+        keys.append(_extract_attr_or_self(items[i], attr, has_attr, hctx.undefined_policy, span))
+        i = i + 1
+
+    # Stable insertion sort (bounded by BudgetTracker ops & MAX_COLLECTION_ITEMS)
+    si: int = 1
+    while si < n:
+        cur_item: Value = work[si]
+        cur_key: Value = keys[si]
+        sj: int = si - 1
+        shifting: bool = True
+        while sj >= 0 and shifting:
+            hctx.consume_op(span)
+            cmp: int = values_compare(keys[sj], cur_key, hctx.undefined_policy, span)
+            should_swap: bool = cmp > 0
+            if rev:
+                should_swap = cmp < 0
+            if should_swap:
+                work[sj + 1] = work[sj]
+                keys[sj + 1] = keys[sj]
+                sj = sj - 1
+            else:
+                shifting = False
+        work[sj + 1] = cur_item
+        keys[sj + 1] = cur_key
+        si = si + 1
+    return Value.VList(work)
+
+def filter_unique(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("unique", args, 1, span)
+    attr: str = expect_str_arg(get_filter_arg(args, 0, "attribute", Value.VStr("")), "unique", "attribute", hctx.undefined_policy, span)
+    has_attr: bool = len(attr) > 0
+    items: list[Value] = _expect_list(val, "unique", hctx.undefined_policy, span)
+    out: list[Value] = []
+    seen_keys: list[Value] = []
+    i: int = 0
+    while i < len(items):
+        hctx.consume_op(span)
+        kv: Value = _extract_attr_or_self(items[i], attr, has_attr, hctx.undefined_policy, span)
+        dup: bool = False
+        j: int = 0
+        while j < len(seen_keys) and not dup:
+            hctx.consume_op(span)
+            if values_equal(seen_keys[j], kv, hctx.undefined_policy, span):
+                dup = True
+            j = j + 1
+        if not dup:
+            seen_keys.append(kv)
+            out.append(items[i])
+        i = i + 1
+    return Value.VList(out)
+
+def filter_map(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("map", args, 1, span)
+    attr: str = expect_str_arg(get_filter_arg(args, 0, "attribute", Value.VStr("")), "map", "attribute", hctx.undefined_policy, span)
+    if len(attr) == 0:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "map() requires attribute='...' argument", span, "use |map(attribute='name')")
+    items: list[Value] = _expect_list(val, "map", hctx.undefined_policy, span)
+    out: list[Value] = []
+    i: int = 0
+    while i < len(items):
+        hctx.consume_op(span)
+        out.append(_extract_attr_or_self(items[i], attr, True, hctx.undefined_policy, span))
+        i = i + 1
+    return Value.VList(out)
+
+def _eval_select_predicate(
+    item: Value,
+    pred: str,
+    attr: str,
+    has_attr: bool,
+    has_cmp_val: bool,
+    cmp_val: Value,
+    policy: UndefinedPolicy,
+    span: SourceSpan
+) -> bool:
+    target: Value = _extract_attr_or_self(item, attr, has_attr, policy, span)
+    if has_cmp_val:
+        if pred == "divisibleby":
+            tc: Value = check_not_undef(target, policy, span)
+            cc: Value = check_not_undef(cmp_val, policy, span)
+            ti: int = 0
+            ci: int = 0
+            match tc:
+                case Value.VInt(t_int):
+                    ti = t_int
+                case _:
+                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "divisibleby predicate expects integer target", span, "pass integers")
+            match cc:
+                case Value.VInt(c_int):
+                    ci = c_int
+                case _:
+                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "divisibleby predicate expects integer divisor", span, "pass integers")
+            if ci == 0:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "divisibleby(0) divisor cannot be zero", span, "pass non-zero integer")
+            return (ti % ci) == 0
+        return values_equal(target, cmp_val, policy, span)
+    if pred == "truthy" or len(pred) == 0:
+        return is_truthy(target, policy, span)
+    if pred == "defined":
+        match target:
+            case Value.VUndefined(_):
+                return False
+            case _:
+                return True
+    if pred == "undefined":
+        match target:
+            case Value.VUndefined(_):
+                return True
+            case _:
+                return False
+    if pred == "none" or pred == "null":
+        match target:
+            case Value.VNull:
+                return True
+            case _:
+                return False
+    if pred == "odd":
+        vo: Value = check_not_undef(target, policy, span)
+        match vo:
+            case Value.VInt(oi):
+                return (oi % 2) != 0
+            case _:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "odd predicate expects integer", span, "pass integers")
+    if pred == "even":
+        ve: Value = check_not_undef(target, policy, span)
+        match ve:
+            case Value.VInt(ei):
+                return (ei % 2) == 0
+            case _:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "even predicate expects integer", span, "pass integers")
+    raise GlyphTypeError(GLYPH_EVAL_TYPE, "unsupported select/reject predicate '" + pred + "'", span, "use attribute=..., equalto, odd, even, defined, none, or truthy")
+
+def filter_select_reject(val: Value, args: list[FilterArgValue], keep_match: bool, hctx: HelperContext, span: SourceSpan) -> Value:
+    fname: str = "reject"
+    if keep_match:
+        fname = "select"
+    expect_max_filter_args(fname, args, 3, span)
+    items: list[Value] = _expect_list(val, fname, hctx.undefined_policy, span)
+
+    has_attr_kw: bool = has_filter_arg(args, -1, "attribute")
+    has_val_kw: bool = has_filter_arg(args, -1, "value")
+    attr: str = ""
+    pred: str = "truthy"
+    has_cmp_val: bool = False
+    cmp_val: Value = Value.VNull
+
+    if has_attr_kw:
+        attr = expect_str_arg(get_filter_arg(args, -1, "attribute", Value.VStr("")), fname, "attribute", hctx.undefined_policy, span)
+        if has_val_kw:
+            has_cmp_val = True
+            cmp_val = get_filter_arg(args, -1, "value", Value.VNull)
+    elif len(args) > 0:
+        pred = expect_str_arg(get_filter_arg(args, 0, "test", Value.VStr("truthy")), fname, "test", hctx.undefined_policy, span)
+        if len(args) >= 2:
+            has_cmp_val = True
+            cmp_val = get_filter_arg(args, 1, "value", Value.VNull)
+
+    has_attr: bool = len(attr) > 0
+    out: list[Value] = []
+    i: int = 0
+    while i < len(items):
+        hctx.consume_op(span)
+        matched: bool = _eval_select_predicate(items[i], pred, attr, has_attr, has_cmp_val, cmp_val, hctx.undefined_policy, span)
+        if matched == keep_match:
+            out.append(items[i])
+        i = i + 1
+    return Value.VList(out)
+
+def filter_batch(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("batch", args, 2, span)
+    if len(args) < 1:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "batch() requires linecount argument", span, "use |batch(3)")
+    size: int = expect_int_arg(get_filter_arg(args, 0, "linecount", Value.VInt(0)), "batch", "linecount", span)
+    if size <= 0 or size > MAX_COLLECTION_ITEMS:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "batch() linecount must be 1.." + str(MAX_COLLECTION_ITEMS), span, "pass a positive chunk size")
+    has_fill: bool = has_filter_arg(args, 1, "fill_with")
+    fill_val: Value = get_filter_arg(args, 1, "fill_with", Value.VNull)
+    items: list[Value] = _expect_list(val, "batch", hctx.undefined_policy, span)
+    groups: list[Value] = []
+    cur: list[Value] = []
+    i: int = 0
+    while i < len(items):
+        hctx.consume_op(span)
+        cur.append(items[i])
+        if len(cur) == size:
+            groups.append(Value.VList(cur))
+            cur = []
+        i = i + 1
+    if len(cur) > 0:
+        if has_fill:
+            while len(cur) < size:
+                hctx.consume_op(span)
+                cur.append(fill_val)
+        groups.append(Value.VList(cur))
+    return Value.VList(groups)
+
+def filter_slice(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("slice", args, 2, span)
+    if len(args) < 1:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "slice() requires slices argument", span, "use |slice(3)")
+    slices: int = expect_int_arg(get_filter_arg(args, 0, "slices", Value.VInt(0)), "slice", "slices", span)
+    if slices <= 0 or slices > 1000:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "slice() count must be 1..1000", span, "pass positive number of slices")
+    has_fill: bool = has_filter_arg(args, 1, "fill_with")
+    fill_val: Value = get_filter_arg(args, 1, "fill_with", Value.VNull)
+    items: list[Value] = _expect_list(val, "slice", hctx.undefined_policy, span)
+    n: int = len(items)
+    base_sz: int = n // slices
+    extra: int = n % slices
+    out: list[Value] = []
+    offset: int = 0
+    si: int = 0
+    while si < slices:
+        hctx.consume_op(span)
+        sz: int = base_sz
+        if si < extra:
+            sz = sz + 1
+        chunk: list[Value] = []
+        k: int = 0
+        while k < sz:
+            hctx.consume_op(span)
+            chunk.append(items[offset + k])
+            k = k + 1
+        if has_fill and extra > 0 and si >= extra:
+            chunk.append(fill_val)
+        out.append(Value.VList(chunk))
+        offset = offset + sz
+        si = si + 1
+    return Value.VList(out)
+
+def filter_sum(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("sum", args, 2, span)
+    attr: str = expect_str_arg(get_filter_arg(args, 0, "attribute", Value.VStr("")), "sum", "attribute", hctx.undefined_policy, span)
+    start_val: Value = check_not_undef(get_filter_arg(args, 1, "start", Value.VInt(0)), hctx.undefined_policy, span)
+    has_attr: bool = len(attr) > 0
+    items: list[Value] = _expect_list(val, "sum", hctx.undefined_policy, span)
+
+    use_float: bool = False
+    acc_i: int = 0
+    acc_f: float = 0.0
+    match start_val:
+        case Value.VInt(si):
+            acc_i = si
+            acc_f = float(si)
+        case Value.VFloat(sf):
+            use_float = True
+            acc_f = validate_float(sf, span)
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "sum() start value must be a number", span, "pass int or float start")
+
+    i: int = 0
+    while i < len(items):
+        hctx.consume_op(span)
+        ev: Value = check_not_undef(_extract_attr_or_self(items[i], attr, has_attr, hctx.undefined_policy, span), hctx.undefined_policy, span)
+        match ev:
+            case Value.VInt(iv):
+                if use_float:
+                    acc_f = acc_f + float(iv)
+                else:
+                    acc_i = checked_add(acc_i, iv, span)
+                    acc_f = float(acc_i)
+            case Value.VFloat(fv):
+                vf: float = validate_float(fv, span)
+                if not use_float:
+                    acc_f = float(acc_i)
+                    use_float = True
+                acc_f = acc_f + vf
+            case _:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "sum() items must be numeric", span, "pass numeric items or numeric attribute")
+        i = i + 1
+    if use_float:
+        return Value.VFloat(validate_float(acc_f, span))
+    return Value.VInt(acc_i)
+
+def filter_extremum(val: Value, args: list[FilterArgValue], find_max: bool, hctx: HelperContext, span: SourceSpan) -> Value:
+    fname: str = "min"
+    if find_max:
+        fname = "max"
+    expect_max_filter_args(fname, args, 1, span)
+    attr: str = expect_str_arg(get_filter_arg(args, 0, "attribute", Value.VStr("")), fname, "attribute", hctx.undefined_policy, span)
+    has_attr: bool = len(attr) > 0
+    items: list[Value] = _expect_list(val, fname, hctx.undefined_policy, span)
+    if len(items) == 0:
+        raise GlyphTypeError(GLYPH_EVAL_OUT_OF_RANGE, fname + " filter cannot inspect an empty list", span, "check list is non-empty before |" + fname)
+
+    best_item: Value = items[0]
+    best_key: Value = _extract_attr_or_self(items[0], attr, has_attr, hctx.undefined_policy, span)
+    i: int = 1
+    while i < len(items):
+        hctx.consume_op(span)
+        cur_key: Value = _extract_attr_or_self(items[i], attr, has_attr, hctx.undefined_policy, span)
+        cmp: int = values_compare(cur_key, best_key, hctx.undefined_policy, span)
+        if find_max and cmp > 0:
+            best_item = items[i]
+            best_key = cur_key
+        elif (not find_max) and cmp < 0:
+            best_item = items[i]
+            best_key = cur_key
+        i = i + 1
+    return best_item
+
+def filter_groupby(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("groupby", args, 1, span)
+    attr: str = expect_str_arg(get_filter_arg(args, 0, "attribute", Value.VStr("")), "groupby", "attribute", hctx.undefined_policy, span)
+    if len(attr) == 0:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "groupby() requires attribute name", span, "use |groupby('category')")
+    items: list[Value] = _expect_list(val, "groupby", hctx.undefined_policy, span)
+
+    group_keys: list[str] = []
+    group_lists: list[list[Value]] = []
+    i: int = 0
+    while i < len(items):
+        hctx.consume_op(span)
+        gval: Value = _extract_attr_or_self(items[i], attr, True, hctx.undefined_policy, span)
+        gstr: str = stringify(gval, hctx.undefined_policy, span)
+        gidx: int = -1
+        gi: int = 0
+        while gi < len(group_keys) and gidx < 0:
+            if group_keys[gi] == gstr:
+                gidx = gi
+            gi = gi + 1
+        if gidx < 0:
+            group_keys.append(gstr)
+            fresh: list[Value] = [items[i]]
+            group_lists.append(fresh)
+        else:
+            existing: list[Value] = group_lists[gidx]
+            existing.append(items[i])
+            group_lists[gidx] = existing
+        i = i + 1
+
+    out: list[Value] = []
+    oi: int = 0
+    while oi < len(group_keys):
+        m: OrderedDict[str, Value] = OrderedDict[str, Value]()
+        m.set("grouper", Value.VStr(group_keys[oi]))
+        m.set("list", Value.VList(group_lists[oi]))
+        out.append(Value.VMap(m))
+        oi = oi + 1
+    return Value.VList(out)
+
+def filter_dictsort(val: Value, args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    expect_max_filter_args("dictsort", args, 3, span)
+    by: str = expect_str_arg(get_filter_arg(args, 0, "by", Value.VStr("key")), "dictsort", "by", hctx.undefined_policy, span)
+    rev: bool = expect_bool_arg(get_filter_arg(args, 1, "reverse", Value.VBool(False)), "dictsort", "reverse", span)
+    case_sens: bool = expect_bool_arg(get_filter_arg(args, 2, "case_sensitive", Value.VBool(False)), "dictsort", "case_sensitive", span)
+    if by != "key" and by != "value":
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "dictsort() 'by' must be 'key' or 'value'", span, "use by='key' or by='value'")
+
+    vc: Value = check_not_undef(val, hctx.undefined_policy, span)
+    keys: list[str] = []
+    vals: list[Value] = []
+    cmp_keys: list[Value] = []
+    match vc:
+        case Value.VMap(entries):
+            if entries.size() > MAX_COLLECTION_ITEMS:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "dictsort exceeds max map size", span, "pass smaller map")
+            raw_keys: list[str] = entries.keys_list()
+            ki: int = 0
+            while ki < len(raw_keys):
+                hctx.consume_op(span)
+                k: str = raw_keys[ki]
+                v: Value = entries.get(k)
+                keys.append(k)
+                vals.append(v)
+                if by == "key":
+                    if case_sens:
+                        cmp_keys.append(Value.VStr(k))
+                    else:
+                        cmp_keys.append(Value.VStr(nox.strings.lower(k)))
+                else:
+                    cmp_keys.append(v)
+                ki = ki + 1
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "dictsort filter expects a map", span, "pass a map to |dictsort")
+
+    n: int = len(keys)
+    si: int = 1
+    while si < n:
+        ck_s: str = keys[si]
+        cv: Value = vals[si]
+        ccmp: Value = cmp_keys[si]
+        sj: int = si - 1
+        shifting: bool = True
+        while sj >= 0 and shifting:
+            hctx.consume_op(span)
+            cmp: int = values_compare(cmp_keys[sj], ccmp, hctx.undefined_policy, span)
+            should_swap: bool = cmp > 0
+            if rev:
+                should_swap = cmp < 0
+            if should_swap:
+                keys[sj + 1] = keys[sj]
+                vals[sj + 1] = vals[sj]
+                cmp_keys[sj + 1] = cmp_keys[sj]
+                sj = sj - 1
+            else:
+                shifting = False
+        keys[sj + 1] = ck_s
+        vals[sj + 1] = cv
+        cmp_keys[sj + 1] = ccmp
+        si = si + 1
+
+    pairs: list[Value] = []
+    pi: int = 0
+    while pi < n:
+        pair_items: list[Value] = [Value.VStr(keys[pi]), vals[pi]]
+        pairs.append(Value.VList(pair_items))
+        pi = pi + 1
+    return Value.VList(pairs)

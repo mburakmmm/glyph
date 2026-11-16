@@ -1,16 +1,110 @@
-# Registered pure helper function dispatch for Glyph (Phase 3 MVP).
-# Enforces AGENTS.md §7.2: only whitelisted, bounded helpers (e.g. bounded range).
+# Pure helper function dispatch and specification registry for Glyph (Phase 7).
+# Enforces AGENTS.md §7.2 & §13.1: only whitelisted, pure, bounded helpers; HelperContext isolation; lock during renders.
+import nox.strings
 from glyph.errors import SourceSpan, GlyphTypeError, GlyphExtensionError, GLYPH_EVAL_TYPE, GLYPH_EXTENSION_ERROR
+from glyph.helpers import CostClass, FunctionSpec, HelperContext
 from glyph.limits import BudgetTracker
+from glyph.options import TrustTier
 from glyph.value import Value
 
 MAX_RANGE_ITEMS: int = 10000
 
+def _is_core_function_name(name: str) -> bool:
+    return name == "range" or name == "super" or name == "caller"
+
+def builtin_function_specs() -> list[FunctionSpec]:
+    return [
+        FunctionSpec("core", "range", 1, 3, "integer", "list", True, True, "any", False, CostClass.Linear, MAX_RANGE_ITEMS, TrustTier.Untrusted)
+    ]
+
 class FunctionRegistry:
     generation: int
+    active_renders: int
+    frozen: bool
+    custom_names: list[str]
+    custom_fns: list[(list[Value], HelperContext, SourceSpan) -> Value]
+    custom_specs: list[FunctionSpec]
 
     def __init__(self: FunctionRegistry) -> None:
         self.generation = 1
+        self.active_renders = 0
+        self.frozen = False
+        empty_n: list[str] = []
+        empty_f: list[(list[Value], HelperContext, SourceSpan) -> Value] = []
+        empty_s: list[FunctionSpec] = []
+        self.custom_names = empty_n
+        self.custom_fns = empty_f
+        self.custom_specs = empty_s
+
+    def begin_use(self: FunctionRegistry) -> None:
+        self.active_renders = self.active_renders + 1
+
+    def end_use(self: FunctionRegistry) -> None:
+        if self.active_renders > 0:
+            self.active_renders = self.active_renders - 1
+
+    def freeze(self: FunctionRegistry) -> None:
+        self.frozen = True
+
+    def register_with_spec(
+        self: FunctionRegistry,
+        spec: FunctionSpec,
+        fn: (list[Value], HelperContext, SourceSpan) -> Value
+    ) -> None:
+        reg_sp: SourceSpan = SourceSpan("<function-registry>", 1, 1, 0, 0)
+        if self.frozen or self.active_renders > 0:
+            raise GlyphExtensionError(
+                GLYPH_EXTENSION_ERROR,
+                "cannot modify FunctionRegistry while rendering is active or frozen",
+                reg_sp,
+                "register custom functions on Environment before rendering starts"
+            )
+        full_name: str = spec.name
+        if len(spec.namespace_name) > 0 and spec.namespace_name != "custom" and spec.namespace_name != "core" and not nox.strings.contains(full_name, "."):
+            full_name = spec.namespace_name + "." + spec.name
+        if _is_core_function_name(full_name):
+            raise GlyphExtensionError(
+                GLYPH_EXTENSION_ERROR,
+                "cannot override core function '" + full_name + "'",
+                reg_sp,
+                "register custom functions under a distinct name"
+            )
+        names: list[str] = self.custom_names
+        fns: list[(list[Value], HelperContext, SourceSpan) -> Value] = self.custom_fns
+        specs: list[FunctionSpec] = self.custom_specs
+        i: int = 0
+        while i < len(names):
+            if names[i] == full_name:
+                fns[i] = fn
+                specs[i] = spec
+                self.custom_fns = fns
+                self.custom_specs = specs
+                self.generation = self.generation + 1
+                return
+            i = i + 1
+        names.append(full_name)
+        fns.append(fn)
+        specs.append(spec)
+        self.custom_names = names
+        self.custom_fns = fns
+        self.custom_specs = specs
+        self.generation = self.generation + 1
+
+    def register(
+        self: FunctionRegistry,
+        name: str,
+        fn: (list[Value], HelperContext, SourceSpan) -> Value
+    ) -> None:
+        sp: FunctionSpec = FunctionSpec("custom", name, 0, 16, "any", "any", True, True, "any", False, CostClass.Linear, 65536, TrustTier.Untrusted)
+        self.register_with_spec(sp, fn)
+
+    def all_specs(self: FunctionRegistry) -> list[FunctionSpec]:
+        out: list[FunctionSpec] = builtin_function_specs()
+        i: int = 0
+        while i < len(self.custom_specs):
+            out.append(self.custom_specs[i])
+            i = i + 1
+        return out
 
 def default_functions() -> FunctionRegistry:
     return FunctionRegistry()
@@ -62,16 +156,22 @@ def _fn_range(args: list[Value], tracker: BudgetTracker, span: SourceSpan) -> Va
             cur = cur + step
     return Value.VList(items)
 
-def apply_function(
+def apply_function_with_context(
     reg: FunctionRegistry,
     name: str,
     args: list[Value],
-    tracker: BudgetTracker,
+    hctx: HelperContext,
     span: SourceSpan
 ) -> Value:
-    tracker.consume_op(span)
+    hctx.consume_op(span)
     if name == "range":
-        return _fn_range(args, tracker, span)
+        return _fn_range(args, hctx.tracker, span)
+    ci: int = 0
+    while ci < len(reg.custom_names):
+        if reg.custom_names[ci] == name:
+            fn: (list[Value], HelperContext, SourceSpan) -> Value = reg.custom_fns[ci]
+            return fn(args, hctx, span)
+        ci = ci + 1
     raise GlyphExtensionError(
         GLYPH_EXTENSION_ERROR,
         "unknown function '" + name + "'",

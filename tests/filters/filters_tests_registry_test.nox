@@ -1,0 +1,253 @@
+# Phase 7 Comprehensive Tests: Full Built-in Filter/Test Catalog, HelperContext, Registry Lock, and Bounds.
+import nox.test
+import nox.strings
+from nox.collections import OrderedDict
+import glyph.api
+from glyph.api import Value, MarkupContext, MemoryLoader, Environment, EnvironmentOptions
+from glyph.api import RenderOptions, Template, Context, TrustTier, OutputMode, UndefinedPolicy
+from glyph.api import ResourceBudget, GlyphTypeError, GlyphSecurityError, GlyphExtensionError, GlyphLimitError
+from glyph.api import CostClass, FilterSpec, TestSpec, FunctionSpec, HelperContext, FilterArgValue
+from glyph.errors import GLYPH_EVAL_TYPE, GLYPH_EVAL_OVERFLOW, GLYPH_EVAL_OUT_OF_RANGE, GLYPH_SECURITY_CONTEXT
+from glyph.errors import GLYPH_SECURITY_REFLECTION, GLYPH_SECURITY_POLICY, GLYPH_EXTENSION_ERROR, GLYPH_LIMIT_TOTAL_OPS
+from glyph.errors import SourceSpan
+
+def _render_str(tpl_src: str, ctx_json: str, locale: str = "en-US") -> str:
+    loader: MemoryLoader = MemoryLoader()
+    opts: EnvironmentOptions = EnvironmentOptions(
+        OutputMode.Html,
+        True,
+        UndefinedPolicy.StrictUndefined,
+        TrustTier.Trusted,
+        False,
+        False,
+        glyph.api.default_budget(),
+        locale
+    )
+    env: Environment = glyph.api.new_environment(loader, opts)
+    tpl: Template = glyph.api.compile_string(tpl_src, "f.html", env)
+    return glyph.api.render(tpl, glyph.api.context_from_json(ctx_json), env)
+
+def _assert_s(got: str, exp: str, label: str) -> None:
+    if got != exp:
+        print("MISMATCH [" + label + "] got=[" + got + "] expected=[" + exp + "]")
+    nox.test.assert_eq_str(got, exp, label)
+
+def _expect_type_error(tpl_src: str, ctx_json: str, expected_code: str, label: str) -> None:
+    caught: str = ""
+    try:
+        _r: str = _render_str(tpl_src, ctx_json)
+    except GlyphTypeError as e:
+        caught = e.code
+    _assert_s(caught, expected_code, label)
+
+def test_string_and_escaping_filters() -> None:
+    _assert_s(_render_str("{{ 'hello WORLD' | capitalize }}", "{}"), "Hello world", "capitalize")
+    _assert_s(_render_str("{{ 'hello-new_world' | title }}", "{}"), "Hello-New_World", "title")
+    _assert_s(_render_str("{{ '  hi  ' | trim }}", "{}"), "hi", "trim")
+    _assert_s(_render_str("{{ 'aaa' | replace('a', 'b', 2) }}", "{}"), "bba", "replace with count")
+    _assert_s(_render_str("{{ 'Hello wonderful world' | truncate(12) }}", "{}"), "Hello...", "truncate word boundary")
+    _assert_s(_render_str("{{ 'Hello wonderful' | truncate(8, killwords=true, end='..') }}", "{}"), "Hello ..", "truncate killwords")
+    _assert_s(_render_str("{{ '  one two   three ' | wordcount }}", "{}"), "3", "wordcount")
+    _assert_s(_render_str("{{ 'a\\n\\nb' | indent(2, first=true) }}", "{}"), "  a\n\n  b", "indent preserves blank lines unless blank=true")
+    _assert_s(_render_str("{{ 'hi' | center(6, '*') }}", "{}"), "**hi**", "center")
+    _assert_s(_render_str("{{ 'hi' | pad(5, '0', 'right') }}", "{}"), "000hi", "pad right")
+    _assert_s(_render_str("{{ 'Hi <there>!' | urlencode }}", "{}"), "Hi%20%3Cthere%3E%21", "urlencode")
+    _assert_s(_render_str("{{ 'Çok Güzel İş!' | slugify }}", "{}"), "cok-guzel-is", "slugify Turkish/ASCII")
+    _assert_s(_render_str("{{ 'İstanbul' | lower }}", "{}", "tr-TR"), "istanbul", "tr-TR lower")
+    _assert_s(_render_str("{{ 'istanbul' | upper }}", "{}", "tr-TR"), "İSTANBUL", "tr-TR upper")
+    _assert_s(_render_str("{{ 'Hello *world* [x](y)' | md_escape }}", "{}"), "Hello \\*world\\* \\[x\\]\\(y\\)", "md_escape")
+    _assert_s(_render_str("{{ 'ABC' | normalize_unicode('NFC') }}", "{}"), "ABC", "normalize_unicode ASCII NFC")
+
+    # striptags strips tags to plain VStr -> still escaped in HTML context (NOT SafeHtml!)
+    _assert_s(_render_str("<div>{{ '<b>Hi</b><img onerror=1>' | striptags }}</div>", "{}"), "<div>Hi</div>", "striptags plain removal")
+    _assert_s(_render_str("<div>{{ '<p>&lt;script&gt;</p>' | striptags }}</div>", "{}"), "<div>&amp;lt;script&amp;gt;</div>", "striptags output remains untrusted VStr")
+
+    # forceescape double-escapes even SafeHtml!
+    loader: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(loader)
+    m: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    m.set("frag", glyph.api.trust_html_fragment("<b>ok</b>"))
+    tpl_fe: Template = glyph.api.compile_string("<div>{{ frag | forceescape }}</div>", "fe.html", env)
+    _assert_s(glyph.api.render(tpl_fe, Context(m), env), "<div>&lt;b&gt;ok&lt;/b&gt;</div>", "forceescape escapes SafeHtml")
+
+    # xml_escape rejects illegal XML 1.0 control bytes
+    m_xml: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    m_xml.set("bad", Value.VStr("a" + nox.strings.char_from_byte(7) + "b"))
+    tpl_xml: Template = glyph.api.compile_string("{{ bad | xml_escape }}", "xml.txt", env)
+    xml_opts: RenderOptions = RenderOptions(OutputMode.Text, False, UndefinedPolicy.StrictUndefined, TrustTier.Trusted, glyph.api.default_budget(), "en-US")
+    caught_xml: str = ""
+    try:
+        _rx: str = glyph.api.render_with_options(tpl_xml, Context(m_xml), xml_opts, env)
+    except GlyphSecurityError as se:
+        caught_xml = se.code
+    _assert_s(caught_xml, GLYPH_SECURITY_CONTEXT, "xml_escape rejects illegal XML control chars")
+
+    # Expansion cap enforced on replace / indent / invalid normalize_unicode form
+    _expect_type_error("{{ s | replace('a', rep) }}", '{"s":"aaaaaaaaaa","rep":"' + nox.strings.repeat("X", 200000) + '"}', GLYPH_EVAL_TYPE, "replace expansion limit enforced")
+    _expect_type_error("{{ 'hi' | normalize_unicode('BAD') }}", "{}", GLYPH_EVAL_TYPE, "invalid unicode form rejected")
+
+def test_collection_filters() -> None:
+    _assert_s(_render_str("{{ [10, 20, 30] | first }}|{{ [10, 20, 30] | last }}|{{ 'abc' | reverse }}", "{}"), "10|30|cba", "first/last/reverse")
+    _assert_s(_render_str("{{ [3, 1, 2] | sort | join(',') }}|{{ [3, 1, 2] | sort(reverse=true) | join(',') }}", "{}"), "1,2,3|3,2,1", "sort ascending/descending")
+    _assert_s(_render_str("{{ [1, 2, 1, 3, 2] | unique | join(',') }}", "{}"), "1,2,3", "unique")
+    _assert_s(_render_str("{{ nums | select('odd') | join(',') }}|{{ nums | reject('even') | join(',') }}", '{"nums":[1,2,3,4,5]}'), "1,3,5|1,3,5", "select/reject odd/even")
+    _assert_s(_render_str("<script>{{ xs | batch(2, '-') | tojson }}</script>", '{"xs":[1,2,3]}'), '<script>[[1,2],[3,"-"]]</script>', "batch with fill_with")
+    _assert_s(_render_str("<script>{{ xs | slice(2, 0) | tojson }}</script>", '{"xs":[1,2,3]}'), "<script>[[1,2],[3,0]]</script>", "slice with fill_with")
+    _assert_s(_render_str("{{ [1, 2, 3, 4] | sum(start=10) }}|{{ [5, 2, 9] | min }}|{{ [5, 2, 9] | max }}", "{}"), "20|2|9", "sum/min/max")
+
+    users_json: str = '{"users":[{"name":"Bob","role":"user","score":10,"active":true},{"name":"Ada","role":"admin","score":30,"active":true},{"name":"Cy","role":"admin","score":20,"active":false}]}'
+    _assert_s(_render_str("{{ users | sort(attribute='score') | map(attribute='name') | join(',') }}", users_json), "Bob,Cy,Ada", "sort + map by attribute")
+    _assert_s(_render_str("{{ users | select(attribute='active') | map(attribute='name') | join(',') }}", users_json), "Bob,Ada", "select(attribute=...) truthy")
+    _assert_s(_render_str("{{ users | reject(attribute='role', value='admin') | map(attribute='name') | join(',') }}", users_json), "Bob", "reject(attribute=..., value=...)")
+    _assert_s(_render_str("{{ users | sum(attribute='score') }}|{{ (users | max(attribute='score')).name }}", users_json), "60|Ada", "sum/max attribute")
+    _assert_s(_render_str("{{ users | groupby('role') | map(attribute='grouper') | join(',') }}", users_json), "user,admin", "groupby grouper keys")
+    _assert_s(_render_str("<script>{{ m | dictsort(by='value', reverse=true) | tojson }}</script>", '{"m":{"b":2,"a":5,"c":1}}'), '<script>[["a",5],["b",2],["c",1]]</script>', "dictsort by value reverse")
+
+    # Negative & security cases on collections
+    _expect_type_error("{{ [] | first }}", "{}", GLYPH_EVAL_OUT_OF_RANGE, "empty list first fails")
+    _expect_type_error("{{ [] | min }}", "{}", GLYPH_EVAL_OUT_OF_RANGE, "empty list min fails")
+    _expect_type_error("{{ [1, 'two'] | sort }}", "{}", GLYPH_EVAL_TYPE, "heterogeneous sort rejected")
+
+    # Reflection guard in map(attribute='__class__')
+    caught_refl: str = ""
+    try:
+        _rr: str = _render_str("{{ users | map(attribute='__class__') }}", users_json)
+    except GlyphSecurityError as se:
+        caught_refl = se.code
+    _assert_s(caught_refl, GLYPH_SECURITY_REFLECTION, "map blocks forbidden metadata keys")
+
+def test_number_locale_and_explicit_date_filters() -> None:
+    _assert_s(_render_str("{{ (-42) | abs }}|{{ 3.14159 | round(2) }}|{{ ' 77 ' | int }}|{{ 'bad' | int(9) }}|{{ '2.5' | float }}|{{ 123 | string }}", "{}"), "42|3.14|77|9|2.5|123", "abs/round/int/float/string")
+    _assert_s(_render_str("{{ 1234567.5 | number(2) }}|{{ 1234.5 | currency('$') }}|{{ 0.256 | percent(1) }}|{{ 1536 | filesize(binary=true) }}", "{}", "en-US"), "1,234,567.50|$1,234.50|25.6%|1.5 KiB", "en-US number/currency/percent/filesize")
+    _assert_s(_render_str("{{ 1234567.5 | number(2) }}|{{ 1234.5 | currency('₺') }}|{{ 0.256 | percent(1) }}", "{}", "tr-TR"), "1.234.567,50|₺1.234,50|25,6%", "tr-TR deterministic number/currency/percent")
+    _assert_s(_render_str("{{ '2026-11-16T12:30:45Z' | date('%d/%m/%Y') }}|{{ 1700000000 | datetime }}", "{}"), "16/11/2026|2023-11-14 22:13:20", "date & datetime deterministic UTC")
+    _assert_s(_render_str("{{ '2026-11-16T12:00:00Z' | relative_time(ref='2026-11-16T12:05:00Z') }}", "{}"), "5 minutes ago", "relative_time explicit ref past")
+    _assert_s(_render_str("{{ 1000 | relative_time(ref=900) }}", "{}"), "in 1 minute", "relative_time explicit ref future")
+    _expect_type_error("{{ '2026-11-16' | relative_time }}", "{}", GLYPH_EVAL_TYPE, "relative_time requires explicit ref")
+
+def test_builtin_is_tests_and_namespaces() -> None:
+    loader: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(loader)
+
+    m: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    m.set("html", glyph.api.trust_html_fragment("<b>ok</b>"))
+    m.set("url", glyph.api.trust_url("https://example.com"))
+    m.set("items", Value.VList([Value.VInt(1), Value.VInt(2)]))
+    m.set("n", Value.VInt(6))
+    m.set("f", Value.VFloat(2.5))
+
+    tpl: Template = glyph.api.compile_string(
+        "{{ n is even }}|{{ n is not odd }}|{{ n is divisibleby(3) }}|{{ n is equalto(6) }}|{{ 2 is in(items) }}|{{ items is iterable }}|{{ 'x' is iterable }}|{{ f is number }}|{{ f is float }}|{{ html is escaped }}|{{ html is safe_for('html') }}|{{ html is safe_for('attr') }}|{{ url is safe_for('url') }}",
+        "tests.html",
+        env
+    )
+    _assert_s(
+        glyph.api.render(tpl, Context(m), env),
+        "true|true|true|true|true|true|true|true|true|true|true|false|true",
+        "built-in is tests & context-aware escaped/safe_for"
+    )
+
+    # Restricted trust tier denies escaped & safe_for
+    res_opts: RenderOptions = RenderOptions(OutputMode.Html, True, UndefinedPolicy.StrictUndefined, TrustTier.Restricted, glyph.api.default_budget(), "en-US")
+    _assert_s(
+        glyph.api.render_with_options(glyph.api.compile_string("{{ html is escaped }}|{{ html is safe_for('html') }}", "rt.html", env), Context(m), res_opts, env),
+        "false|false",
+        "Restricted trust tier denies escaped & safe_for"
+    )
+
+def _ns_badge(val: Value, _args: list[FilterArgValue], hctx: HelperContext, span: SourceSpan) -> Value:
+    hctx.consume_op(span)
+    match val:
+        case Value.VStr(s):
+            return Value.VStr("[" + hctx.locale + ":" + s + "]")
+        case _:
+            return Value.VStr("[" + hctx.locale + "]")
+
+def _ns_is_ten(val: Value, _args: list[Value], hctx: HelperContext, span: SourceSpan) -> bool:
+    hctx.consume_op(span)
+    match val:
+        case Value.VInt(i):
+            return i == 10
+        case _:
+            return False
+
+def _evil_escape_override(val: Value, _args: list[FilterArgValue], _hctx: HelperContext, _span: SourceSpan) -> Value:
+    return val
+
+def _evil_test_override(_val: Value, _args: list[Value], _hctx: HelperContext, _span: SourceSpan) -> bool:
+    return True
+
+def _evil_fn_override(args: list[Value], _hctx: HelperContext, _span: SourceSpan) -> Value:
+    return Value.VNull
+
+def test_helper_context_specs_locking_and_override_guards() -> None:
+    loader: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(loader)
+
+    # Spec introspection includes core + custom specs
+    specs_before: int = len(env.filters.all_specs())
+    nox.test.assert_true(specs_before >= 45, "builtin filter spec catalog populated")
+    nox.test.assert_true(len(env.tests.all_specs()) >= 20, "builtin test spec catalog populated")
+    nox.test.assert_true(len(env.functions.all_specs()) >= 1, "builtin function spec catalog populated")
+
+    fspec: FilterSpec = FilterSpec("ui", "badge", 0, 0, "string", "string", True, True, "any", True, CostClass.Trivial, 2, TrustTier.Untrusted)
+    tspec: TestSpec = TestSpec("mathx", "ten", 0, 0, "integer", True, True, "any", False, CostClass.Trivial, TrustTier.Untrusted)
+    env.filters.register_with_spec(fspec, _ns_badge)
+    env.tests.register_with_spec(tspec, _ns_is_ten)
+
+    nox.test.assert_eq_int(len(env.filters.all_specs()), specs_before + 1, "custom FilterSpec recorded")
+    _assert_s(glyph.api.render(glyph.api.compile_string("{{ 'ok' | ui.badge }}|{{ 10 is mathx.ten }}", "ns.html", env), glyph.api.empty_context(), env), "[en:ok]|true", "namespaced filter & test work with HelperContext")
+
+    # Core built-in filters, tests, and functions cannot be overridden
+    c1: str = ""
+    try:
+        env.filters.register_with_spec(FilterSpec("core", "slugify", 0, 0, "any", "string", True, True, "any", False, CostClass.Trivial, 1, TrustTier.Untrusted), _evil_escape_override)
+    except GlyphExtensionError as ee:
+        c1 = ee.code
+    _assert_s(c1, GLYPH_EXTENSION_ERROR, "core filter override denied")
+
+    c2: str = ""
+    try:
+        env.tests.register("defined", _evil_test_override)
+    except GlyphExtensionError as ee2:
+        c2 = ee2.code
+    _assert_s(c2, GLYPH_EXTENSION_ERROR, "core test override denied")
+
+    c3: str = ""
+    try:
+        env.functions.register("range", _evil_fn_override)
+    except GlyphExtensionError as ee3:
+        c3 = ee3.code
+    _assert_s(c3, GLYPH_EXTENSION_ERROR, "core function override denied")
+
+    # Attempting to mutate registry DURING active render (via callback closing over env) fails closed
+    def _mutating_callback(val: Value, _args: list[FilterArgValue], _hctx: HelperContext, _span: SourceSpan) -> Value:
+        env.filters.register_with_spec(FilterSpec("custom", "sneaky", 0, 0, "any", "any", True, True, "any", False, CostClass.Trivial, 1, TrustTier.Untrusted), _ns_badge)
+        return val
+
+    env.filters.register_with_spec(FilterSpec("custom", "mutator", 0, 0, "any", "any", True, True, "any", False, CostClass.Trivial, 1, TrustTier.Untrusted), _mutating_callback)
+    c4: str = ""
+    try:
+        _rm: str = glyph.api.render(glyph.api.compile_string("{{ 'x' | mutator }}", "mut.html", env), glyph.api.empty_context(), env)
+    except GlyphExtensionError as ee4:
+        c4 = ee4.code
+    _assert_s(c4, GLYPH_EXTENSION_ERROR, "mutating FilterRegistry during active render denied")
+
+    # Freezing registry prevents future mutations permanently
+    env.filters.freeze()
+    c5: str = ""
+    try:
+        env.filters.register_with_spec(FilterSpec("custom", "late", 0, 0, "any", "any", True, True, "any", False, CostClass.Trivial, 1, TrustTier.Untrusted), _ns_badge)
+    except GlyphExtensionError as ee5:
+        c5 = ee5.code
+    _assert_s(c5, GLYPH_EXTENSION_ERROR, "frozen FilterRegistry rejects late mutation")
+
+try:
+    test_string_and_escaping_filters()
+    test_collection_filters()
+    test_number_locale_and_explicit_date_filters()
+    test_builtin_is_tests_and_namespaces()
+    test_helper_context_specs_locking_and_override_guards()
+except GlyphTypeError as te_top:
+    print("UNCAUGHT_TYPE_ERR: code=" + te_top.code + " msg=" + te_top.message)
+    raise te_top

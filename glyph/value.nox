@@ -291,3 +291,183 @@ def checked_mod(a: int, b: int, span: SourceSpan) -> int:
     if a == INT64_MIN and b == -1:
         return 0
     return a % b
+
+def check_not_undef(v: Value, policy: UndefinedPolicy, span: SourceSpan) -> Value:
+    match v:
+        case Value.VUndefined(name):
+            match policy:
+                case UndefinedPolicy.StrictUndefined:
+                    raise GlyphUndefinedError(
+                        GLYPH_EVAL_UNDEFINED,
+                        "undefined variable '" + name + "'",
+                        span,
+                        "define '" + name + "' or use |default"
+                    )
+                case UndefinedPolicy.LenientUndefined:
+                    return Value.VNull
+        case _:
+            return v
+
+def values_equal(a: Value, b: Value, policy: UndefinedPolicy, span: SourceSpan) -> bool:
+    va: Value = check_not_undef(a, policy, span)
+    vb: Value = check_not_undef(b, policy, span)
+    match va:
+        case Value.VNull:
+            match vb:
+                case Value.VNull:
+                    return True
+                case _:
+                    return False
+        case Value.VBool(ba):
+            match vb:
+                case Value.VBool(bb):
+                    return ba == bb
+                case _:
+                    return False
+        case Value.VInt(ia):
+            match vb:
+                case Value.VInt(ib):
+                    return ia == ib
+                case Value.VFloat(fb):
+                    return float(ia) == fb
+                case _:
+                    return False
+        case Value.VFloat(fa):
+            match vb:
+                case Value.VFloat(fb2):
+                    return fa == fb2
+                case Value.VInt(ib2):
+                    return fa == float(ib2)
+                case _:
+                    return False
+        case Value.VStr(sa):
+            match vb:
+                case Value.VStr(sb):
+                    return sa == sb
+                case Value.VTrustedMarkup(cb, _):
+                    return sa == cb
+                case _:
+                    return False
+        case Value.VTrustedMarkup(ca, _):
+            match vb:
+                case Value.VTrustedMarkup(cb2, _):
+                    return ca == cb2
+                case Value.VStr(sb2):
+                    return ca == sb2
+                case _:
+                    return False
+        case Value.VList(la):
+            match vb:
+                case Value.VList(lb):
+                    if len(la) != len(lb):
+                        return False
+                    i: int = 0
+                    while i < len(la):
+                        if not values_equal(la[i], lb[i], policy, span):
+                            return False
+                        i = i + 1
+                    return True
+                case _:
+                    return False
+        case Value.VMap(ma):
+            match vb:
+                case Value.VMap(mb):
+                    if ma.size() != mb.size():
+                        return False
+                    keys: list[str] = ma.keys_list()
+                    j: int = 0
+                    while j < len(keys):
+                        k: str = keys[j]
+                        if not mb.contains(k):
+                            return False
+                        if not values_equal(ma.get(k), mb.get(k), policy, span):
+                            return False
+                        j = j + 1
+                    return True
+                case _:
+                    return False
+        case Value.VUndefined(_):
+            return False
+        case Value.VCallable(na):
+            match vb:
+                case Value.VCallable(nb):
+                    return na == nb
+                case _:
+                    return False
+
+def values_compare(a: Value, b: Value, policy: UndefinedPolicy, span: SourceSpan) -> int:
+    va: Value = check_not_undef(a, policy, span)
+    vb: Value = check_not_undef(b, policy, span)
+    match va:
+        case Value.VInt(ia):
+            match vb:
+                case Value.VInt(ib):
+                    if ia < ib:
+                        return -1
+                    elif ia > ib:
+                        return 1
+                    return 0
+                case Value.VFloat(fb):
+                    fa: float = float(ia)
+                    if fa < fb:
+                        return -1
+                    elif fa > fb:
+                        return 1
+                    return 0
+                case _:
+                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "cannot compare integer with non-number", span, "compare matching types")
+        case Value.VFloat(fa2):
+            match vb:
+                case Value.VFloat(fb2):
+                    if fa2 < fb2:
+                        return -1
+                    elif fa2 > fb2:
+                        return 1
+                    return 0
+                case Value.VInt(ib2):
+                    fb3: float = float(ib2)
+                    if fa2 < fb3:
+                        return -1
+                    elif fa2 > fb3:
+                        return 1
+                    return 0
+                case _:
+                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "cannot compare float with non-number", span, "compare matching types")
+        case Value.VStr(sa):
+            match vb:
+                case Value.VStr(sb):
+                    if sa < sb:
+                        return -1
+                    elif sa > sb:
+                        return 1
+                    return 0
+                case _:
+                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "cannot compare string with non-string", span, "compare matching types")
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "ordered comparison requires numbers or strings", span, "use == or != for non-orderable values")
+
+def values_contains(needle: Value, haystack: Value, policy: UndefinedPolicy, span: SourceSpan) -> bool:
+    vn: Value = check_not_undef(needle, policy, span)
+    vh: Value = check_not_undef(haystack, policy, span)
+    match vh:
+        case Value.VList(items):
+            i: int = 0
+            while i < len(items):
+                if values_equal(vn, items[i], policy, span):
+                    return True
+                i = i + 1
+            return False
+        case Value.VMap(entries):
+            match vn:
+                case Value.VStr(k):
+                    return entries.contains(k)
+                case _:
+                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "map membership check requires string key", span, "check string key 'in' map")
+        case Value.VStr(s):
+            match vn:
+                case Value.VStr(sub):
+                    return nox.strings.contains(s, sub)
+                case _:
+                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "string membership check requires string needle", span, "check string 'in' string")
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "'in' expects list, map, or string", span, "pass a collection or string")

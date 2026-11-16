@@ -1,66 +1,254 @@
-# Built-in `is` test registry for Glyph (Phase 3 MVP subset).
-# Enforces AGENTS.md §13.3: pure type/state predicates.
+# Built-in and custom `is` test registry for Glyph (Phase 7).
+# Enforces AGENTS.md §13.1 & §13.3: pure predicates, HelperContext isolation, immutable during active renders.
+import nox.strings
 from glyph.errors import SourceSpan, GlyphExtensionError, GlyphTypeError, GLYPH_EXTENSION_ERROR, GLYPH_EVAL_TYPE
+from glyph.helpers import CostClass, TestSpec, HelperContext
 from glyph.limits import BudgetTracker
-from glyph.value import Value
+from glyph.options import TrustTier
+from glyph.safety import validate_url_value
+from glyph.value import Value, MarkupContext, values_equal, values_contains, check_not_undef
+
+def _is_core_test_name(name: str) -> bool:
+    if name == "defined" or name == "undefined" or name == "none" or name == "null":
+        return True
+    if name == "boolean" or name == "number" or name == "integer" or name == "float" or name == "string":
+        return True
+    if name == "sequence" or name == "mapping" or name == "iterable" or name == "empty":
+        return True
+    if name == "equalto" or name == "odd" or name == "even" or name == "divisibleby" or name == "in":
+        return True
+    if name == "escaped" or name == "safe_for" or name == "true" or name == "false":
+        return True
+    return False
+
+def _mk_test_spec(name: str, min_a: int, max_a: int, in_t: str, ctxs: str, cost: CostClass) -> TestSpec:
+    return TestSpec("core", name, min_a, max_a, in_t, True, True, ctxs, False, cost, TrustTier.Untrusted)
+
+def builtin_test_specs() -> list[TestSpec]:
+    return [
+        _mk_test_spec("defined", 0, 0, "any", "any", CostClass.Trivial),
+        _mk_test_spec("undefined", 0, 0, "any", "any", CostClass.Trivial),
+        _mk_test_spec("none", 0, 0, "any", "any", CostClass.Trivial),
+        _mk_test_spec("boolean", 0, 0, "any", "any", CostClass.Trivial),
+        _mk_test_spec("number", 0, 0, "any", "any", CostClass.Trivial),
+        _mk_test_spec("integer", 0, 0, "any", "any", CostClass.Trivial),
+        _mk_test_spec("float", 0, 0, "any", "any", CostClass.Trivial),
+        _mk_test_spec("string", 0, 0, "any", "any", CostClass.Trivial),
+        _mk_test_spec("sequence", 0, 0, "any", "any", CostClass.Trivial),
+        _mk_test_spec("mapping", 0, 0, "any", "any", CostClass.Trivial),
+        _mk_test_spec("iterable", 0, 0, "any", "any", CostClass.Trivial),
+        _mk_test_spec("empty", 0, 0, "any", "any", CostClass.Trivial),
+        _mk_test_spec("odd", 0, 0, "integer", "any", CostClass.Trivial),
+        _mk_test_spec("even", 0, 0, "integer", "any", CostClass.Trivial),
+        _mk_test_spec("true", 0, 0, "any", "any", CostClass.Trivial),
+        _mk_test_spec("false", 0, 0, "any", "any", CostClass.Trivial),
+        _mk_test_spec("escaped", 0, 0, "any", "any", CostClass.Trivial),
+        _mk_test_spec("equalto", 1, 1, "any", "any", CostClass.Linear),
+        _mk_test_spec("divisibleby", 1, 1, "integer", "any", CostClass.Trivial),
+        _mk_test_spec("in", 1, 1, "any", "any", CostClass.Linear),
+        _mk_test_spec("safe_for", 1, 1, "any", "html", CostClass.Trivial)
+    ]
 
 class TestRegistry:
     generation: int
+    active_renders: int
+    frozen: bool
+    custom_names: list[str]
+    custom_fns: list[(Value, list[Value], HelperContext, SourceSpan) -> bool]
+    custom_specs: list[TestSpec]
 
     def __init__(self: TestRegistry) -> None:
         self.generation = 1
+        self.active_renders = 0
+        self.frozen = False
+        empty_n: list[str] = []
+        empty_f: list[(Value, list[Value], HelperContext, SourceSpan) -> bool] = []
+        empty_s: list[TestSpec] = []
+        self.custom_names = empty_n
+        self.custom_fns = empty_f
+        self.custom_specs = empty_s
+
+    def begin_use(self: TestRegistry) -> None:
+        self.active_renders = self.active_renders + 1
+
+    def end_use(self: TestRegistry) -> None:
+        if self.active_renders > 0:
+            self.active_renders = self.active_renders - 1
+
+    def freeze(self: TestRegistry) -> None:
+        self.frozen = True
+
+    def register_with_spec(
+        self: TestRegistry,
+        spec: TestSpec,
+        fn: (Value, list[Value], HelperContext, SourceSpan) -> bool
+    ) -> None:
+        reg_sp: SourceSpan = SourceSpan("<test-registry>", 1, 1, 0, 0)
+        if self.frozen or self.active_renders > 0:
+            raise GlyphExtensionError(
+                GLYPH_EXTENSION_ERROR,
+                "cannot modify TestRegistry while rendering is active or frozen",
+                reg_sp,
+                "register custom tests on Environment before rendering starts"
+            )
+        full_name: str = spec.name
+        if len(spec.namespace_name) > 0 and spec.namespace_name != "custom" and spec.namespace_name != "core" and not nox.strings.contains(full_name, "."):
+            full_name = spec.namespace_name + "." + spec.name
+        if _is_core_test_name(full_name):
+            raise GlyphExtensionError(
+                GLYPH_EXTENSION_ERROR,
+                "cannot override core test '" + full_name + "'",
+                reg_sp,
+                "register custom tests under a distinct name"
+            )
+        names: list[str] = self.custom_names
+        fns: list[(Value, list[Value], HelperContext, SourceSpan) -> bool] = self.custom_fns
+        specs: list[TestSpec] = self.custom_specs
+        i: int = 0
+        while i < len(names):
+            if names[i] == full_name:
+                fns[i] = fn
+                specs[i] = spec
+                self.custom_fns = fns
+                self.custom_specs = specs
+                self.generation = self.generation + 1
+                return
+            i = i + 1
+        names.append(full_name)
+        fns.append(fn)
+        specs.append(spec)
+        self.custom_names = names
+        self.custom_fns = fns
+        self.custom_specs = specs
+        self.generation = self.generation + 1
+
+    def register(
+        self: TestRegistry,
+        name: str,
+        fn: (Value, list[Value], HelperContext, SourceSpan) -> bool
+    ) -> None:
+        sp: TestSpec = TestSpec("custom", name, 0, 4, "any", True, True, "any", False, CostClass.Linear, TrustTier.Untrusted)
+        self.register_with_spec(sp, fn)
+
+    def all_specs(self: TestRegistry) -> list[TestSpec]:
+        out: list[TestSpec] = builtin_test_specs()
+        i: int = 0
+        while i < len(self.custom_specs):
+            out.append(self.custom_specs[i])
+            i = i + 1
+        return out
 
 def default_tests() -> TestRegistry:
     return TestRegistry()
 
-def apply_test(
+def _expect_zero_test_args(name: str, args: list[Value], span: SourceSpan) -> None:
+    if len(args) > 0:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "test '" + name + "' takes no arguments", span, "remove arguments from 'is " + name + "'")
+
+def _expect_one_test_arg(name: str, args: list[Value], span: SourceSpan) -> Value:
+    if len(args) != 1:
+        raise GlyphTypeError(GLYPH_EVAL_TYPE, "test '" + name + "' expects exactly 1 argument", span, "write 'is " + name + "(arg)'")
+    return args[0]
+
+def _test_safe_for(val: Value, ctx_arg: Value, hctx: HelperContext, span: SourceSpan) -> bool:
+    ctx_name: str = ""
+    match ctx_arg:
+        case Value.VStr(s):
+            ctx_name = nox.strings.lower(s)
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "safe_for() expects a string context name", span, "pass 'html', 'attr', 'url', or 'js'")
+    match hctx.trust_tier:
+        case TrustTier.Trusted:
+            pass
+        case _:
+            return False
+    match val:
+        case Value.VTrustedMarkup(content, mctx):
+            if ctx_name == "html" or ctx_name == "safehtml":
+                return mctx == MarkupContext.SafeHtml
+            if ctx_name == "attr" or ctx_name == "safeattr":
+                return mctx == MarkupContext.SafeAttr
+            if ctx_name == "js" or ctx_name == "safejs":
+                return mctx == MarkupContext.SafeJs
+            if ctx_name == "url" or ctx_name == "safeurl":
+                if mctx == MarkupContext.SafeUrl:
+                    try:
+                        validate_url_value(content, "href", "", span)
+                        return True
+                    except Exception:
+                        return False
+                return False
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "unknown context '" + ctx_name + "' in safe_for()", span, "use 'html', 'attr', 'url', or 'js'")
+        case _:
+            return False
+
+def apply_test_with_context(
     reg: TestRegistry,
     name: str,
     val: Value,
     args: list[Value],
-    tracker: BudgetTracker,
+    hctx: HelperContext,
     span: SourceSpan
 ) -> bool:
-    tracker.consume_op(span)
-    if len(args) > 0:
-        raise GlyphTypeError(GLYPH_EVAL_TYPE, "test '" + name + "' takes no arguments", span, "remove arguments from 'is " + name + "'")
+    hctx.consume_op(span)
     if name == "defined":
+        _expect_zero_test_args(name, args, span)
         match val:
             case Value.VUndefined(_):
                 return False
             case _:
                 return True
     if name == "undefined":
+        _expect_zero_test_args(name, args, span)
         match val:
             case Value.VUndefined(_):
                 return True
             case _:
                 return False
     if name == "none" or name == "null":
+        _expect_zero_test_args(name, args, span)
         match val:
             case Value.VNull:
                 return True
             case _:
                 return False
     if name == "boolean":
+        _expect_zero_test_args(name, args, span)
         match val:
             case Value.VBool(_):
                 return True
             case _:
                 return False
+    if name == "true":
+        _expect_zero_test_args(name, args, span)
+        match val:
+            case Value.VBool(b):
+                return b
+            case _:
+                return False
+    if name == "false":
+        _expect_zero_test_args(name, args, span)
+        match val:
+            case Value.VBool(b):
+                return not b
+            case _:
+                return False
     if name == "integer":
+        _expect_zero_test_args(name, args, span)
         match val:
             case Value.VInt(_):
                 return True
             case _:
                 return False
     if name == "float":
+        _expect_zero_test_args(name, args, span)
         match val:
             case Value.VFloat(_):
                 return True
             case _:
                 return False
     if name == "number":
+        _expect_zero_test_args(name, args, span)
         match val:
             case Value.VInt(_):
                 return True
@@ -69,24 +257,39 @@ def apply_test(
             case _:
                 return False
     if name == "string":
+        _expect_zero_test_args(name, args, span)
         match val:
             case Value.VStr(_):
                 return True
             case _:
                 return False
     if name == "sequence":
+        _expect_zero_test_args(name, args, span)
         match val:
             case Value.VList(_):
                 return True
             case _:
                 return False
     if name == "mapping":
+        _expect_zero_test_args(name, args, span)
         match val:
             case Value.VMap(_):
                 return True
             case _:
                 return False
+    if name == "iterable":
+        _expect_zero_test_args(name, args, span)
+        match val:
+            case Value.VList(_):
+                return True
+            case Value.VMap(_):
+                return True
+            case Value.VStr(_):
+                return True
+            case _:
+                return False
     if name == "empty":
+        _expect_zero_test_args(name, args, span)
         match val:
             case Value.VStr(s):
                 return len(s) == 0
@@ -98,4 +301,72 @@ def apply_test(
                 return True
             case _:
                 return False
-    raise GlyphExtensionError(GLYPH_EXTENSION_ERROR, "unknown test '" + name + "'", span, "use a registered test name")
+    if name == "odd":
+        _expect_zero_test_args(name, args, span)
+        v_odd: Value = check_not_undef(val, hctx.undefined_policy, span)
+        match v_odd:
+            case Value.VInt(iv):
+                return (iv % 2) != 0
+            case _:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "test 'odd' expects an integer", span, "pass an integer to 'is odd'")
+    if name == "even":
+        _expect_zero_test_args(name, args, span)
+        v_even: Value = check_not_undef(val, hctx.undefined_policy, span)
+        match v_even:
+            case Value.VInt(iv2):
+                return (iv2 % 2) == 0
+            case _:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "test 'even' expects an integer", span, "pass an integer to 'is even'")
+    if name == "escaped":
+        _expect_zero_test_args(name, args, span)
+        match hctx.trust_tier:
+            case TrustTier.Trusted:
+                pass
+            case _:
+                return False
+        match val:
+            case Value.VTrustedMarkup(_, _):
+                return True
+            case _:
+                return False
+    if name == "equalto":
+        other: Value = _expect_one_test_arg(name, args, span)
+        return values_equal(val, other, hctx.undefined_policy, span)
+    if name == "divisibleby":
+        d_arg: Value = check_not_undef(_expect_one_test_arg(name, args, span), hctx.undefined_policy, span)
+        v_div: Value = check_not_undef(val, hctx.undefined_policy, span)
+        num: int = 0
+        den: int = 0
+        match v_div:
+            case Value.VInt(nv):
+                num = nv
+            case _:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "test 'divisibleby' expects an integer target", span, "pass an integer")
+        match d_arg:
+            case Value.VInt(dv):
+                den = dv
+            case _:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "test 'divisibleby' expects an integer divisor", span, "pass an integer divisor")
+        if den == 0:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "divisibleby(0) divisor cannot be zero", span, "pass a non-zero integer divisor")
+        return (num % den) == 0
+    if name == "in":
+        seq_arg: Value = _expect_one_test_arg(name, args, span)
+        return values_contains(val, seq_arg, hctx.undefined_policy, span)
+    if name == "safe_for":
+        ctx_arg2: Value = _expect_one_test_arg(name, args, span)
+        return _test_safe_for(val, ctx_arg2, hctx, span)
+
+    ci: int = 0
+    while ci < len(reg.custom_names):
+        if reg.custom_names[ci] == name:
+            fn: (Value, list[Value], HelperContext, SourceSpan) -> bool = reg.custom_fns[ci]
+            return fn(val, args, hctx, span)
+        ci = ci + 1
+
+    raise GlyphExtensionError(
+        GLYPH_EXTENSION_ERROR,
+        "unknown test '" + name + "'",
+        span,
+        "check built-in and registered 'is' test names"
+    )

@@ -1,0 +1,177 @@
+# Extension specification contracts and isolated HelperContext for Glyph (Phase 7).
+# Enforces AGENTS.md §13.1: helpers receive immutable policy + locale + shared budget + diagnostics, NEVER full RenderScope.
+from glyph.errors import SourceSpan
+from glyph.limits import BudgetTracker
+from glyph.options import OutputMode, TrustTier
+from glyph.value import UndefinedPolicy
+
+enum CostClass:
+    Trivial
+    Linear
+    QuadraticBounded
+    Sorting
+
+class FilterSpec:
+    namespace_name: str
+    name: str
+    min_args: int
+    max_args: int
+    input_types: str
+    result_type: str
+    is_pure: bool
+    is_deterministic: bool
+    allowed_contexts: str
+    needs_locale: bool
+    cost_class: CostClass
+    maximum_expansion: int
+    min_trust_tier: TrustTier
+
+    def __init__(
+        self: FilterSpec,
+        namespace_name: str,
+        name: str,
+        min_args: int,
+        max_args: int,
+        input_types: str,
+        result_type: str,
+        is_pure: bool,
+        is_deterministic: bool,
+        allowed_contexts: str,
+        needs_locale: bool,
+        cost_class: CostClass,
+        maximum_expansion: int,
+        min_trust_tier: TrustTier
+    ) -> None:
+        self.namespace_name = namespace_name
+        self.name = name
+        self.min_args = min_args
+        self.max_args = max_args
+        self.input_types = input_types
+        self.result_type = result_type
+        self.is_pure = is_pure
+        self.is_deterministic = is_deterministic
+        self.allowed_contexts = allowed_contexts
+        self.needs_locale = needs_locale
+        self.cost_class = cost_class
+        self.maximum_expansion = maximum_expansion
+        self.min_trust_tier = min_trust_tier
+
+class TestSpec:
+    namespace_name: str
+    name: str
+    min_args: int
+    max_args: int
+    input_types: str
+    is_pure: bool
+    is_deterministic: bool
+    allowed_contexts: str
+    needs_locale: bool
+    cost_class: CostClass
+    min_trust_tier: TrustTier
+
+    def __init__(
+        self: TestSpec,
+        namespace_name: str,
+        name: str,
+        min_args: int,
+        max_args: int,
+        input_types: str,
+        is_pure: bool,
+        is_deterministic: bool,
+        allowed_contexts: str,
+        needs_locale: bool,
+        cost_class: CostClass,
+        min_trust_tier: TrustTier
+    ) -> None:
+        self.namespace_name = namespace_name
+        self.name = name
+        self.min_args = min_args
+        self.max_args = max_args
+        self.input_types = input_types
+        self.is_pure = is_pure
+        self.is_deterministic = is_deterministic
+        self.allowed_contexts = allowed_contexts
+        self.needs_locale = needs_locale
+        self.cost_class = cost_class
+        self.min_trust_tier = min_trust_tier
+
+class FunctionSpec:
+    namespace_name: str
+    name: str
+    min_args: int
+    max_args: int
+    input_types: str
+    result_type: str
+    is_pure: bool
+    is_deterministic: bool
+    allowed_contexts: str
+    needs_locale: bool
+    cost_class: CostClass
+    maximum_expansion: int
+    min_trust_tier: TrustTier
+
+    def __init__(
+        self: FunctionSpec,
+        namespace_name: str,
+        name: str,
+        min_args: int,
+        max_args: int,
+        input_types: str,
+        result_type: str,
+        is_pure: bool,
+        is_deterministic: bool,
+        allowed_contexts: str,
+        needs_locale: bool,
+        cost_class: CostClass,
+        maximum_expansion: int,
+        min_trust_tier: TrustTier
+    ) -> None:
+        self.namespace_name = namespace_name
+        self.name = name
+        self.min_args = min_args
+        self.max_args = max_args
+        self.input_types = input_types
+        self.result_type = result_type
+        self.is_pure = is_pure
+        self.is_deterministic = is_deterministic
+        self.allowed_contexts = allowed_contexts
+        self.needs_locale = needs_locale
+        self.cost_class = cost_class
+        self.maximum_expansion = maximum_expansion
+        self.min_trust_tier = min_trust_tier
+
+class HelperContext:
+    locale: str
+    output_mode: OutputMode
+    autoescape: bool
+    undefined_policy: UndefinedPolicy
+    trust_tier: TrustTier
+    tracker: BudgetTracker
+    diagnostics: list[str]
+
+    def __init__(
+        self: HelperContext,
+        locale: str,
+        output_mode: OutputMode,
+        autoescape: bool,
+        undefined_policy: UndefinedPolicy,
+        trust_tier: TrustTier,
+        tracker: BudgetTracker
+    ) -> None:
+        self.locale = locale
+        self.output_mode = output_mode
+        self.autoescape = autoescape
+        self.undefined_policy = undefined_policy
+        self.trust_tier = trust_tier
+        self.tracker = tracker
+        empty_diag: list[str] = []
+        self.diagnostics = empty_diag
+
+    def add_warning(self: HelperContext, msg: str) -> None:
+        ds: list[str] = self.diagnostics
+        if len(ds) < 64:
+            ds.append(msg)
+            self.diagnostics = ds
+
+    def consume_op(self: HelperContext, span: SourceSpan) -> None:
+        self.tracker.consume_op(span)

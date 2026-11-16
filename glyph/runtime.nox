@@ -6,9 +6,11 @@ from glyph.errors import SourceSpan, GlyphTypeError, GlyphUndefinedError, GlyphR
 from glyph.errors import GLYPH_EVAL_TYPE, GLYPH_EVAL_UNDEFINED, GLYPH_EVAL_DIV_ZERO, GLYPH_EVAL_OVERFLOW
 from glyph.errors import GLYPH_RENDER_ERROR, GLYPH_RENDER_CYCLE, GLYPH_SECURITY_POLICY, GLYPH_SECURITY_CONTEXT, GLYPH_LOADER_NOT_FOUND, GLYPH_EXTENSION_ERROR
 from glyph.limits import BudgetTracker
+from glyph.helpers import HelperContext
 from glyph.value import Value, MarkupContext, UndefinedPolicy, is_truthy, stringify, validate_float
 from glyph.value import map_get, list_get, is_forbidden_key, checked_add, checked_sub
 from glyph.value import checked_mul, checked_floordiv, checked_mod, INT64_MIN
+from glyph.value import check_not_undef, values_equal, values_compare, values_contains
 from glyph.expressions import Expr, ExprKind, UnaryOp, BinaryOp, CallArg, MapEntry
 from glyph.ast import Stmt, StmtKind, IfBranch, MacroParam, TemplateAst
 from glyph.validate import TemplateInfo
@@ -16,9 +18,10 @@ from glyph.options import OutputMode, RenderOptions, TrustTier, min_trust_tier
 from glyph.scope import RenderScope, make_loop_metadata
 from glyph.writer import GlyphWriter, RenderResult
 from glyph.safety import HtmlContextTracker, OutputContext, render_contextual_value
-from glyph.filters import FilterRegistry, FilterArgValue, apply_filter
-from glyph.tests_registry import TestRegistry, apply_test
-from glyph.functions import FunctionRegistry, apply_function
+from glyph.filters_text import FilterArgValue
+from glyph.filters import FilterRegistry, apply_filter_with_context
+from glyph.tests_registry import TestRegistry, apply_test_with_context
+from glyph.functions import FunctionRegistry, apply_function_with_context
 from glyph.loader import validate_logical_template_name
 from glyph.inheritance import BlockVersion, TemplateLayer, InheritanceChain, build_inheritance_chain
 from glyph.macros import MacroDef, MacroNamespace, MacroTable, MacroCallArg, BoundMacroArg, CallerClosure
@@ -45,155 +48,8 @@ class Template:
         self.fingerprint = fingerprint
         self.trust_tier = trust_tier
 
-def _check_not_undef(v: Value, policy: UndefinedPolicy, span: SourceSpan) -> Value:
-    match v:
-        case Value.VUndefined(name):
-            match policy:
-                case UndefinedPolicy.StrictUndefined:
-                    raise GlyphUndefinedError(
-                        GLYPH_EVAL_UNDEFINED,
-                        "undefined variable '" + name + "'",
-                        span,
-                        "define '" + name + "' or use |default"
-                    )
-                case UndefinedPolicy.LenientUndefined:
-                    return Value.VNull
-        case _:
-            return v
-
-def _value_equals(a: Value, b: Value, policy: UndefinedPolicy, span: SourceSpan) -> bool:
-    va: Value = _check_not_undef(a, policy, span)
-    vb: Value = _check_not_undef(b, policy, span)
-    match va:
-        case Value.VNull:
-            match vb:
-                case Value.VNull:
-                    return True
-                case _:
-                    return False
-        case Value.VBool(ba):
-            match vb:
-                case Value.VBool(bb):
-                    return ba == bb
-                case _:
-                    return False
-        case Value.VInt(ia):
-            match vb:
-                case Value.VInt(ib):
-                    return ia == ib
-                case Value.VFloat(fb):
-                    return float(ia) == fb
-                case _:
-                    return False
-        case Value.VFloat(fa):
-            match vb:
-                case Value.VFloat(fb2):
-                    return fa == fb2
-                case Value.VInt(ib2):
-                    return fa == float(ib2)
-                case _:
-                    return False
-        case Value.VStr(sa):
-            match vb:
-                case Value.VStr(sb):
-                    return sa == sb
-                case Value.VTrustedMarkup(cb, _):
-                    return sa == cb
-                case _:
-                    return False
-        case Value.VTrustedMarkup(ca, _):
-            match vb:
-                case Value.VTrustedMarkup(cb2, _):
-                    return ca == cb2
-                case Value.VStr(sb2):
-                    return ca == sb2
-                case _:
-                    return False
-        case Value.VList(la):
-            match vb:
-                case Value.VList(lb):
-                    if len(la) != len(lb):
-                        return False
-                    i: int = 0
-                    while i < len(la):
-                        if not _value_equals(la[i], lb[i], policy, span):
-                            return False
-                        i = i + 1
-                    return True
-                case _:
-                    return False
-        case Value.VMap(ma):
-            match vb:
-                case Value.VMap(mb):
-                    if ma.size() != mb.size():
-                        return False
-                    keys: list[str] = ma.keys_list()
-                    j: int = 0
-                    while j < len(keys):
-                        k: str = keys[j]
-                        if not mb.contains(k):
-                            return False
-                        if not _value_equals(ma.get(k), mb.get(k), policy, span):
-                            return False
-                        j = j + 1
-                    return True
-                case _:
-                    return False
-        case Value.VUndefined(_):
-            return False
-        case Value.VCallable(na):
-            match vb:
-                case Value.VCallable(nb):
-                    return na == nb
-                case _:
-                    return False
-
 def _compare_order(a: Value, b: Value, op: BinaryOp, policy: UndefinedPolicy, span: SourceSpan) -> bool:
-    va: Value = _check_not_undef(a, policy, span)
-    vb: Value = _check_not_undef(b, policy, span)
-    cmp: int = 0
-    match va:
-        case Value.VInt(ia):
-            match vb:
-                case Value.VInt(ib):
-                    if ia < ib:
-                        cmp = -1
-                    elif ia > ib:
-                        cmp = 1
-                case Value.VFloat(fb):
-                    fa: float = float(ia)
-                    if fa < fb:
-                        cmp = -1
-                    elif fa > fb:
-                        cmp = 1
-                case _:
-                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "cannot compare integer with non-number", span, "compare matching types")
-        case Value.VFloat(fa2):
-            match vb:
-                case Value.VFloat(fb2):
-                    if fa2 < fb2:
-                        cmp = -1
-                    elif fa2 > fb2:
-                        cmp = 1
-                case Value.VInt(ib2):
-                    fb3: float = float(ib2)
-                    if fa2 < fb3:
-                        cmp = -1
-                    elif fa2 > fb3:
-                        cmp = 1
-                case _:
-                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "cannot compare float with non-number", span, "compare matching types")
-        case Value.VStr(sa):
-            match vb:
-                case Value.VStr(sb):
-                    if sa < sb:
-                        cmp = -1
-                    elif sa > sb:
-                        cmp = 1
-                case _:
-                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "cannot compare string with non-string", span, "compare matching types")
-        case _:
-            raise GlyphTypeError(GLYPH_EVAL_TYPE, "ordered comparison requires numbers or strings", span, "use == or != for non-orderable values")
+    cmp: int = values_compare(a, b, policy, span)
     match op:
         case BinaryOp.BLt:
             return cmp < 0
@@ -205,32 +61,6 @@ def _compare_order(a: Value, b: Value, op: BinaryOp, policy: UndefinedPolicy, sp
             return cmp >= 0
         case _:
             return False
-
-def _contains_in(needle: Value, haystack: Value, policy: UndefinedPolicy, span: SourceSpan) -> bool:
-    vn: Value = _check_not_undef(needle, policy, span)
-    vh: Value = _check_not_undef(haystack, policy, span)
-    match vh:
-        case Value.VList(items):
-            i: int = 0
-            while i < len(items):
-                if _value_equals(vn, items[i], policy, span):
-                    return True
-                i = i + 1
-            return False
-        case Value.VMap(entries):
-            match vn:
-                case Value.VStr(k):
-                    return entries.contains(k)
-                case _:
-                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "map membership check requires string key", span, "check string key 'in' map")
-        case Value.VStr(s):
-            match vn:
-                case Value.VStr(sub):
-                    return nox.strings.contains(s, sub)
-                case _:
-                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "string membership check requires string needle", span, "check string 'in' string")
-        case _:
-            raise GlyphTypeError(GLYPH_EVAL_TYPE, "'in' expects list, map, or string", span, "pass a collection or string")
 
 def _snapshot_scope_flat(scope: RenderScope) -> OrderedDict[str, Value]:
     out: OrderedDict[str, Value] = OrderedDict[str, Value]()
@@ -269,10 +99,15 @@ def _filters_for_trust(base: FilterRegistry, trust: TrustTier) -> FilterRegistry
             pass
         case _:
             allow_s = False
+    if allow_s == base.allow_safe:
+        return base
     out: FilterRegistry = FilterRegistry(allow_s)
     out.custom_names = base.custom_names
     out.custom_fns = base.custom_fns
+    out.custom_specs = base.custom_specs
     out.generation = base.generation
+    out.active_renders = base.active_renders
+    out.frozen = base.frozen
     return out
 
 def _opts_with_trust(base: RenderOptions, trust: TrustTier) -> RenderOptions:
@@ -358,6 +193,16 @@ class _Evaluator:
         self.has_caller = has_caller
         self.active_caller = active_caller
         self.html_ctx = html_ctx
+
+    def _helper_ctx(self: _Evaluator) -> HelperContext:
+        return HelperContext(
+            self.options.locale,
+            self.options.output_mode,
+            self.options.autoescape,
+            self.options.undefined_policy,
+            self.options.trust_tier,
+            self.tracker
+        )
 
     def eval_expr(self: _Evaluator, expr: Expr) -> Value:
         self.tracker.consume_op(expr.span)
@@ -474,7 +319,7 @@ class _Evaluator:
                     ca: CallArg = args[ai]
                     fargs.append(FilterArgValue(ca.name, self.eval_expr(ca.value)))
                     ai = ai + 1
-                return apply_filter(self.filters, fname, fv, fargs, self.options.undefined_policy, self.tracker, expr.span)
+                return apply_filter_with_context(self.filters, fname, fv, fargs, self._helper_ctx(), expr.span)
             case ExprKind.EIsTest(target, tname, negated, args):
                 tv3: Value = self.eval_expr(target)
                 targs: list[Value] = []
@@ -482,7 +327,7 @@ class _Evaluator:
                 while ti < len(args):
                     targs.append(self.eval_expr(args[ti].value))
                     ti = ti + 1
-                matched: bool = apply_test(self.tests, tname, tv3, targs, self.tracker, expr.span)
+                matched: bool = apply_test_with_context(self.tests, tname, tv3, targs, self._helper_ctx(), expr.span)
                 if negated:
                     return Value.VBool(not matched)
                 return Value.VBool(matched)
@@ -538,7 +383,7 @@ class _Evaluator:
                 raise GlyphTypeError(GLYPH_EVAL_TYPE, "keyword arguments are not supported for '" + fn_name + "'", ca2.span, "pass positional arguments")
             cargs.append(self.eval_expr(ca2.value))
             ci = ci + 1
-        return apply_function(self.functions, fn_name, cargs, self.tracker, span)
+        return apply_function_with_context(self.functions, fn_name, cargs, self._helper_ctx(), span)
 
     def _invoke_macro(
         self: _Evaluator,
@@ -784,9 +629,9 @@ class _Evaluator:
         pol: UndefinedPolicy = self.options.undefined_policy
         match op:
             case BinaryOp.BEq:
-                return Value.VBool(_value_equals(l, r, pol, span))
+                return Value.VBool(values_equal(l, r, pol, span))
             case BinaryOp.BNotEq:
-                return Value.VBool(not _value_equals(l, r, pol, span))
+                return Value.VBool(not values_equal(l, r, pol, span))
             case BinaryOp.BLt:
                 return Value.VBool(_compare_order(l, r, BinaryOp.BLt, pol, span))
             case BinaryOp.BLtEq:
@@ -796,9 +641,9 @@ class _Evaluator:
             case BinaryOp.BGtEq:
                 return Value.VBool(_compare_order(l, r, BinaryOp.BGtEq, pol, span))
             case BinaryOp.BIn:
-                return Value.VBool(_contains_in(l, r, pol, span))
+                return Value.VBool(values_contains(l, r, pol, span))
             case BinaryOp.BNotIn:
-                return Value.VBool(not _contains_in(l, r, pol, span))
+                return Value.VBool(not values_contains(l, r, pol, span))
             case BinaryOp.BAdd:
                 return self._eval_add(l, r, span)
             case BinaryOp.BSub:
@@ -816,8 +661,8 @@ class _Evaluator:
 
     def _eval_add(self: _Evaluator, l: Value, r: Value, span: SourceSpan) -> Value:
         pol: UndefinedPolicy = self.options.undefined_policy
-        vl: Value = _check_not_undef(l, pol, span)
-        vr: Value = _check_not_undef(r, pol, span)
+        vl: Value = check_not_undef(l, pol, span)
+        vr: Value = check_not_undef(r, pol, span)
         match vl:
             case Value.VStr(sa):
                 match vr:
@@ -855,8 +700,8 @@ class _Evaluator:
 
     def _eval_arith_num(self: _Evaluator, l: Value, r: Value, op: BinaryOp, span: SourceSpan) -> Value:
         pol: UndefinedPolicy = self.options.undefined_policy
-        vl: Value = _check_not_undef(l, pol, span)
-        vr: Value = _check_not_undef(r, pol, span)
+        vl: Value = check_not_undef(l, pol, span)
+        vr: Value = check_not_undef(r, pol, span)
         match vl:
             case Value.VInt(ia):
                 match vr:
@@ -1171,7 +1016,7 @@ class _Evaluator:
         span: SourceSpan
     ) -> None:
         loop_base: HtmlContextTracker = self.html_ctx.clone()
-        seq_val: Value = _check_not_undef(self.eval_expr(iterable), self.options.undefined_policy, span)
+        seq_val: Value = check_not_undef(self.eval_expr(iterable), self.options.undefined_policy, span)
         match seq_val:
             case Value.VList(items):
                 if len(targets) != 1:
@@ -1296,7 +1141,7 @@ class _Evaluator:
                         "pass a literal template name string"
                     )
 
-        name_val: Value = _check_not_undef(self.eval_expr(tpl_expr), self.options.undefined_policy, span)
+        name_val: Value = check_not_undef(self.eval_expr(tpl_expr), self.options.undefined_policy, span)
         inc_raw: str = ""
         match name_val:
             case Value.VStr(s):
@@ -1412,7 +1257,7 @@ def _build_chain_layers(
         di = di + 1
     return layers
 
-def execute_template_with_resolver(
+def _execute_unlocked(
     tpl: Template,
     root_vars: OrderedDict[str, Value],
     writer: GlyphWriter,
@@ -1506,6 +1351,47 @@ def execute_template_with_resolver(
         tracker.loop_steps_used,
         True
     )
+
+def execute_template_with_resolver(
+    tpl: Template,
+    root_vars: OrderedDict[str, Value],
+    writer: GlyphWriter,
+    tracker: BudgetTracker,
+    filters: FilterRegistry,
+    tests: TestRegistry,
+    functions: FunctionRegistry,
+    options: RenderOptions,
+    allow_dynamic_include: bool,
+    has_resolver: bool,
+    resolve_fn: (str, BudgetTracker) -> Template
+) -> RenderResult:
+    filters.begin_use()
+    tests.begin_use()
+    functions.begin_use()
+    res: RenderResult = RenderResult("", 0, 0, 0, False)
+    try:
+        res = _execute_unlocked(
+            tpl,
+            root_vars,
+            writer,
+            tracker,
+            filters,
+            tests,
+            functions,
+            options,
+            allow_dynamic_include,
+            has_resolver,
+            resolve_fn
+        )
+    except Exception as err:
+        filters.end_use()
+        tests.end_use()
+        functions.end_use()
+        raise err
+    filters.end_use()
+    tests.end_use()
+    functions.end_use()
+    return res
 
 def execute_template(
     tpl: Template,

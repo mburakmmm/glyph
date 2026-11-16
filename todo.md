@@ -243,20 +243,20 @@ Her PoC derlenip `noxc check` + `noxc test` ile doğrulanmış ve sonucu `docs/c
 **Amaç:** `AGENTS.md` §13 kapsamındaki onaylı tüm built-in filtre, test ve helper sözleşmelerini tam tip/bütçe/güvenlik denetimiyle sunmak.
 
 ### 7.1. Registry Sözleşmesi (`glyph/filters.nox`, `tests_registry.nox`, `functions.nox`)
-- [ ] `FilterSpec`, `TestSpec`, `FunctionSpec`: `namespace/name`, `arity/range`, beklenen/dönen `Value` tipleri, `pure/deterministic`, `allowed_contexts`, `needs_locale`, `cost_class`, `maximum_expansion`, `policy_requirement`.
-- [ ] `HelperContext` izolasyonu (tam `RenderContext` yerine locale + immutable config + shared budget + diagnostics).
-- [ ] Core güvenlik helper'larının override edilmesini yasaklama; render başladıktan sonra registry mutasyon yasağı; `registry_generation` artışı.
+- [x] `FilterSpec`, `TestSpec`, `FunctionSpec`: `namespace/name`, `arity/range`, beklenen/dönen `Value` tipleri, `pure/deterministic`, `allowed_contexts`, `needs_locale`, `cost_class`, `maximum_expansion`, `policy_requirement` (`glyph/helpers.nox` + `all_specs()`).
+- [x] `HelperContext` izolasyonu (tam `RenderContext` yerine locale + immutable config + shared budget + diagnostics).
+- [x] Core güvenlik helper'larının override edilmesini yasaklama; render başladıktan sonra registry mutasyon yasağı (`active_renders > 0` & `.freeze()`); `registry_generation` artışı; namespaced `| ns.filter` ve `is ns.test` parser desteği.
 
 ### 7.2. Onaylı Built-in Filtreler ve Testler
-- [ ] **Strings:** `upper`, `lower`, `capitalize`, `title`, `trim`, `replace`, `truncate`, `wordcount`, `indent`, `center`, `pad`, `striptags` (sanitizer değil uyarısı ile), `normalize_unicode`, `urlencode`, `slugify`.
-- [ ] **Escaping:** `escape`, `forceescape`, `tojson`, `urlencode`, `xml_escape` (ve policy kontrollü `safe`).
-- [ ] **Collections:** `length`, `first`, `last`, `reverse`, `sort` (heterojen türlerde açık comparator/hata), `unique`, `join`, `map(attribute=...)`, `select`, `reject`, `batch`, `slice`, `sum`, `min`, `max`, `groupby`, `dictsort`.
-- [ ] **Numbers / Dates / Markdown:** `abs`, `round`, `int`, `float`, `number`, `currency`, `percent`, `filesize`, `default`, `string`; `date`, `datetime`, `relative_time` (explicit reference time); `md_escape`.
-- [ ] **Tests (`is`):** `defined`, `undefined`, `none`, `boolean`, `number`, `integer`, `float`, `string`, `sequence`, `mapping`, `iterable`, `empty`, `equalto`, `odd`, `even`, `divisibleby`, `in`, `escaped`, `safe_for`.
+- [x] **Strings:** `upper`, `lower`, `capitalize`, `title`, `trim`, `replace`, `truncate`, `wordcount`, `indent`, `center`, `pad`, `striptags` (sanitizer değil uyarısı + `VStr` ile), `normalize_unicode`, `urlencode`, `slugify`.
+- [x] **Escaping:** `escape`, `forceescape`, `tojson`, `urlencode`, `xml_escape` (ve policy kontrollü `safe`).
+- [x] **Collections:** `length`, `first`, `last`, `reverse`, `sort` (heterojen türlerde açık comparator/hata), `unique`, `join`, `map(attribute=...)`, `select`, `reject`, `batch`, `slice`, `sum`, `min`, `max`, `groupby`, `dictsort`.
+- [x] **Numbers / Dates / Markdown:** `abs`, `round`, `int`, `float`, `number`, `currency`, `percent`, `filesize`, `default`, `string`; `date`, `datetime`, `relative_time` (explicit `ref` timestamp); `md_escape`.
+- [x] **Tests (`is`):** `defined`, `undefined`, `none`, `boolean`, `true`, `false`, `number`, `integer`, `float`, `string`, `sequence`, `mapping`, `iterable`, `empty`, `equalto`, `odd`, `even`, `divisibleby`, `in`, `escaped`, `safe_for`.
 
 ### 7.3. Faz 7 Testleri ve Dokümantasyon (`v0.5.0`)
-- [ ] `docs/filters.md`: Tüm built-in filtre/test imzaları, maliyet sınıfları ve güvenlik sınırları.
-- [ ] Her filtre ve test için pozitif, tip hatası, boş/sınır değer, expansion/budget aşımı ve locale testi.
+- [x] `docs/filters.md`: Tüm built-in filtre/test imzaları, maliyet sınıfları ve güvenlik sınırları.
+- [x] Her filtre ve test için pozitif, tip hatası, boş/sınır değer, expansion/budget aşımı ve locale testi (`tests/filters/filters_tests_registry_test.nox`).
 
 ---
 
