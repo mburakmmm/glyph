@@ -50,7 +50,7 @@ Single target or 2-target key/value unpacking:
 - `set` binds only in the current/local lexical scope; mutating parent or global registry state is forbidden.
 - Target must be a plain identifier (never `obj.field` or `arr[0]`).
 
-## 3. Composition Statements (Parsed in Phase 2, Executed in Phases 4–5)
+## 3. Composition Statements (Supported in `v0.3.0`)
 
 - `{% include "partial.html" %}` (`with context` / `without context`, `ignore missing`)
 - `{% extends "base.html" %}` (must appear as the first non-whitespace, non-comment statement at top level)

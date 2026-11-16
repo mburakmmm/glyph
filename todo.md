@@ -2,7 +2,7 @@
 
 > **Kaynak Sözleşme:** [AGENTS.md](AGENTS.md)  
 > **Hedef Dil & Doğrulanan Araç Zinciri:** `noxc 2.1.186` (`C:\Users\Administrator\.nox-lang\bin\noxc.exe`)  
-> **Durum:** Faz 4 (`v0.2.0`) tamamlandı — Faz 5 (`v0.3.0`) sıradaki iş.  
+> **Durum:** Faz 5 (`v0.3.0`) tamamlandı — Faz 6 (`v0.4.0`) sıradaki iş.  
 > **Kural:** Hiçbir madde, gerçek `.nox` kodu `noxc check` ve `noxc test` ile çalıştırılıp kanıtlanmadan `[x]` işaretlenmez.
 
 ---
@@ -26,7 +26,7 @@
 | Faz 2 | `v0.0.3-parser-ast` | Pratt expression parser, AST, statement nesting, static validation | `[x]` Tamamlandı |
 | Faz 3 | `v0.1.0` **(MVP)** | AST interpreter, Writer, default HTML escape, limits, `MemoryLoader`, Slice #1 | `[x]` Tamamlandı |
 | Faz 4 | `v0.2.0` | `FilesystemLoader` sandbox, `include`, `ParseCache`/`CompileCache`, dependency graph | `[x]` Tamamlandı |
-| Faz 5 | `v0.3.0` | `extends`, `block`, `super()`, `macro`, `import`, `call/caller`, Slice #2 | `[ ]` Başlanmadı |
+| Faz 5 | `v0.3.0` | `extends`, `block`, `super()`, `macro`, `import`, `call/caller`, Slice #2 | `[x]` Tamamlandı |
 | Faz 6 | `v0.4.0` | Contextual HTML escaping, URL/JS/CSS engeli, `TrustedMarkup`, security corpus | `[ ]` Başlanmadı |
 | Faz 7 | `v0.5.0` | Tam Filter/Test/Function registry kataloğu, cost metering, `HelperContext` | `[ ]` Başlanmadı |
 | Faz 8 | `v0.6.0` | i18n/locale/plural, çıkış profilleri (HTML/Text/XML/MD/JSON/Email), Streaming Writer | `[ ]` Başlanmadı |
@@ -185,22 +185,22 @@ Her PoC derlenip `noxc check` + `noxc test` ile doğrulanmış ve sonucu `docs/c
 **Amaç:** Şablon kalıtımı (`extends`/`block`/`super`) ve yeniden kullanılabilir, kapsam-izoleli makroları üretmek.
 
 ### 5.1. Karar Kaydı
-- [ ] `docs/adr/0006-macro-scope-caller-and-includes.md` (**ADR-0006**): Macro closure yakalama kuralları, `call/caller` reentrancy modeli ve `include` varsayılan context politikası.
+- [x] `docs/adr/0006-macro-scope-caller-and-includes.md` (**ADR-0006**): Macro closure yakalama kuralları, `call/caller` reentrancy modeli ve `include` varsayılan context politikası.
 
 ### 5.2. Kalıtım (`glyph/inheritance.nox`)
-- [ ] `{% extends "base.html" %}` yalnızca top-level konumda; cross-root inheritance engeli; security policy devralımı.
-- [ ] `{% block name %}...{% endblock %}` override çözümleme zinciri; `{{ super() }}` ile üst blok render'ı (parent yoksa deterministik hata).
-- [ ] Duplicate block, ambiguous override, missing parent/block ve inheritance cycle (`A -> B -> A`) hataları.
+- [x] `{% extends "base.html" %}` yalnızca top-level konumda; cross-root inheritance engeli; security policy devralımı (`min_trust_tier`).
+- [x] `{% block name %}...{% endblock %}` override çözümleme zinciri; `{{ super() }}` ile üst blok render'ı (parent yoksa deterministik hata).
+- [x] Duplicate block, missing parent/block ve inheritance cycle (`A -> B -> A`) hataları.
 
 ### 5.3. Makrolar ve İçe Aktarma (`glyph/macros.nox`)
-- [ ] `{% macro name(a, b=default) %}...{% endmacro %}`: Positional, keyword ve default argümanlar; arity/duplicate/unknown keyword hata kontrolü.
-- [ ] `{% import "helpers.html" as h %}` ve `{% from "helpers.html" import x %}`: Immutable namespace, explicit export policy, circular import tespiti.
-- [ ] `{% call macro(...) %}...{% endcall %}` ve `caller()` callback desteği (bounded depth).
-- [ ] Güvenlik kuralı: Macro çıktı fragmanında güven etiketi korunur; güvenilmeyen parametre otomatik `TrustedMarkup` olmaz.
+- [x] `{% macro name(a, b=default) %}...{% endmacro %}`: Positional, keyword ve default argümanlar; arity/duplicate/unknown keyword hata kontrolü.
+- [x] `{% import "helpers.html" as h %}` ve `{% from "helpers.html" import x %}`: Immutable namespace, `_macro` gizliliği, circular import tespiti (`parser.nox` yalnız import alias'larında `h.macro()` izni).
+- [x] `{% call macro(...) %}...{% endcall %}` ve `caller()` callback desteği (bounded depth).
+- [x] Güvenlik kuralı: Macro çıktı fragmanında güven etiketi korunur; `Restricted`/untrusted makro sonucu otomatik `TrustedMarkup` olmaz.
 
 ### 5.4. Faz 5 Testleri ve Kabul (`v0.3.0`)
-- [ ] **Vertical Slice #2:** `examples/blog_layout/` (`base.html` + `extends` + `block` + `super()` + `include` + `macro` + cache invalidation) `noxc run` ile doğrulanır.
-- [ ] `tests/composition/`: Çok katmanlı kalıtım, cycle, super() hataları, macro recursive budget aşımı ve kapsam sızıntısı testleri.
+- [x] **Vertical Slice #2:** `examples/blog_layout/main.nox` (`base.html` + `extends` + `block` + `super()` + `include` + `macro` + `import` + `call/caller`) `noxc run` ile doğrulandı.
+- [x] `tests/composition/composition_test.nox`: Çok katmanlı kalıtım, cycle, `super()` hataları, macro recursive budget aşımı, kapsam izolasyonu ve `extends`/`import` cache invalidation testleri.
 
 ---
 

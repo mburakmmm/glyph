@@ -1,0 +1,156 @@
+# Phase 5 Composition Tests: Inheritance, Blocks, super(), Macros, Imports, call/caller, and Cache Invalidation
+import nox.test
+import glyph.api
+from glyph.api import MemoryLoader, Environment, RenderOptions, Template, Context
+from glyph.api import TrustTier, OutputMode, UndefinedPolicy, ResourceBudget
+from glyph.api import GlyphRenderError, GlyphTypeError, GlyphSecurityError, GlyphUndefinedError, GlyphSyntaxError
+from glyph.api import GlyphLimitError, GlyphLoadError, GlyphExtensionError
+from glyph.errors import GLYPH_RENDER_ERROR, GLYPH_RENDER_CYCLE, GLYPH_EVAL_TYPE, GLYPH_EVAL_UNDEFINED
+from glyph.errors import GLYPH_SECURITY_POLICY, GLYPH_LIMIT_MACRO_DEPTH, GLYPH_LOADER_NOT_FOUND, GLYPH_SYNTAX_INVALID_NESTING
+
+def test_multilevel_inheritance_and_super() -> None:
+    mem: MemoryLoader = MemoryLoader()
+    mem.put("base.html", "<html>{% block body %}Base{% endblock %}</html>")
+    mem.put("mid.html", "{% extends 'base.html' %}{% block body %}[{{ super() }}|Mid]{% endblock %}")
+    mem.put("leaf.html", "{% extends 'mid.html' %}{% block body %}({{ super() }}|{{ name }}){% endblock %}")
+
+    env: Environment = glyph.api.default_environment(mem)
+    ctx: Context = glyph.api.context_from_json('{"name":"<Ada>"}')
+    out: str = glyph.api.render(glyph.api.get_template("leaf.html", env), ctx, env)
+    nox.test.assert_eq_str(out, "<html>([Base|Mid]|&lt;Ada&gt;)</html>", "3-level super() inheritance")
+
+def test_inheritance_errors_and_cycles() -> None:
+    mem: MemoryLoader = MemoryLoader()
+    mem.put("cyc1.html", "{% extends 'cyc2.html' %}")
+    mem.put("cyc2.html", "{% extends 'cyc1.html' %}")
+    mem.put("orphan_base.html", "{% block a %}X{% endblock %}")
+    mem.put("bad_super.html", "{% extends 'orphan_base.html' %}{% block a %}{{ super() }}{% endblock %}")
+
+    env: Environment = glyph.api.default_environment(mem)
+    cyc_code: str = ""
+    try:
+        _r: str = glyph.api.render(glyph.api.get_template("cyc1.html", env), glyph.api.empty_context(), env)
+    except GlyphRenderError as re:
+        cyc_code = re.code
+    nox.test.assert_eq_str(cyc_code, GLYPH_RENDER_CYCLE, "cyclic extends rejected")
+
+    # Static check: super() in root template without extends fails with GlyphSyntaxError
+    mem.put("base_bad_super.html", "{% block a %}{{ super() }}{% endblock %}")
+    syn_code: str = ""
+    try:
+        _b: Template = glyph.api.get_template("base_bad_super.html", env)
+    except GlyphSyntaxError as se_sup:
+        syn_code = se_sup.code
+    nox.test.assert_eq_str(syn_code, GLYPH_SYNTAX_INVALID_NESTING, "super() in non-extending template rejected statically")
+
+    # Runtime check: super() in child block with no parent block definition fails with GlyphRenderError
+    mem.put("base_only_x.html", "{% block x %}base{% endblock %}")
+    mem.put("child_missing_parent_blk.html", "{% extends 'base_only_x.html' %}{% block x %}{% block inner %}{{ super() }}{% endblock %}{% endblock %}")
+    sup_code: str = ""
+    try:
+        _s: str = glyph.api.render(glyph.api.get_template("child_missing_parent_blk.html", env), glyph.api.empty_context(), env)
+    except GlyphRenderError as re2:
+        sup_code = re2.code
+    nox.test.assert_eq_str(sup_code, GLYPH_RENDER_ERROR, "super() without parent block version rejected at runtime")
+
+def test_macros_imports_and_call_caller() -> None:
+    mem: MemoryLoader = MemoryLoader()
+    mem.put(
+        "macros.html",
+        "{% macro _priv(v) %}<i>{{ v }}</i>{% endmacro %}{% macro wrap(v) %}<b>{{ _priv(v) }}</b>{% endmacro %}{% macro badge(txt, kind='info') %}[{{ kind }}:{{ txt }}]{% endmacro %}{% macro list_box(items) %}<ul>{% for it in items %}<li>{{ caller(it) }}</li>{% endfor %}</ul>{% endmacro %}"
+    )
+    mem.put(
+        "page.html",
+        "{% import 'macros.html' as ui %}{% from 'macros.html' import badge %}{{ ui.wrap('<X>') }}|{{ badge(kind='ok', txt='<Y>') }}|{% call(x) ui.list_box(items) %}{{ x | upper }}{% endcall %}"
+    )
+
+    env: Environment = glyph.api.default_environment(mem)
+    ctx: Context = glyph.api.context_from_json('{"items":["a","<b&c>"]}')
+    out: str = glyph.api.render(glyph.api.get_template("page.html", env), ctx, env)
+    nox.test.assert_eq_str(
+        out,
+        "<b><i>&lt;X&gt;</i></b>|[ok:&lt;Y&gt;]|<ul><li>A</li><li>&lt;B&amp;C&gt;</li></ul>",
+        "macros, imports, sibling private helper, keyword args, and call(x)/caller(it)"
+    )
+
+    # Private _macro cannot be imported or called via namespace
+    mem.put("bad_imp.html", "{% from 'macros.html' import _priv %}{{ _priv('a') }}")
+    priv_code: str = ""
+    try:
+        _p: str = glyph.api.render(glyph.api.get_template("bad_imp.html", env), glyph.api.empty_context(), env)
+    except GlyphSecurityError as se:
+        priv_code = se.code
+    nox.test.assert_eq_str(priv_code, GLYPH_SECURITY_POLICY, "private _macro from-import denied")
+
+    mem.put("bad_ns.html", "{% import 'macros.html' as ui %}{{ ui._priv('a') }}")
+    ns_priv_code: str = ""
+    try:
+        _p2: str = glyph.api.render(glyph.api.get_template("bad_ns.html", env), glyph.api.empty_context(), env)
+    except GlyphSecurityError as se2:
+        ns_priv_code = se2.code
+    nox.test.assert_eq_str(ns_priv_code, GLYPH_SECURITY_POLICY, "private _macro namespace call denied")
+
+    # Non-imported member method call is STILL rejected at parse time!
+    meth_code: str = ""
+    try:
+        _t: Template = glyph.api.compile_string("{{ user.save() }}", "meth.html", env)
+    except GlyphSecurityError as se3:
+        meth_code = se3.code
+    nox.test.assert_eq_str(meth_code, GLYPH_SECURITY_POLICY, "non-import method call still rejected")
+
+def test_macro_scope_arity_recursion_and_trust() -> None:
+    mem: MemoryLoader = MemoryLoader()
+    # Lexical scope isolation: caller's local `secret` is NOT visible inside macro!
+    mem.put("lex.html", "{% macro show() %}{{ secret }}{% endmacro %}{% set secret = 'TOP_SECRET' %}{{ show() }}")
+    env: Environment = glyph.api.default_environment(mem)
+    undef_hit: bool = False
+    try:
+        _u: str = glyph.api.render(glyph.api.get_template("lex.html", env), glyph.api.empty_context(), env)
+    except GlyphUndefinedError as ue:
+        undef_hit = (ue.code == GLYPH_EVAL_UNDEFINED)
+    nox.test.assert_true(undef_hit, "macro does not capture caller dynamic locals")
+
+    # Arity / unknown kwarg error
+    mem.put("kw.html", "{% macro m(a) %}{{ a }}{% endmacro %}{{ m(unknown=1) }}")
+    kw_hit: bool = False
+    try:
+        _k: str = glyph.api.render(glyph.api.get_template("kw.html", env), glyph.api.empty_context(), env)
+    except GlyphTypeError as te:
+        kw_hit = (te.code == GLYPH_EVAL_TYPE)
+    nox.test.assert_true(kw_hit, "unknown macro keyword rejected")
+
+    # Recursive macro depth limit
+    mem.put("rec.html", "{% macro down(n) %}{% if n > 0 %}{{ n }}{{ down(n - 1) }}{% endif %}{% endmacro %}{{ down(20) }}")
+    shallow: ResourceBudget = ResourceBudget(4096, 1000, 256, 1000, 8, 4, 16, 100, 4096, 10000)
+    shallow_opts: RenderOptions = RenderOptions(OutputMode.Html, True, UndefinedPolicy.StrictUndefined, TrustTier.Trusted, shallow, "en")
+    rec_code: str = ""
+    try:
+        _r: str = glyph.api.render_with_options(glyph.api.get_template("rec.html", env), glyph.api.empty_context(), shallow_opts, env)
+    except GlyphLimitError as le:
+        rec_code = le.code
+    nox.test.assert_eq_str(rec_code, GLYPH_LIMIT_MACRO_DEPTH, "recursive macro depth budget enforced")
+
+    # Restricted macro template cannot emit unescaped HTML into Trusted caller
+    mem.put_with_trust("untrusted_mac.html", "{% macro html_frag() %}<b>hi</b>{% endmacro %}", TrustTier.Restricted)
+    mem.put("trusted_caller.html", "{% from 'untrusted_mac.html' import html_frag %}{{ html_frag() }}")
+    out_tr: str = glyph.api.render(glyph.api.get_template("trusted_caller.html", env), glyph.api.empty_context(), env)
+    nox.test.assert_eq_str(out_tr, "&lt;b&gt;hi&lt;/b&gt;", "Restricted macro output is escaped in caller")
+
+def test_extends_and_import_cache_invalidation() -> None:
+    mem: MemoryLoader = MemoryLoader()
+    mem.put("b.html", "B1:{% block c %}{% endblock %}")
+    mem.put("m.html", "{% macro tag() %}M1{% endmacro %}")
+    mem.put("c.html", "{% extends 'b.html' %}{% from 'm.html' import tag %}{% block c %}{{ tag() }}{% endblock %}")
+    env: Environment = glyph.api.default_environment(mem)
+
+    nox.test.assert_eq_str(glyph.api.render(glyph.api.get_template("c.html", env), glyph.api.empty_context(), env), "B1:M1", "initial layout")
+    mem.put("b.html", "B2:{% block c %}{% endblock %}")
+    nox.test.assert_eq_str(glyph.api.render(glyph.api.get_template("c.html", env), glyph.api.empty_context(), env), "B2:M1", "base update invalidates child")
+    mem.put("m.html", "{% macro tag() %}M2{% endmacro %}")
+    nox.test.assert_eq_str(glyph.api.render(glyph.api.get_template("c.html", env), glyph.api.empty_context(), env), "B2:M2", "macro import update invalidates child")
+
+test_multilevel_inheritance_and_super()
+test_inheritance_errors_and_cycles()
+test_macros_imports_and_call_caller()
+test_macro_scope_arity_recursion_and_trust()
+test_extends_and_import_cache_invalidation()

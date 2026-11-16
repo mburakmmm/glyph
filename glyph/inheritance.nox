@@ -1,0 +1,111 @@
+# Template inheritance chain and block override resolution for Glyph.
+# Enforces AGENTS.md §9.1 and ADR-0006. Pure NOX, freestanding-safe.
+from nox.collections import OrderedDict
+from glyph.errors import SourceSpan, GlyphRenderError, GLYPH_RENDER_ERROR
+from glyph.ast import Stmt, StmtKind, TemplateAst
+from glyph.options import TrustTier, min_trust_tier
+
+class BlockVersion:
+    owner_name: str
+    level: int
+    body: list[Stmt]
+    trust_tier: TrustTier
+    span: SourceSpan
+
+    def __init__(
+        self: BlockVersion,
+        owner_name: str,
+        level: int,
+        body: list[Stmt],
+        trust_tier: TrustTier,
+        span: SourceSpan
+    ) -> None:
+        self.owner_name = owner_name
+        self.level = level
+        self.body = body
+        self.trust_tier = trust_tier
+        self.span = span
+
+class TemplateLayer:
+    logical_name: str
+    ast: TemplateAst
+    trust_tier: TrustTier
+
+    def __init__(self: TemplateLayer, logical_name: str, ast: TemplateAst, trust_tier: TrustTier) -> None:
+        self.logical_name = logical_name
+        self.ast = ast
+        self.trust_tier = trust_tier
+
+# Stores block overrides ordered from most-derived child (index 0) up to base root (last).
+class InheritanceChain:
+    layers_child_to_root: list[TemplateLayer]
+    blocks: OrderedDict[str, list[BlockVersion]]
+    effective_trust: TrustTier
+
+    def __init__(
+        self: InheritanceChain,
+        layers_child_to_root: list[TemplateLayer],
+        blocks: OrderedDict[str, list[BlockVersion]],
+        effective_trust: TrustTier
+    ) -> None:
+        self.layers_child_to_root = layers_child_to_root
+        self.blocks = blocks
+        self.effective_trust = effective_trust
+
+    def has_block(self: InheritanceChain, name: str) -> bool:
+        return self.blocks.contains(name)
+
+    def get_block_at(self: InheritanceChain, name: str, idx: int, span: SourceSpan) -> BlockVersion:
+        if not self.blocks.contains(name):
+            raise GlyphRenderError(
+                GLYPH_RENDER_ERROR,
+                "block '" + name + "' is not defined in inheritance chain",
+                span,
+                "define {% block " + name + " %} in parent or child template"
+            )
+        versions: list[BlockVersion] = self.blocks.get(name)
+        if idx < 0 or idx >= len(versions):
+            raise GlyphRenderError(
+                GLYPH_RENDER_ERROR,
+                "super() has no parent block for '" + name + "'",
+                span,
+                "only call super() when a parent template defines the block"
+            )
+        return versions[idx]
+
+def _collect_blocks_in_stmts(
+    stmts: list[Stmt],
+    owner_name: str,
+    level: int,
+    trust: TrustTier,
+    block_map: OrderedDict[str, list[BlockVersion]]
+) -> None:
+    i: int = 0
+    while i < len(stmts):
+        st: Stmt = stmts[i]
+        match st.kind:
+            case StmtKind.SBlock(bname, body):
+                ver: BlockVersion = BlockVersion(owner_name, level, body, trust, st.span)
+                if block_map.contains(bname):
+                    existing: list[BlockVersion] = block_map.get(bname)
+                    existing.append(ver)
+                    block_map.set(bname, existing)
+                else:
+                    fresh: list[BlockVersion] = [ver]
+                    block_map.set(bname, fresh)
+                # Nested blocks inside blocks are also indexed
+                _collect_blocks_in_stmts(body, owner_name, level, trust, block_map)
+            case _:
+                pass
+        i = i + 1
+
+def build_inheritance_chain(layers_child_to_root: list[TemplateLayer]) -> InheritanceChain:
+    block_map: OrderedDict[str, list[BlockVersion]] = OrderedDict[str, list[BlockVersion]]()
+    eff_trust: TrustTier = TrustTier.Trusted
+    i: int = 0
+    while i < len(layers_child_to_root):
+        layer: TemplateLayer = layers_child_to_root[i]
+        eff_trust = min_trust_tier(eff_trust, layer.trust_tier)
+        _collect_blocks_in_stmts(layer.ast.body, layer.logical_name, i, layer.trust_tier, block_map)
+        i = i + 1
+    return InheritanceChain(layers_child_to_root, block_map, eff_trust)

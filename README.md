@@ -14,7 +14,7 @@
 
 ---
 
-> **Project Status:** **Phase 4 (`v0.2.0`) Complete** — Confined `FilesystemLoader`, `ChoiceLoader`/`PrefixLoader`, `{% include %}` with cycle/depth/trust guards, and policy-isolated `ParseCache`/`CompileCache` verified (`noxc test`: 9/9 suites passing on LLVM & QBE). Next up: Phase 5 (`v0.3.0` Inheritance, Blocks & Macros — see [todo.md](todo.md) and [docs/roadmap.md](docs/roadmap.md)).
+> **Project Status:** **Phase 5 (`v0.3.0`) Complete** — Full composition (`extends`, `block`, `super()`, `macro`, `import`, `call/caller`) and Vertical Slice #2 verified (`noxc test`: 10/10 suites passing on LLVM & QBE). Next up: Phase 6 (`v0.4.0` Contextual Escaping & Security Hardening — see [todo.md](todo.md) and [docs/roadmap.md](docs/roadmap.md)).
 
 ---
 
@@ -72,8 +72,9 @@ noxc check --profile freestanding glyph/api.nox
 # Run all *_test.nox suites
 noxc test
 
-# Run the Phase 3 MVP example (Vertical Slice #1)
+# Run the Phase 3 & 5 examples (Vertical Slices #1 & #2)
 noxc run examples/hello/main.nox
+noxc run examples/blog_layout/main.nox
 
 # Run the Phase 0 standalone consumer verification
 noxc run examples/audit_consumer/main.nox
@@ -93,7 +94,7 @@ noxc sbom . -o glyph.sbom.json
 | **Phase 2** | `v0.0.3-parser-ast` | Pratt expression parser, AST, `if`/`for`/`set`, static validation | Done |
 | **Phase 3** | `v0.1.0` **(MVP)** | Interpreter, chunked `Writer`, HTML escape, MVP filters, `MemoryLoader` | Done |
 | **Phase 4** | `v0.2.0` | `FilesystemLoader` sandbox, `include`, `ParseCache`/`CompileCache` | Done |
-| **Phase 5** | `v0.3.0` | `extends`, `block`, `super()`, `macro`, `import`, `call/caller` | Planned |
+| **Phase 5** | `v0.3.0` | `extends`, `block`, `super()`, `macro`, `import`, `call/caller` | Done |
 | **Phase 6** | `v0.4.0` | Contextual escaping, URL/JS/CSS denial, `TrustedMarkup`, XSS corpus | Planned |
 | **Phase 7** | `v0.5.0` | Full built-in filter/test registry, `HelperContext`, cost metering | Planned |
 | **Phase 8** | `v0.6.0` | i18n/locale/plural, HTML/Text/XML/MD/JSON/Email modes, Streaming `Writer` | Planned |

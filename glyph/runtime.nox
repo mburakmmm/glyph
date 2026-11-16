@@ -1,25 +1,28 @@
-# AST interpreter / runtime engine for Glyph (Phase 3 MVP).
-# Enforces AGENTS.md §2, §5.2-5.3, §7.2, §8.3, §10.3: deterministic, bounded, fail-closed.
+# AST interpreter / runtime engine for Glyph (Phase 5: Core + Include + Inheritance + Macros).
+# Enforces AGENTS.md §2, §5.2-5.3, §7.2, §8.3, §9.1-9.3, §10.3 and ADR-0006.
 import nox.strings
 from nox.collections import OrderedDict
-from glyph.errors import SourceSpan, GlyphTypeError, GlyphUndefinedError, GlyphRenderError, GlyphSecurityError, GlyphLoadError
+from glyph.errors import SourceSpan, GlyphTypeError, GlyphUndefinedError, GlyphRenderError, GlyphSecurityError, GlyphLoadError, GlyphExtensionError
 from glyph.errors import GLYPH_EVAL_TYPE, GLYPH_EVAL_UNDEFINED, GLYPH_EVAL_DIV_ZERO, GLYPH_EVAL_OVERFLOW
-from glyph.errors import GLYPH_RENDER_ERROR, GLYPH_RENDER_CYCLE, GLYPH_SECURITY_POLICY, GLYPH_LOADER_NOT_FOUND
+from glyph.errors import GLYPH_RENDER_ERROR, GLYPH_RENDER_CYCLE, GLYPH_SECURITY_POLICY, GLYPH_LOADER_NOT_FOUND, GLYPH_EXTENSION_ERROR
 from glyph.limits import BudgetTracker
-from glyph.value import Value, UndefinedPolicy, is_truthy, stringify, validate_float
+from glyph.value import Value, MarkupContext, UndefinedPolicy, is_truthy, stringify, validate_float
 from glyph.value import map_get, list_get, is_forbidden_key, checked_add, checked_sub
 from glyph.value import checked_mul, checked_floordiv, checked_mod, INT64_MIN
 from glyph.expressions import Expr, ExprKind, UnaryOp, BinaryOp, CallArg, MapEntry
-from glyph.ast import Stmt, StmtKind, IfBranch, TemplateAst
+from glyph.ast import Stmt, StmtKind, IfBranch, MacroParam, TemplateAst
 from glyph.validate import TemplateInfo
-from glyph.options import RenderOptions, TrustTier, min_trust_tier
-from glyph.loader import validate_logical_template_name
+from glyph.options import OutputMode, RenderOptions, TrustTier, min_trust_tier
 from glyph.scope import RenderScope, make_loop_metadata
 from glyph.writer import GlyphWriter, RenderResult
 from glyph.safety import render_value_for_mode
 from glyph.filters import FilterRegistry, FilterArgValue, apply_filter
 from glyph.tests_registry import TestRegistry, apply_test
 from glyph.functions import FunctionRegistry, apply_function
+from glyph.loader import validate_logical_template_name
+from glyph.inheritance import BlockVersion, TemplateLayer, InheritanceChain, build_inheritance_chain
+from glyph.macros import MacroDef, MacroNamespace, MacroTable, MacroCallArg, BoundMacroArg, CallerClosure
+from glyph.macros import is_private_macro_name, bind_macro_arguments
 
 class Template:
     logical_name: str
@@ -229,6 +232,70 @@ def _contains_in(needle: Value, haystack: Value, policy: UndefinedPolicy, span: 
         case _:
             raise GlyphTypeError(GLYPH_EVAL_TYPE, "'in' expects list, map, or string", span, "pass a collection or string")
 
+def _snapshot_scope_flat(scope: RenderScope) -> OrderedDict[str, Value]:
+    out: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    fi: int = 0
+    while fi < len(scope.frames):
+        fr: OrderedDict[str, Value] = scope.frames[fi]
+        keys: list[str] = fr.keys_list()
+        ki: int = 0
+        while ki < len(keys):
+            k: str = keys[ki]
+            out.set(k, fr.get(k))
+            ki = ki + 1
+        fi = fi + 1
+    return out
+
+def _snapshot_frames(scope: RenderScope) -> list[OrderedDict[str, Value]]:
+    out: list[OrderedDict[str, Value]] = []
+    fi: int = 0
+    while fi < len(scope.frames):
+        fr: OrderedDict[str, Value] = scope.frames[fi]
+        cp: OrderedDict[str, Value] = OrderedDict[str, Value]()
+        keys: list[str] = fr.keys_list()
+        ki: int = 0
+        while ki < len(keys):
+            k: str = keys[ki]
+            cp.set(k, fr.get(k))
+            ki = ki + 1
+        out.append(cp)
+        fi = fi + 1
+    return out
+
+def _filters_for_trust(base: FilterRegistry, trust: TrustTier) -> FilterRegistry:
+    allow_s: bool = base.allow_safe
+    match trust:
+        case TrustTier.Trusted:
+            pass
+        case _:
+            allow_s = False
+    out: FilterRegistry = FilterRegistry(allow_s)
+    out.custom_names = base.custom_names
+    out.custom_fns = base.custom_fns
+    out.generation = base.generation
+    return out
+
+def _opts_with_trust(base: RenderOptions, trust: TrustTier) -> RenderOptions:
+    return RenderOptions(
+        base.output_mode,
+        base.autoescape,
+        base.undefined_policy,
+        trust,
+        base.budget,
+        base.locale
+    )
+
+def _empty_caller() -> CallerClosure:
+    empty_p: list[str] = []
+    empty_b: list[Stmt] = []
+    empty_f: list[OrderedDict[str, Value]] = []
+    return CallerClosure(empty_p, empty_b, empty_f, MacroTable(), SourceSpan("<caller>", 1, 1, 0, 0))
+
+def _empty_chain() -> InheritanceChain:
+    empty_l: list[TemplateLayer] = []
+    empty_m: OrderedDict[str, list[BlockVersion]] = OrderedDict[str, list[BlockVersion]]()
+    return InheritanceChain(empty_l, empty_m, TrustTier.Trusted)
+
 class _Evaluator:
     scope: RenderScope
     tracker: BudgetTracker
@@ -241,6 +308,13 @@ class _Evaluator:
     allow_dynamic_include: bool
     has_resolver: bool
     resolve_fn: (str, BudgetTracker) -> Template
+    macros: MacroTable
+    has_chain: bool
+    chain: InheritanceChain
+    cur_block_name: str
+    cur_block_idx: int
+    has_caller: bool
+    active_caller: CallerClosure
 
     def __init__(
         self: _Evaluator,
@@ -254,7 +328,14 @@ class _Evaluator:
         active_templates: list[str],
         allow_dynamic_include: bool,
         has_resolver: bool,
-        resolve_fn: (str, BudgetTracker) -> Template
+        resolve_fn: (str, BudgetTracker) -> Template,
+        macros: MacroTable,
+        has_chain: bool,
+        chain: InheritanceChain,
+        cur_block_name: str,
+        cur_block_idx: int,
+        has_caller: bool,
+        active_caller: CallerClosure
     ) -> None:
         self.scope = scope
         self.tracker = tracker
@@ -267,6 +348,13 @@ class _Evaluator:
         self.allow_dynamic_include = allow_dynamic_include
         self.has_resolver = has_resolver
         self.resolve_fn = resolve_fn
+        self.macros = macros
+        self.has_chain = has_chain
+        self.chain = chain
+        self.cur_block_name = cur_block_name
+        self.cur_block_idx = cur_block_idx
+        self.has_caller = has_caller
+        self.active_caller = active_caller
 
     def eval_expr(self: _Evaluator, expr: Expr) -> Value:
         self.tracker.consume_op(expr.span)
@@ -396,15 +484,269 @@ class _Evaluator:
                     return Value.VBool(not matched)
                 return Value.VBool(matched)
             case ExprKind.ECall(fn_name, args):
-                cargs: list[Value] = []
-                ci: int = 0
-                while ci < len(args):
-                    ca2: CallArg = args[ci]
-                    if len(ca2.name) > 0:
-                        raise GlyphTypeError(GLYPH_EVAL_TYPE, "keyword arguments are not supported for '" + fn_name + "'", ca2.span, "pass positional arguments")
-                    cargs.append(self.eval_expr(ca2.value))
-                    ci = ci + 1
-                return apply_function(self.functions, fn_name, cargs, self.tracker, expr.span)
+                return self._eval_call(fn_name, args, False, _empty_caller(), expr.span)
+
+    def _resolve_macro_target(self: _Evaluator, fn_name: str, span: SourceSpan) -> MacroDef:
+        if nox.strings.contains(fn_name, "."):
+            parts: list[str] = nox.strings.splitn(fn_name, ".", 2)
+            ns_alias: str = parts[0]
+            mname: str = parts[1]
+            if not self.macros.has_namespace(ns_alias):
+                raise GlyphExtensionError(GLYPH_EXTENSION_ERROR, "unknown macro namespace '" + ns_alias + "'", span, "import the namespace with {% import %}")
+            ns: MacroNamespace = self.macros.get_namespace(ns_alias)
+            return ns.get(mname, span)
+        return self.macros.get_macro(fn_name)
+
+    def _has_macro_target(self: _Evaluator, fn_name: str) -> bool:
+        if nox.strings.contains(fn_name, "."):
+            parts: list[str] = nox.strings.splitn(fn_name, ".", 2)
+            return self.macros.has_namespace(parts[0])
+        return self.macros.has_macro(fn_name)
+
+    def _eval_call(
+        self: _Evaluator,
+        fn_name: str,
+        args: list[CallArg],
+        with_caller: bool,
+        caller_val: CallerClosure,
+        span: SourceSpan
+    ) -> Value:
+        if fn_name == "super":
+            if len(args) > 0:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "super() takes no arguments", span, "call super()")
+            return self._eval_super(span)
+        if fn_name == "caller":
+            return self._eval_caller(args, span)
+        if self._has_macro_target(fn_name):
+            mdef: MacroDef = self._resolve_macro_target(fn_name, span)
+            m_args: list[MacroCallArg] = []
+            mi: int = 0
+            while mi < len(args):
+                ca: CallArg = args[mi]
+                m_args.append(MacroCallArg(ca.name, self.eval_expr(ca.value), ca.span))
+                mi = mi + 1
+            return self._invoke_macro(mdef, m_args, with_caller, caller_val, span)
+
+        cargs: list[Value] = []
+        ci: int = 0
+        while ci < len(args):
+            ca2: CallArg = args[ci]
+            if len(ca2.name) > 0:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "keyword arguments are not supported for '" + fn_name + "'", ca2.span, "pass positional arguments")
+            cargs.append(self.eval_expr(ca2.value))
+            ci = ci + 1
+        return apply_function(self.functions, fn_name, cargs, self.tracker, span)
+
+    def _invoke_macro(
+        self: _Evaluator,
+        mdef: MacroDef,
+        m_args: list[MacroCallArg],
+        with_caller: bool,
+        caller_val: CallerClosure,
+        span: SourceSpan
+    ) -> Value:
+        self.tracker.enter_macro(span)
+        bound: list[BoundMacroArg] = bind_macro_arguments(mdef, m_args, span)
+
+        macro_trust: TrustTier = min_trust_tier(self.options.trust_tier, mdef.trust_tier)
+        macro_opts: RenderOptions = _opts_with_trust(self.options, macro_trust)
+        macro_filters: FilterRegistry = _filters_for_trust(self.filters, macro_trust)
+
+        # Evaluate default parameter expressions in the macro's captured lexical scope.
+        mac_root: OrderedDict[str, Value] = OrderedDict[str, Value]()
+        ckeys: list[str] = mdef.captured_globals.keys_list()
+        cki: int = 0
+        while cki < len(ckeys):
+            ck: str = ckeys[cki]
+            mac_root.set(ck, mdef.captured_globals.get(ck))
+            cki = cki + 1
+
+        mac_macros: MacroTable = self.macros.clone()
+        mm_keys: list[str] = mdef.module_macros.keys_list()
+        mmi: int = 0
+        while mmi < len(mm_keys):
+            mmk: str = mm_keys[mmi]
+            mac_macros.define_macro(mdef.module_macros.get(mmk))
+            mmi = mmi + 1
+
+        mac_scope: RenderScope = RenderScope(mac_root)
+        mac_writer: GlyphWriter = GlyphWriter(self.tracker)
+        def_ev: _Evaluator = _Evaluator(
+            mac_scope,
+            self.tracker,
+            mac_writer,
+            macro_filters,
+            self.tests,
+            self.functions,
+            macro_opts,
+            self.active_templates,
+            self.allow_dynamic_include,
+            self.has_resolver,
+            self.resolve_fn,
+            mac_macros,
+            False,
+            _empty_chain(),
+            "",
+            -1,
+            with_caller,
+            caller_val
+        )
+
+        # Apply explicit bound args and evaluate remaining default params.
+        bi: int = 0
+        while bi < len(bound):
+            b: BoundMacroArg = bound[bi]
+            mac_scope.set_local(b.name, b.value, span)
+            bi = bi + 1
+
+        pi: int = 0
+        while pi < len(mdef.params):
+            mp: MacroParam = mdef.params[pi]
+            already_bound: bool = False
+            bci: int = 0
+            while bci < len(bound):
+                if bound[bci].name == mp.name:
+                    already_bound = True
+                bci = bci + 1
+            if not already_bound and mp.has_default:
+                mac_scope.set_local(mp.name, def_ev.eval_expr(mp.default_expr), mp.span)
+            pi = pi + 1
+
+        def_ev.exec_stmts(mdef.body)
+        mac_writer.flush()
+        out_str: str = mac_writer.to_string()
+        self.tracker.exit_macro()
+
+        match self.options.output_mode:
+            case OutputMode.Html:
+                if self.options.autoescape:
+                    match macro_trust:
+                        case TrustTier.Trusted:
+                            return Value.VTrustedMarkup(out_str, MarkupContext.SafeHtml)
+                        case _:
+                            return Value.VStr(out_str)
+                return Value.VStr(out_str)
+            case _:
+                return Value.VStr(out_str)
+
+    def _eval_caller(self: _Evaluator, args: list[CallArg], span: SourceSpan) -> Value:
+        if not self.has_caller:
+            raise GlyphRenderError(GLYPH_RENDER_ERROR, "caller() invoked outside a {% call %} block", span, "invoke caller() only inside macros called via {% call %}")
+        cc: CallerClosure = self.active_caller
+        if len(args) != len(cc.params):
+            raise GlyphTypeError(
+                GLYPH_EVAL_TYPE,
+                "caller() argument count mismatch (expected " + str(len(cc.params)) + ", got " + str(len(args)) + ")",
+                span,
+                "match {% call(...) %} parameters"
+            )
+        arg_vals: list[Value] = []
+        ai: int = 0
+        while ai < len(args):
+            if len(args[ai].name) > 0:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "caller() does not support keyword arguments", args[ai].span, "pass positional arguments to caller()")
+            arg_vals.append(self.eval_expr(args[ai].value))
+            ai = ai + 1
+
+        self.tracker.enter_macro(span)
+        call_frames: list[OrderedDict[str, Value]] = []
+        fi: int = 0
+        while fi < len(cc.captured_frames):
+            call_frames.append(cc.captured_frames[fi])
+            fi = fi + 1
+        param_frame: OrderedDict[str, Value] = OrderedDict[str, Value]()
+        pi: int = 0
+        while pi < len(cc.params):
+            param_frame.set(cc.params[pi], arg_vals[pi])
+            pi = pi + 1
+        call_frames.append(param_frame)
+
+        call_scope: RenderScope = RenderScope(OrderedDict[str, Value]())
+        call_scope.frames = call_frames
+        call_writer: GlyphWriter = GlyphWriter(self.tracker)
+        call_ev: _Evaluator = _Evaluator(
+            call_scope,
+            self.tracker,
+            call_writer,
+            self.filters,
+            self.tests,
+            self.functions,
+            self.options,
+            self.active_templates,
+            self.allow_dynamic_include,
+            self.has_resolver,
+            self.resolve_fn,
+            cc.macros,
+            self.has_chain,
+            self.chain,
+            self.cur_block_name,
+            self.cur_block_idx,
+            False,
+            _empty_caller()
+        )
+        call_ev.exec_stmts(cc.body)
+        call_writer.flush()
+        res_str: str = call_writer.to_string()
+        self.tracker.exit_macro()
+
+        match self.options.output_mode:
+            case OutputMode.Html:
+                if self.options.autoescape:
+                    match self.options.trust_tier:
+                        case TrustTier.Trusted:
+                            return Value.VTrustedMarkup(res_str, MarkupContext.SafeHtml)
+                        case _:
+                            return Value.VStr(res_str)
+                return Value.VStr(res_str)
+            case _:
+                return Value.VStr(res_str)
+
+    def _eval_super(self: _Evaluator, span: SourceSpan) -> Value:
+        if not self.has_chain or len(self.cur_block_name) == 0:
+            raise GlyphRenderError(GLYPH_RENDER_ERROR, "super() can only be called inside an overridden block", span, "use super() inside {% block %}")
+        parent_ver: BlockVersion = self.chain.get_block_at(self.cur_block_name, self.cur_block_idx + 1, span)
+        parent_trust: TrustTier = min_trust_tier(self.options.trust_tier, parent_ver.trust_tier)
+        parent_opts: RenderOptions = _opts_with_trust(self.options, parent_trust)
+        parent_filters: FilterRegistry = _filters_for_trust(self.filters, parent_trust)
+
+        sup_writer: GlyphWriter = GlyphWriter(self.tracker)
+        sup_ev: _Evaluator = _Evaluator(
+            self.scope,
+            self.tracker,
+            sup_writer,
+            parent_filters,
+            self.tests,
+            self.functions,
+            parent_opts,
+            self.active_templates,
+            self.allow_dynamic_include,
+            self.has_resolver,
+            self.resolve_fn,
+            self.macros,
+            self.has_chain,
+            self.chain,
+            self.cur_block_name,
+            self.cur_block_idx + 1,
+            self.has_caller,
+            self.active_caller
+        )
+        self.scope.push_frame()
+        sup_ev.exec_stmts(parent_ver.body)
+        self.scope.pop_frame()
+        sup_writer.flush()
+        sup_str: str = sup_writer.to_string()
+
+        match self.options.output_mode:
+            case OutputMode.Html:
+                if self.options.autoescape:
+                    match parent_trust:
+                        case TrustTier.Trusted:
+                            return Value.VTrustedMarkup(sup_str, MarkupContext.SafeHtml)
+                        case _:
+                            return Value.VStr(sup_str)
+                return Value.VStr(sup_str)
+            case _:
+                return Value.VStr(sup_str)
 
     def eval_binary(self: _Evaluator, op: BinaryOp, left_expr: Expr, right_expr: Expr, span: SourceSpan) -> Value:
         match op:
@@ -467,7 +809,6 @@ class _Evaluator:
                     case Value.VStr(sb):
                         return Value.VStr(sa + sb)
                     case Value.VTrustedMarkup(cb, _):
-                        # Concatenating plain string with trusted markup strips trust
                         return Value.VStr(sa + cb)
                     case _:
                         raise GlyphTypeError(GLYPH_EVAL_TYPE, "cannot add string and non-string", span, "convert non-string with |string")
@@ -562,6 +903,24 @@ class _Evaluator:
             case _:
                 return Value.VNull
 
+    def exec_declarations_only(self: _Evaluator, stmts: list[Stmt]) -> None:
+        i: int = 0
+        while i < len(stmts):
+            st: Stmt = stmts[i]
+            match st.kind:
+                case StmtKind.SSet(target, val_expr):
+                    sval: Value = self.eval_expr(val_expr)
+                    self.scope.set_local(target, sval, st.span)
+                case StmtKind.SMacro(mname, params, body):
+                    self._exec_macro_def(mname, params, body, st.span)
+                case StmtKind.SImport(tpl_name, alias):
+                    self._exec_import(tpl_name, alias, st.span)
+                case StmtKind.SFromImport(tpl_name, names):
+                    self._exec_from_import(tpl_name, names, st.span)
+                case _:
+                    pass
+            i = i + 1
+
     def exec_stmts(self: _Evaluator, stmts: list[Stmt]) -> None:
         i: int = 0
         while i < len(stmts):
@@ -603,14 +962,162 @@ class _Evaluator:
                     self.scope.set_local(target, sval, st.span)
                 case StmtKind.SInclude(tpl_expr, with_context, ignore_missing):
                     self._exec_include(tpl_expr, with_context, ignore_missing, st.span)
-                case _:
-                    raise GlyphRenderError(
-                        GLYPH_RENDER_ERROR,
-                        "composition statements (extends/block/macro/import/call) require Phase 5 composition runtime",
-                        st.span,
-                        "use core statements or include in v0.2"
-                    )
+                case StmtKind.SExtends(_):
+                    pass
+                case StmtKind.SBlock(bname, default_body):
+                    self._exec_block(bname, default_body, st.span)
+                case StmtKind.SMacro(mname, params, body):
+                    self._exec_macro_def(mname, params, body, st.span)
+                case StmtKind.SImport(tpl_name, alias):
+                    self._exec_import(tpl_name, alias, st.span)
+                case StmtKind.SFromImport(tpl_name, names):
+                    self._exec_from_import(tpl_name, names, st.span)
+                case StmtKind.SCallBlock(mac_target, args, caller_params, body):
+                    self._exec_call_block(mac_target, args, caller_params, body, st.span)
             i = i + 1
+
+    def _exec_block(self: _Evaluator, bname: str, default_body: list[Stmt], span: SourceSpan) -> None:
+        if self.has_chain and self.chain.has_block(bname):
+            ver: BlockVersion = self.chain.get_block_at(bname, 0, span)
+            blk_trust: TrustTier = min_trust_tier(self.options.trust_tier, ver.trust_tier)
+            blk_opts: RenderOptions = _opts_with_trust(self.options, blk_trust)
+            blk_filters: FilterRegistry = _filters_for_trust(self.filters, blk_trust)
+            blk_ev: _Evaluator = _Evaluator(
+                self.scope,
+                self.tracker,
+                self.writer,
+                blk_filters,
+                self.tests,
+                self.functions,
+                blk_opts,
+                self.active_templates,
+                self.allow_dynamic_include,
+                self.has_resolver,
+                self.resolve_fn,
+                self.macros,
+                True,
+                self.chain,
+                bname,
+                0,
+                self.has_caller,
+                self.active_caller
+            )
+            self.scope.push_frame()
+            blk_ev.exec_stmts(ver.body)
+            self.scope.pop_frame()
+        else:
+            self.scope.push_frame()
+            self.exec_stmts(default_body)
+            self.scope.pop_frame()
+
+    def _exec_macro_def(
+        self: _Evaluator,
+        mname: str,
+        params: list[MacroParam],
+        body: list[Stmt],
+        span: SourceSpan
+    ) -> None:
+        snap: OrderedDict[str, Value] = _snapshot_scope_flat(self.scope)
+        mdef: MacroDef = MacroDef(mname, params, body, snap, self.macros.macros, self.options.trust_tier, span)
+        self.macros.define_macro(mdef)
+
+    def _load_macro_module(self: _Evaluator, tpl_name: str, span: SourceSpan) -> MacroTable:
+        safe_name: str = validate_logical_template_name(tpl_name)
+        if not self.has_resolver:
+            raise GlyphRenderError(GLYPH_RENDER_ERROR, "import is not available without a template resolver", span, "render via Environment")
+        ai: int = 0
+        while ai < len(self.active_templates):
+            if self.active_templates[ai] == safe_name:
+                raise GlyphRenderError(GLYPH_RENDER_CYCLE, "cyclic import detected for '" + safe_name + "'", span, "break circular template import")
+            ai = ai + 1
+
+        self.tracker.enter_include(span)
+        resolver: (str, BudgetTracker) -> Template = self.resolve_fn
+        imp_tpl: Template = resolver(safe_name, self.tracker)
+
+        imp_trust: TrustTier = min_trust_tier(self.options.trust_tier, imp_tpl.trust_tier)
+        imp_opts: RenderOptions = _opts_with_trust(self.options, imp_trust)
+        imp_filters: FilterRegistry = _filters_for_trust(self.filters, imp_trust)
+
+        child_active: list[str] = []
+        bi: int = 0
+        while bi < len(self.active_templates):
+            child_active.append(self.active_templates[bi])
+            bi = bi + 1
+        child_active.append(safe_name)
+
+        imp_scope: RenderScope = RenderScope(OrderedDict[str, Value]())
+        imp_macros: MacroTable = MacroTable()
+        imp_writer: GlyphWriter = GlyphWriter(self.tracker)
+        imp_ev: _Evaluator = _Evaluator(
+            imp_scope,
+            self.tracker,
+            imp_writer,
+            imp_filters,
+            self.tests,
+            self.functions,
+            imp_opts,
+            child_active,
+            self.allow_dynamic_include,
+            self.has_resolver,
+            self.resolve_fn,
+            imp_macros,
+            False,
+            _empty_chain(),
+            "",
+            -1,
+            False,
+            _empty_caller()
+        )
+        imp_ev.exec_declarations_only(imp_tpl.ast.body)
+        self.tracker.exit_include()
+        return imp_macros
+
+    def _exec_import(self: _Evaluator, tpl_name: str, alias: str, span: SourceSpan) -> None:
+        imp_macros: MacroTable = self._load_macro_module(tpl_name, span)
+        exported: OrderedDict[str, MacroDef] = OrderedDict[str, MacroDef]()
+        mkeys: list[str] = imp_macros.macros.keys_list()
+        i: int = 0
+        while i < len(mkeys):
+            mk: str = mkeys[i]
+            if not is_private_macro_name(mk):
+                exported.set(mk, imp_macros.macros.get(mk))
+            i = i + 1
+        ns: MacroNamespace = MacroNamespace(alias, exported)
+        self.macros.register_namespace(alias, ns)
+
+    def _exec_from_import(self: _Evaluator, tpl_name: str, names: list[str], span: SourceSpan) -> None:
+        imp_macros: MacroTable = self._load_macro_module(tpl_name, span)
+        i: int = 0
+        while i < len(names):
+            sym: str = names[i]
+            if is_private_macro_name(sym):
+                raise GlyphSecurityError(GLYPH_SECURITY_POLICY, "cannot import private macro '" + sym + "'", span, "macros starting with '_' are private")
+            if not imp_macros.has_macro(sym):
+                raise GlyphExtensionError(GLYPH_EXTENSION_ERROR, "template '" + tpl_name + "' has no macro '" + sym + "'", span, "check exported macro names")
+            self.macros.define_macro(imp_macros.get_macro(sym))
+            i = i + 1
+
+    def _exec_call_block(
+        self: _Evaluator,
+        mac_target: str,
+        args: list[CallArg],
+        caller_params: list[str],
+        body: list[Stmt],
+        span: SourceSpan
+    ) -> None:
+        if not self._has_macro_target(mac_target):
+            raise GlyphExtensionError(GLYPH_EXTENSION_ERROR, "unknown macro '" + mac_target + "' in call block", span, "define or import the macro before calling")
+        cc: CallerClosure = CallerClosure(caller_params, body, _snapshot_frames(self.scope), self.macros.clone(), span)
+        res_val: Value = self._eval_call(mac_target, args, True, cc, span)
+        rendered: str = render_value_for_mode(
+            res_val,
+            self.options.autoescape,
+            self.options.output_mode,
+            self.options.undefined_policy,
+            span
+        )
+        self.writer.write(rendered, span)
 
     def _exec_for(
         self: _Evaluator,
@@ -737,26 +1244,9 @@ class _Evaluator:
             return
 
         child_trust: TrustTier = min_trust_tier(self.options.trust_tier, child_tpl.trust_tier)
-        child_allow_safe: bool = self.filters.allow_safe
-        match child_trust:
-            case TrustTier.Trusted:
-                pass
-            case _:
-                child_allow_safe = False
+        child_opts: RenderOptions = _opts_with_trust(self.options, child_trust)
+        child_filters: FilterRegistry = _filters_for_trust(self.filters, child_trust)
 
-        child_filters: FilterRegistry = FilterRegistry(child_allow_safe)
-        child_filters.custom_names = self.filters.custom_names
-        child_filters.custom_fns = self.filters.custom_fns
-        child_filters.generation = self.filters.generation
-
-        child_opts: RenderOptions = RenderOptions(
-            self.options.output_mode,
-            self.options.autoescape,
-            self.options.undefined_policy,
-            child_trust,
-            self.options.budget,
-            self.options.locale
-        )
         child_scope: RenderScope = RenderScope(OrderedDict[str, Value]())
         if with_context:
             child_scope = self.scope.clone_for_include()
@@ -779,13 +1269,51 @@ class _Evaluator:
             child_active,
             self.allow_dynamic_include,
             self.has_resolver,
-            self.resolve_fn
+            self.resolve_fn,
+            MacroTable(),
+            False,
+            _empty_chain(),
+            "",
+            -1,
+            False,
+            _empty_caller()
         )
         child_ev.exec_stmts(child_tpl.ast.body)
         self.tracker.exit_include()
 
 def _noop_resolve(name: str, _tr: BudgetTracker) -> Template:
     raise GlyphRenderError(GLYPH_RENDER_ERROR, "no resolver configured for '" + name + "'", SourceSpan(name, 1, 1, 0, 0), "use Environment")
+
+def _build_chain_layers(
+    leaf: Template,
+    tracker: BudgetTracker,
+    has_resolver: bool,
+    resolve_fn: (str, BudgetTracker) -> Template
+) -> list[TemplateLayer]:
+    layers: list[TemplateLayer] = [TemplateLayer(leaf.logical_name, leaf.ast, leaf.trust_tier)]
+    seen: list[str] = [leaf.logical_name]
+    cur: Template = leaf
+    depth_entered: int = 0
+    while cur.ast.has_extends:
+        if not has_resolver:
+            raise GlyphRenderError(GLYPH_RENDER_ERROR, "extends requires a template resolver", SourceSpan(cur.logical_name, 1, 1, 0, 0), "render via Environment")
+        parent_name: str = validate_logical_template_name(cur.ast.extends_target)
+        si: int = 0
+        while si < len(seen):
+            if seen[si] == parent_name:
+                raise GlyphRenderError(GLYPH_RENDER_CYCLE, "cyclic template inheritance detected for '" + parent_name + "'", SourceSpan(cur.logical_name, 1, 1, 0, 0), "break circular extends chain")
+            si = si + 1
+        seen.append(parent_name)
+        tracker.enter_include(SourceSpan(cur.logical_name, 1, 1, 0, 0))
+        depth_entered = depth_entered + 1
+        parent_tpl: Template = resolve_fn(parent_name, tracker)
+        layers.append(TemplateLayer(parent_tpl.logical_name, parent_tpl.ast, parent_tpl.trust_tier))
+        cur = parent_tpl
+    di: int = 0
+    while di < depth_entered:
+        tracker.exit_include()
+        di = di + 1
+    return layers
 
 def execute_template_with_resolver(
     tpl: Template,
@@ -800,45 +1328,77 @@ def execute_template_with_resolver(
     has_resolver: bool,
     resolve_fn: (str, BudgetTracker) -> Template
 ) -> RenderResult:
-    # Effective trust policy takes the most restrictive tier between template and render options.
-    eff_trust: TrustTier = min_trust_tier(tpl.trust_tier, options.trust_tier)
-    eff_allow_safe: bool = filters.allow_safe
-    match eff_trust:
-        case TrustTier.Trusted:
-            pass
-        case _:
-            eff_allow_safe = False
+    if tpl.ast.has_extends:
+        layers: list[TemplateLayer] = _build_chain_layers(tpl, tracker, has_resolver, resolve_fn)
+        chain: InheritanceChain = build_inheritance_chain(layers)
+        eff_trust: TrustTier = min_trust_tier(options.trust_tier, chain.effective_trust)
+        eff_opts: RenderOptions = _opts_with_trust(options, eff_trust)
+        eff_filters: FilterRegistry = _filters_for_trust(filters, eff_trust)
 
-    eff_filters: FilterRegistry = FilterRegistry(eff_allow_safe)
-    eff_filters.custom_names = filters.custom_names
-    eff_filters.custom_fns = filters.custom_fns
-    eff_filters.generation = filters.generation
+        scope: RenderScope = RenderScope(root_vars)
+        active: list[str] = []
+        li: int = 0
+        while li < len(layers):
+            active.append(layers[li].logical_name)
+            li = li + 1
 
-    eff_opts: RenderOptions = RenderOptions(
-        options.output_mode,
-        options.autoescape,
-        options.undefined_policy,
-        eff_trust,
-        options.budget,
-        options.locale
-    )
+        ev: _Evaluator = _Evaluator(
+            scope,
+            tracker,
+            writer,
+            eff_filters,
+            tests,
+            functions,
+            eff_opts,
+            active,
+            allow_dynamic_include,
+            has_resolver,
+            resolve_fn,
+            MacroTable(),
+            True,
+            chain,
+            "",
+            -1,
+            False,
+            _empty_caller()
+        )
+        # Execute top-level declarations from base down to leaf child (so child overrides base declarations),
+        # then execute the root layout body with block dispatch.
+        ri: int = len(layers) - 1
+        while ri >= 0:
+            ev.exec_declarations_only(layers[ri].ast.body)
+            ri = ri - 1
+        root_layer: TemplateLayer = layers[len(layers) - 1]
+        ev.exec_stmts(root_layer.ast.body)
+        writer.flush()
+        return RenderResult(writer.to_string(), writer.bytes_written, tracker.total_ops_used, tracker.loop_steps_used, True)
 
-    scope: RenderScope = RenderScope(root_vars)
-    active: list[str] = [tpl.logical_name]
-    ev: _Evaluator = _Evaluator(
-        scope,
+    eff_trust2: TrustTier = min_trust_tier(tpl.trust_tier, options.trust_tier)
+    eff_opts2: RenderOptions = _opts_with_trust(options, eff_trust2)
+    eff_filters2: FilterRegistry = _filters_for_trust(filters, eff_trust2)
+    scope2: RenderScope = RenderScope(root_vars)
+    active2: list[str] = [tpl.logical_name]
+    ev2: _Evaluator = _Evaluator(
+        scope2,
         tracker,
         writer,
-        eff_filters,
+        eff_filters2,
         tests,
         functions,
-        eff_opts,
-        active,
+        eff_opts2,
+        active2,
         allow_dynamic_include,
         has_resolver,
-        resolve_fn
+        resolve_fn,
+        MacroTable(),
+        False,
+        _empty_chain(),
+        "",
+        -1,
+        False,
+        _empty_caller()
     )
-    ev.exec_stmts(tpl.ast.body)
+    ev2.exec_stmts(tpl.ast.body)
     writer.flush()
     return RenderResult(
         writer.to_string(),

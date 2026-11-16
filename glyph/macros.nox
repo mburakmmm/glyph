@@ -1,0 +1,223 @@
+# Macro definitions, immutable lexical capture, argument binding, and namespace exports.
+# Enforces AGENTS.md §9.2-9.3 and ADR-0006. Pure NOX, freestanding-safe.
+import nox.strings
+from nox.collections import OrderedDict
+from glyph.errors import SourceSpan, GlyphTypeError, GlyphSecurityError, GlyphExtensionError
+from glyph.errors import GLYPH_EVAL_TYPE, GLYPH_SECURITY_POLICY, GLYPH_EXTENSION_ERROR
+from glyph.value import Value, is_forbidden_key
+from glyph.ast import Stmt, MacroParam
+from glyph.expressions import Expr
+from glyph.options import TrustTier
+
+class MacroDef:
+    name: str
+    params: list[MacroParam]
+    body: list[Stmt]
+    captured_globals: OrderedDict[str, Value]
+    module_macros: OrderedDict[str, MacroDef]
+    trust_tier: TrustTier
+    span: SourceSpan
+
+    def __init__(
+        self: MacroDef,
+        name: str,
+        params: list[MacroParam],
+        body: list[Stmt],
+        captured_globals: OrderedDict[str, Value],
+        module_macros: OrderedDict[str, MacroDef],
+        trust_tier: TrustTier,
+        span: SourceSpan
+    ) -> None:
+        self.name = name
+        self.params = params
+        self.body = body
+        self.captured_globals = captured_globals
+        self.module_macros = module_macros
+        self.trust_tier = trust_tier
+        self.span = span
+
+class MacroNamespace:
+    alias: str
+    macros: OrderedDict[str, MacroDef]
+
+    def __init__(self: MacroNamespace, alias: str, macros: OrderedDict[str, MacroDef]) -> None:
+        self.alias = alias
+        self.macros = macros
+
+    def has(self: MacroNamespace, name: str) -> bool:
+        return self.macros.contains(name)
+
+    def get(self: MacroNamespace, name: str, span: SourceSpan) -> MacroDef:
+        if nox.strings.starts_with(name, "_") or is_forbidden_key(name):
+            raise GlyphSecurityError(
+                GLYPH_SECURITY_POLICY,
+                "cannot access private macro '" + name + "' across template boundary",
+                span,
+                "macros starting with '_' are private"
+            )
+        if not self.macros.contains(name):
+            raise GlyphExtensionError(
+                GLYPH_EXTENSION_ERROR,
+                "unknown macro '" + self.alias + "." + name + "'",
+                span,
+                "check exported macro name"
+            )
+        return self.macros.get(name)
+
+class MacroTable:
+    macros: OrderedDict[str, MacroDef]
+    namespaces: OrderedDict[str, MacroNamespace]
+
+    def __init__(self: MacroTable) -> None:
+        m: OrderedDict[str, MacroDef] = OrderedDict[str, MacroDef]()
+        ns: OrderedDict[str, MacroNamespace] = OrderedDict[str, MacroNamespace]()
+        self.macros = m
+        self.namespaces = ns
+
+    def define_macro(self: MacroTable, mdef: MacroDef) -> None:
+        self.macros.set(mdef.name, mdef)
+
+    def has_macro(self: MacroTable, name: str) -> bool:
+        return self.macros.contains(name)
+
+    def get_macro(self: MacroTable, name: str) -> MacroDef:
+        return self.macros.get(name)
+
+    def register_namespace(self: MacroTable, alias: str, ns: MacroNamespace) -> None:
+        self.namespaces.set(alias, ns)
+
+    def has_namespace(self: MacroTable, alias: str) -> bool:
+        return self.namespaces.contains(alias)
+
+    def get_namespace(self: MacroTable, alias: str) -> MacroNamespace:
+        return self.namespaces.get(alias)
+
+    def clone(self: MacroTable) -> MacroTable:
+        out: MacroTable = MacroTable()
+        mkeys: list[str] = self.macros.keys_list()
+        i: int = 0
+        while i < len(mkeys):
+            k: str = mkeys[i]
+            out.macros.set(k, self.macros.get(k))
+            i = i + 1
+        nkeys: list[str] = self.namespaces.keys_list()
+        j: int = 0
+        while j < len(nkeys):
+            nk: str = nkeys[j]
+            out.namespaces.set(nk, self.namespaces.get(nk))
+            j = j + 1
+        return out
+
+class MacroCallArg:
+    name: str
+    value: Value
+    span: SourceSpan
+
+    def __init__(self: MacroCallArg, name: str, value: Value, span: SourceSpan) -> None:
+        self.name = name
+        self.value = value
+        self.span = span
+
+class BoundMacroArg:
+    name: str
+    value: Value
+
+    def __init__(self: BoundMacroArg, name: str, value: Value) -> None:
+        self.name = name
+        self.value = value
+
+class CallerClosure:
+    params: list[str]
+    body: list[Stmt]
+    captured_frames: list[OrderedDict[str, Value]]
+    macros: MacroTable
+    span: SourceSpan
+
+    def __init__(
+        self: CallerClosure,
+        params: list[str],
+        body: list[Stmt],
+        captured_frames: list[OrderedDict[str, Value]],
+        macros: MacroTable,
+        span: SourceSpan
+    ) -> None:
+        self.params = params
+        self.body = body
+        self.captured_frames = captured_frames
+        self.macros = macros
+        self.span = span
+
+def is_private_macro_name(name: str) -> bool:
+    return nox.strings.starts_with(name, "_") or is_forbidden_key(name)
+
+# Binds positional and keyword call arguments strictly against macro parameters.
+# Returns BoundMacroArg list (for provided values) and flags which parameter indices need default evaluation.
+def bind_macro_arguments(
+    mdef: MacroDef,
+    args: list[MacroCallArg],
+    span: SourceSpan
+) -> list[BoundMacroArg]:
+    nparams: int = len(mdef.params)
+    bound_set: list[bool] = []
+    bound_vals: list[Value] = []
+    pi: int = 0
+    while pi < nparams:
+        bound_set.append(False)
+        bound_vals.append(Value.VNull)
+        pi = pi + 1
+
+    pos_idx: int = 0
+    ai: int = 0
+    while ai < len(args):
+        arg: MacroCallArg = args[ai]
+        if len(arg.name) == 0:
+            if pos_idx >= nparams:
+                raise GlyphTypeError(
+                    GLYPH_EVAL_TYPE,
+                    "macro '" + mdef.name + "' received too many positional arguments",
+                    arg.span,
+                    "expected at most " + str(nparams) + " arguments"
+                )
+            bound_set[pos_idx] = True
+            bound_vals[pos_idx] = arg.value
+            pos_idx = pos_idx + 1
+        else:
+            found_idx: int = -1
+            ki: int = 0
+            while ki < nparams:
+                if mdef.params[ki].name == arg.name:
+                    found_idx = ki
+                ki = ki + 1
+            if found_idx < 0:
+                raise GlyphTypeError(
+                    GLYPH_EVAL_TYPE,
+                    "macro '" + mdef.name + "' got unexpected keyword argument '" + arg.name + "'",
+                    arg.span,
+                    "check macro parameter names"
+                )
+            if bound_set[found_idx]:
+                raise GlyphTypeError(
+                    GLYPH_EVAL_TYPE,
+                    "macro '" + mdef.name + "' got multiple values for argument '" + arg.name + "'",
+                    arg.span,
+                    "pass each argument once"
+                )
+            bound_set[found_idx] = True
+            bound_vals[found_idx] = arg.value
+        ai = ai + 1
+
+    out: list[BoundMacroArg] = []
+    oi: int = 0
+    while oi < nparams:
+        mp: MacroParam = mdef.params[oi]
+        if bound_set[oi]:
+            out.append(BoundMacroArg(mp.name, bound_vals[oi]))
+        elif not mp.has_default:
+            raise GlyphTypeError(
+                GLYPH_EVAL_TYPE,
+                "macro '" + mdef.name + "' missing required argument '" + mp.name + "'",
+                span,
+                "provide all required macro arguments"
+            )
+        oi = oi + 1
+    return out

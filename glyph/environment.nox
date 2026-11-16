@@ -119,18 +119,32 @@ def _collect_static_deps(
             try:
                 rec: SourceRecord = env.loader.load(dep_name)
                 out.append(DepFingerprint(dep_name, rec.origin_id, rec.fingerprint))
-                # Inspect child includes transitively if valid
                 try:
                     sub_tr: BudgetTracker = BudgetTracker(env.options.default_budget)
                     sub_ast: TemplateAst = _parse_with_cache(rec, env, sub_tr)
                     sub_info: TemplateInfo = validate_ast(sub_ast, env.options.allow_dynamic_include)
-                    _collect_static_deps(sub_info.includes, env, visited, out, depth + 1)
+                    sub_deps: list[str] = _all_dep_names(sub_info)
+                    _collect_static_deps(sub_deps, env, visited, out, depth + 1)
                 except GlyphError:
                     pass
             except GlyphLoadError as le:
                 if le.code == GLYPH_LOADER_NOT_FOUND:
                     out.append(DepFingerprint(dep_name, "", "<missing>"))
         i = i + 1
+
+def _all_dep_names(info: TemplateInfo) -> list[str]:
+    names: list[str] = []
+    if info.has_extends and len(info.extends_target) > 0:
+        names.append(info.extends_target)
+    i: int = 0
+    while i < len(info.includes):
+        names.append(info.includes[i])
+        i = i + 1
+    j: int = 0
+    while j < len(info.imports):
+        names.append(info.imports[j])
+        j = j + 1
+    return names
 
 def _parse_with_cache(rec: SourceRecord, env: Environment, tracker: BudgetTracker) -> TemplateAst:
     pkey: str = build_parse_cache_key(rec.origin_id, rec.fingerprint)
@@ -165,7 +179,7 @@ def _get_template_with_tracker(name: str, env: Environment, tracker: BudgetTrack
 
     deps: list[DepFingerprint] = []
     visited: list[str] = [rec.logical_name]
-    _collect_static_deps(info.includes, env, visited, deps, 0)
+    _collect_static_deps(_all_dep_names(info), env, visited, deps, 0)
 
     tpl: Template = Template(rec.logical_name, ast, info, rec.fingerprint, eff_trust)
     new_entry: CompileCacheEntry = CompileCacheEntry(tpl, deps, nox.strings.byte_len(rec.content))

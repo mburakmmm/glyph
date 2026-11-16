@@ -1,0 +1,26 @@
+# Vertical Slice #2 example (AGENTS.md §29):
+# base.html + extends + block + super() + include + macro + import + call/caller + cache invalidation
+import glyph.api
+from glyph.api import MemoryLoader, Environment, Template, Context
+
+loader: MemoryLoader = MemoryLoader()
+loader.put(
+    "macros/ui.html",
+    "{% macro badge(label, kind='info') %}<span class=\"badge-{{ kind }}\">{{ label }}</span>{% endmacro %}{% macro card(title) %}<section><h2>{{ title }}</h2><div>{{ caller() }}</div></section>{% endmacro %}"
+)
+loader.put("partials/nav.html", "<nav>{{ site_name }}</nav>")
+loader.put(
+    "base.html",
+    "<!doctype html><html><head><title>{% block title %}Blog{% endblock %}</title></head><body>{% include 'partials/nav.html' with context %}<main>{% block content %}BaseContent{% endblock %}</main></body></html>"
+)
+loader.put(
+    "post.html",
+    "{% extends 'base.html' %}{% import 'macros/ui.html' as ui %}{% from 'macros/ui.html' import badge %}{% set site_name = 'Glyph Journal' %}{% block title %}{{ post.title }} - {{ super() }}{% endblock %}{% block content %}{% call ui.card(post.title) %}{{ badge(post.tag, kind='hot') }}<p>{{ post.body }}</p>{% endcall %}{% endblock %}"
+)
+
+env: Environment = glyph.api.default_environment(loader)
+tpl: Template = glyph.api.get_template("post.html", env)
+ctx: Context = glyph.api.context_from_json('{"post":{"title":"<Hello>","tag":"NOX","body":"<script>xss()</script>"}}')
+
+out: str = glyph.api.render(tpl, ctx, env)
+print(out)

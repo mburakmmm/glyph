@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-16
+
+### Added
+- `docs/adr/0006-macro-scope-caller-and-includes.md` (ADR-0006).
+- `glyph/inheritance.nox`: Multi-level `{% extends %}`, `{% block %}`, `{{ super() }}` block override chains, cycle detection, and `TrustTier` floor propagation.
+- `glyph/macros.nox`: `{% macro %}` (positional, keyword, default args, lexical capture), `{% import "..." as h %}`, `{% from "..." import ... %}`, private `_macro` boundary enforcement, `{% call %}` / `caller()`, and `max_macro_depth` recursion bounds.
+- `glyph/parser.nox` & `glyph/environment.nox`: Static namespace call support (`h.macro(...)` only for explicit `{% import %}` aliases, while preserving method-call denial on values) and transitive `CompileCache` invalidation for `extends` and `imports`.
+- `examples/blog_layout/main.nox` (Vertical Slice #2) and `tests/composition/composition_test.nox`.
+
 ## [0.2.0] - 2026-11-16
 
 ### Added

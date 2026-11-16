@@ -52,17 +52,28 @@ def _is_ws_only(s: str) -> bool:
 def _kind_eq(a: TokenKind, b: TokenKind) -> bool:
     return a == b
 
+def _has_alias(aliases: list[str], name: str) -> bool:
+    i: int = 0
+    while i < len(aliases):
+        if aliases[i] == name:
+            return True
+        i = i + 1
+    return False
+
 class _Parser:
     tokens: list[Token]
     pos: int
     logical_name: str
     tracker: BudgetTracker
+    imported_aliases: list[str]
 
     def __init__(self: _Parser, tokens: list[Token], logical_name: str, tracker: BudgetTracker) -> None:
         self.tokens = tokens
         self.pos = 0
         self.logical_name = logical_name
         self.tracker = tracker
+        empty_aliases: list[str] = []
+        self.imported_aliases = empty_aliases
 
     def peek(self: _Parser) -> Token:
         if self.pos < len(self.tokens):
@@ -293,8 +304,22 @@ class _Parser:
                 if is_forbidden_key(field_tok.text):
                     raise GlyphSecurityError(GLYPH_SECURITY_REFLECTION, "access to restricted metadata key '" + field_tok.text + "' is denied", field_tok.span, "reflection fields are forbidden")
                 if self.check_kind(TokenKind.TLParen):
-                    raise GlyphSecurityError(GLYPH_SECURITY_POLICY, "method calls on values are not permitted; use filters or registered functions", field_tok.span, "replace obj.method(...) with obj | filter(...)")
-                expr = self._make_expr(ExprKind.EMember(expr, field_tok.text), dot_sp)
+                    is_ns_call: bool = False
+                    ns_name: str = ""
+                    match expr.kind:
+                        case ExprKind.EIdent(id_name):
+                            if _has_alias(self.imported_aliases, id_name):
+                                is_ns_call = True
+                                ns_name = id_name
+                        case _:
+                            pass
+                    if is_ns_call:
+                        ns_args: list[CallArg] = self.parse_call_args()
+                        expr = self._make_expr(ExprKind.ECall(ns_name + "." + field_tok.text, ns_args), dot_sp)
+                    else:
+                        raise GlyphSecurityError(GLYPH_SECURITY_POLICY, "method calls on values are not permitted; use filters or registered functions", field_tok.span, "replace obj.method(...) with obj | filter(...)")
+                else:
+                    expr = self._make_expr(ExprKind.EMember(expr, field_tok.text), dot_sp)
             elif self.check_kind(TokenKind.TLBracket):
                 br_sp: SourceSpan = self.advance().span
                 idx_expr: Expr = self.parse_expr()
@@ -657,6 +682,9 @@ class _Parser:
         _as: Token = self.expect_ident_word("as", "expected 'as' in import statement")
         alias_tok: Token = self.expect_name("expected alias name after 'as'")
         _se: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after import")
+        als: list[str] = self.imported_aliases
+        als.append(alias_tok.text)
+        self.imported_aliases = als
         return self._make_stmt(StmtKind.SImport(tpl_tok.text, alias_tok.text), start_span)
 
     def parse_from_import(self: _Parser, start_span: SourceSpan) -> Stmt:
@@ -691,6 +719,11 @@ class _Parser:
                         cdone = True
             _rp: Token = self.expect_kind(TokenKind.TRParen, "expected ')' after caller parameters")
         mac_tok: Token = self.expect_name("expected macro name in call statement")
+        call_target: str = mac_tok.text
+        if self.check_kind(TokenKind.TDot) and _has_alias(self.imported_aliases, mac_tok.text):
+            _dot: Token = self.advance()
+            member_tok: Token = self.expect_name("expected macro name after '.'")
+            call_target = mac_tok.text + "." + member_tok.text
         args: list[CallArg] = self.parse_call_args()
         _se: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after call header")
         stop_call: list[str] = ["endcall"]
@@ -698,7 +731,7 @@ class _Parser:
         _s1: Token = self.expect_kind(TokenKind.TStmtStart, "expected '{% endcall %}'")
         _ec: Token = self.expect_ident_word("endcall", "expected 'endcall'")
         _s2: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after endcall")
-        return self._make_stmt(StmtKind.SCallBlock(mac_tok.text, args, caller_params, body), start_span)
+        return self._make_stmt(StmtKind.SCallBlock(call_target, args, caller_params, body), start_span)
 
 def parse_tokens(tokens: list[Token], logical_name: str, tracker: BudgetTracker) -> TemplateAst:
     p: _Parser = _Parser(tokens, logical_name, tracker)
