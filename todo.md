@@ -209,32 +209,32 @@ Her PoC derlenip `noxc check` + `noxc test` ile doğrulanmış ve sonucu `docs/c
 **Amaç:** `AGENTS.md` §10'daki tüm bağlamsal XSS korumalarını, güven etiketlerini, URL/JS/CSS politikalarını ve saldırı test kümesini tamamlamak.
 
 ### 6.1. Karar Kayıtları ve Dokümanlar
-- [ ] `docs/adr/0003-contextual-html-escaping.md` (**ADR-0003**)
-- [ ] `docs/adr/0004-trusted-markup-and-safe-policy.md` (**ADR-0004**)
-- [ ] `docs/adr/0012-user-created-templates-threat-model.md` (**ADR-0012**)
-- [ ] `docs/security.md` ve `SECURITY.md` güncellemesi (threat model: Trusted / Restricted / Untrusted templates).
+- [x] `docs/adr/0003-contextual-html-escaping.md` (**ADR-0003**)
+- [x] `docs/adr/0004-trusted-markup-and-safe-policy.md` (**ADR-0004**)
+- [x] `docs/adr/0012-user-created-templates-threat-model.md` (**ADR-0012**)
+- [x] `docs/security.md` ve `SECURITY.md` güncellemesi (threat model: Trusted / Restricted / Untrusted templates).
 
 ### 6.2. Bağlamsal HTML Tracker ve Güven Etiketleri
-- [ ] `OutputContext` durum makinesi / minimal HTML tokenizer:
+- [x] `OutputContext` durum makinesi / minimal HTML tokenizer (`glyph/safety.nox` + `glyph/runtime.nox`):
   - `HtmlText`, `HtmlAttributeQuoted` (izinli)
   - `HtmlAttributeUnquoted` (varsayılan reddedilir)
-  - `HtmlUrlAttribute` (`href`, `src`, `action`, `formaction`, `srcset` — scheme allowlist: `http`, `https`, `mailto`, `tel`, relative; `javascript:`, `vbscript:`, `data:`, whitespace/percent/entity bypass reddi)
-  - `HtmlJs` / `HtmlEventHandler` (`<script>`, `on*` — untrusted interpolasyon reddi)
+  - `HtmlUrlAttribute` (`href`, `src`, `action`, `formaction`, `poster`, `cite`, `data`, `xlink:href`, `srcset` — scheme allowlist: `http`, `https`, `mailto`, `tel`, relative; `javascript:`, `vbscript:`, `data:`, `//` protocol-relative, backslash ve whitespace/percent/entity bypass reddi)
+  - `HtmlJs` / `HtmlEventHandler` (`<script>`, `on*` — untrusted/raw interpolasyon reddi; `Restricted`/`Untrusted` şablonlarda `|tojson` dahil reddi)
   - `HtmlCss` / `StyleAttribute` (untrusted interpolasyon reddi)
   - `HtmlTagOrAttrName` (dinamik tag/attr adı reddi)
-  - `Unknown` (fail-closed)
-- [ ] `TrustedMarkup` ayrımı: `SafeHtml`, `SafeAttr`, `SafeUrl`, `SafeJs` — bağlamlar arası otomatik geçiş yok (`SafeHtml` attribute/URL/JS içinde güvenli sayılmaz).
-- [ ] Concat/split kuralı: Trusted değer untrusted string ile birleşince güven etiketi düşer.
-- [ ] `|tojson`: `<`, `>`, `&`, `U+2028`, `U+2029` ve `</script` kaçış sözleşmesi.
-- [ ] Trust tier birleştirme: Parent/child şablonlarda **en kısıtlayıcı policy** kazanır; template içi `|safe`/`raw`/`autoescape false` untrusted modda yasak.
+  - `HtmlRawUnsafeAttr` (`srcdoc` reddi), `HtmlComment` (`--`/`>` breakout reddi) & `Unknown` (fail-closed, `if`/`for`/`include` divergence kontrolü dahil)
+- [x] `TrustedMarkup` ayrımı: `SafeHtml`, `SafeAttr`, `SafeUrl`, `SafeJs` — bağlamlar arası otomatik geçiş yok (`SafeHtml` attribute/URL/JS içinde güvenli sayılmaz) + `api.nox` host yardımcıları (`trust_html_fragment`, `trust_attr_value`, `trust_url`, `trust_js_literal`).
+- [x] Concat/split kuralı: Trusted değer untrusted string ile birleşince güven etiketi düşer (`runtime.nox` `_eval_add`).
+- [x] `|tojson`: `<`, `>`, `&`, `U+2028`, `U+2029` ve `</script` kaçış sözleşmesi (`glyph/filters.nox` + `glyph/safety.nox`).
+- [x] Trust tier birleştirme: Parent/child şablonlarda **en kısıtlayıcı policy** kazanır; template içi `|safe`/`raw`/`autoescape false` restricted/untrusted modda yasak.
 
 ### 6.3. Zorunlu Güvenlik Test Kümesi (`tests/security/`)
-- [ ] HTML text/attr quote bypass, malformed delimiter, NUL, entity/double-encoding, SVG/MathML payload'ları.
-- [ ] `<script>`, `</script>`, `onerror`, `style`, `srcdoc`, dinamik tag/attribute enjeksiyon denemeleri.
-- [ ] Case/whitespace/percent-encoded/HTML-entity-encoded `javascript:` URL bypass corpus'u.
-- [ ] `SafeHtml`'in URL/JS/attr'e taşınması ve macro/include sırasında trust düşüşü testleri.
-- [ ] Expression üzerinden `__class__`, `__dict__`, `constructor`, `prototype`, host method erişim denemeleri.
-- [ ] Hata mesajlarında context değeri / secret / absolute path redaction testleri.
+- [x] HTML text/attr quote bypass, malformed delimiter, NUL, entity/double-encoding, SVG/MathML payload'ları (`contextual_xss_test.nox`, `mvp_security_test.nox`).
+- [x] `<script>`, `</script>`, `onerror`, `style`, `srcdoc`, dinamik tag/attribute enjeksiyon denemeleri (`contextual_xss_test.nox`).
+- [x] Case/whitespace/percent-encoded/HTML-entity-encoded `javascript:`, `//`, backslash URL ve `srcset` bypass corpus'u (`contextual_xss_test.nox`).
+- [x] `SafeHtml`'in URL/JS/attr'e taşınması ve macro/include/branch divergence sırasında trust düşüşü testleri (`contextual_xss_test.nox`).
+- [x] Expression üzerinden `__class__`, `__dict__`, `constructor`, `prototype`, host method erişim denemeleri (`mvp_security_test.nox`, `expression_test.nox`).
+- [x] Hata mesajlarında context değeri / secret / absolute path redaction testleri (`mvp_security_test.nox`, `loader_test.nox`).
 
 ---
 

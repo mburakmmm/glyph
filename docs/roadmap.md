@@ -11,7 +11,7 @@
 | **Phase 3** | `v0.1.0` **(MVP)** | `Environment`, `Template`, `Scope`, chunked `Writer`, default HTML escaping, MVP filters, `MemoryLoader`, Vertical Slice #1 | **Done** (`tests/rendering/`, `tests/security/`, `examples/hello/`) |
 | **Phase 4** | `v0.2.0` | `ADR-0005`, `ADR-0007`, `FilesystemLoader`, `include`, `ParseCache`/`CompileCache`, dependency invalidation | **Done** (`tests/loaders/`, `tests/cache/`) |
 | **Phase 5** | `v0.3.0` | `ADR-0006`, `extends`, `block`, `super()`, `macro`, `import`, `call/caller`, Vertical Slice #2 | **Done** (`tests/composition/`, `examples/blog_layout/`) |
-| **Phase 6** | `v0.4.0` | `ADR-0003`, `ADR-0004`, `ADR-0012`, contextual HTML/URL/JS/CSS tracker, `TrustedMarkup`, XSS corpus | Planned |
+| **Phase 6** | `v0.4.0` | `ADR-0003`, `ADR-0004`, `ADR-0012`, contextual HTML/URL/JS/CSS tracker, `TrustedMarkup`, XSS corpus | **Done** (`tests/security/`) |
 | **Phase 7** | `v0.5.0` | Full built-in filter/test catalog, `FilterSpec` registry, `HelperContext`, cost metering | Planned |
 | **Phase 8** | `v0.6.0` | `ADR-0008`, `ADR-0009`, i18n/locale/plural, HTML/Text/XML/MD/JSON/Email modes, streaming `GlyphWriter` | Planned |
 | **Phase 9** | `v0.7.0` | `ADR-0010`, `integrations/nyx/`, `integrations/aether/`, `glyph` CLI, diagnostic JSON, Vertical Slice #3 | Planned |

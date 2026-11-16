@@ -1,11 +1,12 @@
 # MVP FilterRegistry and built-in pure filters for Glyph (Phase 3).
 # Enforces AGENTS.md §2.5, §2.8, §13: pure, bounded, safe-by-default (`|safe` disabled by default).
 import nox.strings
+import nox.json
 from glyph.errors import SourceSpan, GlyphTypeError, GlyphSecurityError, GlyphExtensionError
 from glyph.errors import GLYPH_EVAL_TYPE, GLYPH_SECURITY_POLICY, GLYPH_EXTENSION_ERROR
 from glyph.limits import BudgetTracker
-from glyph.value import Value, MarkupContext, UndefinedPolicy, is_truthy, stringify
-from glyph.safety import escape_html_with_span
+from glyph.value import Value, MarkupContext, UndefinedPolicy, is_truthy, stringify, validate_float
+from glyph.safety import escape_html_with_span, escape_json_for_html_script
 
 class FilterArgValue:
     name: str
@@ -61,7 +62,7 @@ def default_filters(allow_safe: bool) -> FilterRegistry:
     return FilterRegistry(allow_safe)
 
 def _is_core_filter_name(name: str) -> bool:
-    if name == "escape" or name == "e" or name == "safe" or name == "raw":
+    if name == "escape" or name == "e" or name == "safe" or name == "raw" or name == "tojson":
         return True
     if name == "default" or name == "length" or name == "join" or name == "upper" or name == "lower":
         return True
@@ -160,6 +161,73 @@ def _filter_case(val: Value, args: list[FilterArgValue], to_upper: bool, policy:
         return Value.VStr(nox.strings.upper(s))
     return Value.VStr(nox.strings.lower(s))
 
+def _value_to_json(val: Value, policy: UndefinedPolicy, tracker: BudgetTracker, depth: int, span: SourceSpan) -> str:
+    tracker.consume_op(span)
+    if depth > 64:
+        raise GlyphTypeError(
+            GLYPH_EVAL_TYPE,
+            "tojson nesting depth exceeded maximum limit (64)",
+            span,
+            "flatten deeply nested structures before calling |tojson"
+        )
+    match val:
+        case Value.VNull:
+            return "null"
+        case Value.VBool(b):
+            if b:
+                return "true"
+            return "false"
+        case Value.VInt(i):
+            return str(i)
+        case Value.VFloat(f):
+            vf: float = validate_float(f, span)
+            return str(vf)
+        case Value.VStr(s):
+            return nox.json.dump_string(s)
+        case Value.VTrustedMarkup(c, _):
+            return nox.json.dump_string(c)
+        case Value.VList(items):
+            parts: list[str] = []
+            i: int = 0
+            while i < len(items):
+                parts.append(_value_to_json(items[i], policy, tracker, depth + 1, span))
+                i = i + 1
+            return "[" + nox.strings.join(parts, ",") + "]"
+        case Value.VMap(entries):
+            keys: list[str] = entries.keys_list()
+            pairs: list[str] = []
+            ki: int = 0
+            while ki < len(keys):
+                k: str = keys[ki]
+                ev: Value = entries.get(k)
+                pairs.append(nox.json.dump_string(k) + ":" + _value_to_json(ev, policy, tracker, depth + 1, span))
+                ki = ki + 1
+            return "{" + nox.strings.join(pairs, ",") + "}"
+        case Value.VUndefined(name):
+            match policy:
+                case UndefinedPolicy.LenientUndefined:
+                    return "null"
+                case _:
+                    raise GlyphTypeError(
+                        GLYPH_EVAL_TYPE,
+                        "cannot serialize undefined variable '" + name + "' with |tojson",
+                        span,
+                        "define '" + name + "' or apply |default before |tojson"
+                    )
+        case Value.VCallable(cname):
+            raise GlyphTypeError(
+                GLYPH_EVAL_TYPE,
+                "cannot serialize callable '" + cname + "' with |tojson",
+                span,
+                "pass data values rather than callables to |tojson"
+            )
+
+def _filter_tojson(val: Value, args: list[FilterArgValue], policy: UndefinedPolicy, tracker: BudgetTracker, span: SourceSpan) -> Value:
+    _expect_no_args("tojson", args, span)
+    raw_json: str = _value_to_json(val, policy, tracker, 0, span)
+    safe_json: str = escape_json_for_html_script(raw_json)
+    return Value.VTrustedMarkup(safe_json, MarkupContext.SafeJs)
+
 def apply_filter(
     reg: FilterRegistry,
     name: str,
@@ -172,6 +240,8 @@ def apply_filter(
     tracker.consume_op(span)
     if name == "escape" or name == "e":
         return _filter_escape(val, args, policy, span)
+    if name == "tojson":
+        return _filter_tojson(val, args, policy, tracker, span)
     if name == "default":
         return _filter_default(val, args, policy, span)
     if name == "length":

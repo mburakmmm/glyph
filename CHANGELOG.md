@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-16
+
+### Added
+- `docs/adr/0003-contextual-html-escaping.md` (ADR-0003), `docs/adr/0004-trusted-markup-and-safe-policy.md` (ADR-0004), `docs/adr/0012-user-created-templates-threat-model.md` (ADR-0012), `docs/security.md`, and updated `SECURITY.md` + `docs/api.md`.
+- `glyph/safety.nox` & `glyph/runtime.nox`: Stateful `HtmlContextTracker` & `OutputContext` fail-closed contextual escaping across static text, interpolations, `if`/`for` divergence guards, `block`/`super()`, `macro`/`call`, and `include` boundaries.
+- URL allowlist enforcement (`http`, `https`, `mailto`, `tel`, relative paths) rejecting HTML entity/percent/control/backslash/`//` smuggling and validating each `srcset` candidate URL.
+- Denial of unsafe HTML positions (`HtmlAttributeUnquoted`, `HtmlEventHandler`, `HtmlCss`, `StyleAttribute`, `HtmlTagOrAttrName`, `HtmlRawUnsafeAttr` `srcdoc`, `HtmlComment` `--`/`>` breakouts, raw `<script>` values, and `Unknown`).
+- `glyph/filters.nox` & `glyph/api.nox`: Protected `|tojson` filter emitting `MarkupContext.SafeJs` (escaping `<`, `>`, `&`, `U+2028`, `U+2029`) and host promotion helpers `trust_html_fragment`, `trust_attr_value`, `trust_url`, `trust_js_literal`.
+- `tests/security/contextual_xss_test.nox`: Adversarial XSS, URL smuggling, `|tojson`, provenance isolation, and `TrustTier.Restricted` regression suite.
+
 ## [0.3.0] - 2026-11-16
 
 ### Added

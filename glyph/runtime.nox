@@ -4,7 +4,7 @@ import nox.strings
 from nox.collections import OrderedDict
 from glyph.errors import SourceSpan, GlyphTypeError, GlyphUndefinedError, GlyphRenderError, GlyphSecurityError, GlyphLoadError, GlyphExtensionError
 from glyph.errors import GLYPH_EVAL_TYPE, GLYPH_EVAL_UNDEFINED, GLYPH_EVAL_DIV_ZERO, GLYPH_EVAL_OVERFLOW
-from glyph.errors import GLYPH_RENDER_ERROR, GLYPH_RENDER_CYCLE, GLYPH_SECURITY_POLICY, GLYPH_LOADER_NOT_FOUND, GLYPH_EXTENSION_ERROR
+from glyph.errors import GLYPH_RENDER_ERROR, GLYPH_RENDER_CYCLE, GLYPH_SECURITY_POLICY, GLYPH_SECURITY_CONTEXT, GLYPH_LOADER_NOT_FOUND, GLYPH_EXTENSION_ERROR
 from glyph.limits import BudgetTracker
 from glyph.value import Value, MarkupContext, UndefinedPolicy, is_truthy, stringify, validate_float
 from glyph.value import map_get, list_get, is_forbidden_key, checked_add, checked_sub
@@ -15,7 +15,7 @@ from glyph.validate import TemplateInfo
 from glyph.options import OutputMode, RenderOptions, TrustTier, min_trust_tier
 from glyph.scope import RenderScope, make_loop_metadata
 from glyph.writer import GlyphWriter, RenderResult
-from glyph.safety import render_value_for_mode
+from glyph.safety import HtmlContextTracker, OutputContext, render_contextual_value
 from glyph.filters import FilterRegistry, FilterArgValue, apply_filter
 from glyph.tests_registry import TestRegistry, apply_test
 from glyph.functions import FunctionRegistry, apply_function
@@ -315,6 +315,7 @@ class _Evaluator:
     cur_block_idx: int
     has_caller: bool
     active_caller: CallerClosure
+    html_ctx: HtmlContextTracker
 
     def __init__(
         self: _Evaluator,
@@ -335,7 +336,8 @@ class _Evaluator:
         cur_block_name: str,
         cur_block_idx: int,
         has_caller: bool,
-        active_caller: CallerClosure
+        active_caller: CallerClosure,
+        html_ctx: HtmlContextTracker
     ) -> None:
         self.scope = scope
         self.tracker = tracker
@@ -355,6 +357,7 @@ class _Evaluator:
         self.cur_block_idx = cur_block_idx
         self.has_caller = has_caller
         self.active_caller = active_caller
+        self.html_ctx = html_ctx
 
     def eval_expr(self: _Evaluator, expr: Expr) -> Value:
         self.tracker.consume_op(expr.span)
@@ -571,6 +574,7 @@ class _Evaluator:
 
         mac_scope: RenderScope = RenderScope(mac_root)
         mac_writer: GlyphWriter = GlyphWriter(self.tracker)
+        mac_ctx_base: HtmlContextTracker = HtmlContextTracker()
         def_ev: _Evaluator = _Evaluator(
             mac_scope,
             self.tracker,
@@ -589,7 +593,8 @@ class _Evaluator:
             "",
             -1,
             with_caller,
-            caller_val
+            caller_val,
+            HtmlContextTracker()
         )
 
         # Apply explicit bound args and evaluate remaining default params.
@@ -620,6 +625,8 @@ class _Evaluator:
         match self.options.output_mode:
             case OutputMode.Html:
                 if self.options.autoescape:
+                    if not def_ev.html_ctx.same_state(mac_ctx_base):
+                        return Value.VStr(out_str)
                     match macro_trust:
                         case TrustTier.Trusted:
                             return Value.VTrustedMarkup(out_str, MarkupContext.SafeHtml)
@@ -664,6 +671,7 @@ class _Evaluator:
         call_scope: RenderScope = RenderScope(OrderedDict[str, Value]())
         call_scope.frames = call_frames
         call_writer: GlyphWriter = GlyphWriter(self.tracker)
+        call_ctx_base: HtmlContextTracker = HtmlContextTracker()
         call_ev: _Evaluator = _Evaluator(
             call_scope,
             self.tracker,
@@ -682,7 +690,8 @@ class _Evaluator:
             self.cur_block_name,
             self.cur_block_idx,
             False,
-            _empty_caller()
+            _empty_caller(),
+            HtmlContextTracker()
         )
         call_ev.exec_stmts(cc.body)
         call_writer.flush()
@@ -692,6 +701,8 @@ class _Evaluator:
         match self.options.output_mode:
             case OutputMode.Html:
                 if self.options.autoescape:
+                    if not call_ev.html_ctx.same_state(call_ctx_base):
+                        return Value.VStr(res_str)
                     match self.options.trust_tier:
                         case TrustTier.Trusted:
                             return Value.VTrustedMarkup(res_str, MarkupContext.SafeHtml)
@@ -710,6 +721,7 @@ class _Evaluator:
         parent_filters: FilterRegistry = _filters_for_trust(self.filters, parent_trust)
 
         sup_writer: GlyphWriter = GlyphWriter(self.tracker)
+        sup_ctx_base: HtmlContextTracker = HtmlContextTracker()
         sup_ev: _Evaluator = _Evaluator(
             self.scope,
             self.tracker,
@@ -728,7 +740,8 @@ class _Evaluator:
             self.cur_block_name,
             self.cur_block_idx + 1,
             self.has_caller,
-            self.active_caller
+            self.active_caller,
+            HtmlContextTracker()
         )
         self.scope.push_frame()
         sup_ev.exec_stmts(parent_ver.body)
@@ -739,6 +752,8 @@ class _Evaluator:
         match self.options.output_mode:
             case OutputMode.Html:
                 if self.options.autoescape:
+                    if not sup_ev.html_ctx.same_state(sup_ctx_base):
+                        return Value.VStr(sup_str)
                     match parent_trust:
                         case TrustTier.Trusted:
                             return Value.VTrustedMarkup(sup_str, MarkupContext.SafeHtml)
@@ -929,17 +944,26 @@ class _Evaluator:
             match st.kind:
                 case StmtKind.SText(txt):
                     self.writer.write(txt, st.span)
+                    match self.options.output_mode:
+                        case OutputMode.Html:
+                            if self.options.autoescape:
+                                self.html_ctx.advance_text(txt)
+                        case _:
+                            pass
                 case StmtKind.SOutput(expr):
                     val: Value = self.eval_expr(expr)
-                    rendered: str = render_value_for_mode(
+                    rendered: str = render_contextual_value(
                         val,
                         self.options.autoescape,
                         self.options.output_mode,
                         self.options.undefined_policy,
+                        self.options.trust_tier,
+                        self.html_ctx,
                         st.span
                     )
                     self.writer.write(rendered, st.span)
                 case StmtKind.SIf(branches, else_body):
+                    if_base: HtmlContextTracker = self.html_ctx.clone()
                     taken: bool = False
                     bi: int = 0
                     while bi < len(branches) and not taken:
@@ -955,6 +979,13 @@ class _Evaluator:
                         self.scope.push_frame()
                         self.exec_stmts(else_body)
                         self.scope.pop_frame()
+                    match self.options.output_mode:
+                        case OutputMode.Html:
+                            if self.options.autoescape:
+                                if not self.html_ctx.same_state(if_base):
+                                    self.html_ctx.mark_unknown()
+                        case _:
+                            pass
                 case StmtKind.SFor(targets, iterable, body, else_body):
                     self._exec_for(targets, iterable, body, else_body, st.span)
                 case StmtKind.SSet(target, val_expr):
@@ -977,6 +1008,7 @@ class _Evaluator:
             i = i + 1
 
     def _exec_block(self: _Evaluator, bname: str, default_body: list[Stmt], span: SourceSpan) -> None:
+        blk_base: HtmlContextTracker = self.html_ctx.clone()
         if self.has_chain and self.chain.has_block(bname):
             ver: BlockVersion = self.chain.get_block_at(bname, 0, span)
             blk_trust: TrustTier = min_trust_tier(self.options.trust_tier, ver.trust_tier)
@@ -1000,7 +1032,8 @@ class _Evaluator:
                 bname,
                 0,
                 self.has_caller,
-                self.active_caller
+                self.active_caller,
+                self.html_ctx
             )
             self.scope.push_frame()
             blk_ev.exec_stmts(ver.body)
@@ -1009,6 +1042,13 @@ class _Evaluator:
             self.scope.push_frame()
             self.exec_stmts(default_body)
             self.scope.pop_frame()
+        match self.options.output_mode:
+            case OutputMode.Html:
+                if self.options.autoescape:
+                    if not self.html_ctx.same_state(blk_base):
+                        self.html_ctx.mark_unknown()
+            case _:
+                pass
 
     def _exec_macro_def(
         self: _Evaluator,
@@ -1067,7 +1107,8 @@ class _Evaluator:
             "",
             -1,
             False,
-            _empty_caller()
+            _empty_caller(),
+            HtmlContextTracker()
         )
         imp_ev.exec_declarations_only(imp_tpl.ast.body)
         self.tracker.exit_include()
@@ -1110,11 +1151,13 @@ class _Evaluator:
             raise GlyphExtensionError(GLYPH_EXTENSION_ERROR, "unknown macro '" + mac_target + "' in call block", span, "define or import the macro before calling")
         cc: CallerClosure = CallerClosure(caller_params, body, _snapshot_frames(self.scope), self.macros.clone(), span)
         res_val: Value = self._eval_call(mac_target, args, True, cc, span)
-        rendered: str = render_value_for_mode(
+        rendered: str = render_contextual_value(
             res_val,
             self.options.autoescape,
             self.options.output_mode,
             self.options.undefined_policy,
+            self.options.trust_tier,
+            self.html_ctx,
             span
         )
         self.writer.write(rendered, span)
@@ -1127,6 +1170,7 @@ class _Evaluator:
         else_body: list[Stmt],
         span: SourceSpan
     ) -> None:
+        loop_base: HtmlContextTracker = self.html_ctx.clone()
         seq_val: Value = _check_not_undef(self.eval_expr(iterable), self.options.undefined_policy, span)
         match seq_val:
             case Value.VList(items):
@@ -1138,6 +1182,13 @@ class _Evaluator:
                         self.scope.push_frame()
                         self.exec_stmts(else_body)
                         self.scope.pop_frame()
+                        match self.options.output_mode:
+                            case OutputMode.Html:
+                                if self.options.autoescape:
+                                    if not self.html_ctx.same_state(loop_base):
+                                        self.html_ctx.mark_unknown()
+                            case _:
+                                pass
                     return
                 idx: int = 0
                 while idx < n:
@@ -1147,6 +1198,13 @@ class _Evaluator:
                     self.scope.set_local("loop", make_loop_metadata(idx, n), span)
                     self.exec_stmts(body)
                     self.scope.pop_frame()
+                    match self.options.output_mode:
+                        case OutputMode.Html:
+                            if self.options.autoescape:
+                                if not self.html_ctx.same_state(loop_base):
+                                    self.html_ctx.mark_unknown()
+                        case _:
+                            pass
                     idx = idx + 1
             case Value.VMap(entries):
                 keys: list[str] = entries.keys_list()
@@ -1156,6 +1214,13 @@ class _Evaluator:
                         self.scope.push_frame()
                         self.exec_stmts(else_body)
                         self.scope.pop_frame()
+                        match self.options.output_mode:
+                            case OutputMode.Html:
+                                if self.options.autoescape:
+                                    if not self.html_ctx.same_state(loop_base):
+                                        self.html_ctx.mark_unknown()
+                            case _:
+                                pass
                     return
                 kidx: int = 0
                 while kidx < kn:
@@ -1172,6 +1237,13 @@ class _Evaluator:
                     self.scope.set_local("loop", make_loop_metadata(kidx, kn), span)
                     self.exec_stmts(body)
                     self.scope.pop_frame()
+                    match self.options.output_mode:
+                        case OutputMode.Html:
+                            if self.options.autoescape:
+                                if not self.html_ctx.same_state(loop_base):
+                                    self.html_ctx.mark_unknown()
+                        case _:
+                            pass
                     kidx = kidx + 1
             case _:
                 raise GlyphTypeError(GLYPH_EVAL_TYPE, "for-loop iterable must be a list or map", span, "iterate over a list or map")
@@ -1183,6 +1255,22 @@ class _Evaluator:
         ignore_missing: bool,
         span: SourceSpan
     ) -> None:
+        match self.options.output_mode:
+            case OutputMode.Html:
+                if self.options.autoescape:
+                    cur_octx: OutputContext = self.html_ctx.current_output_context()
+                    match cur_octx:
+                        case OutputContext.HtmlText:
+                            pass
+                        case _:
+                            raise GlyphSecurityError(
+                                GLYPH_SECURITY_CONTEXT,
+                                "{% include %} is only allowed in HTML text context",
+                                span,
+                                "move {% include %} outside HTML tags, attributes, comments, or <script>/<style> blocks"
+                            )
+            case _:
+                pass
         is_literal: bool = False
         match tpl_expr.kind:
             case ExprKind.EStr(_):
@@ -1258,6 +1346,7 @@ class _Evaluator:
             bi = bi + 1
         child_active.append(inc_name)
 
+        child_inc_base: HtmlContextTracker = HtmlContextTracker()
         child_ev: _Evaluator = _Evaluator(
             child_scope,
             self.tracker,
@@ -1276,9 +1365,17 @@ class _Evaluator:
             "",
             -1,
             False,
-            _empty_caller()
+            _empty_caller(),
+            HtmlContextTracker()
         )
         child_ev.exec_stmts(child_tpl.ast.body)
+        match self.options.output_mode:
+            case OutputMode.Html:
+                if self.options.autoescape:
+                    if not child_ev.html_ctx.same_state(child_inc_base):
+                        self.html_ctx.mark_unknown()
+            case _:
+                pass
         self.tracker.exit_include()
 
 def _noop_resolve(name: str, _tr: BudgetTracker) -> Template:
@@ -1360,7 +1457,8 @@ def execute_template_with_resolver(
             "",
             -1,
             False,
-            _empty_caller()
+            _empty_caller(),
+            HtmlContextTracker()
         )
         # Execute top-level declarations from base down to leaf child (so child overrides base declarations),
         # then execute the root layout body with block dispatch.
@@ -1396,7 +1494,8 @@ def execute_template_with_resolver(
         "",
         -1,
         False,
-        _empty_caller()
+        _empty_caller(),
+        HtmlContextTracker()
     )
     ev2.exec_stmts(tpl.ast.body)
     writer.flush()

@@ -1,6 +1,6 @@
 # Glyph Public API Reference (`docs/api.md`)
 
-> **Version:** `0.2.0` (Phase 4)  
+> **Version:** `0.4.0` (Phase 6)  
 > **Entry Module:** `import glyph.api`  
 > **Stability Legend:** `Stable` (contract frozen in SemVer), `Experimental` (v0.x shape subject to refinement before `v1.0`), `Internal` (implementation detail).
 
@@ -27,6 +27,11 @@
 - `context_from_map(entries: OrderedDict[str, Value]) -> Context`
 - `context_from_json(raw: str) -> Context` — Parses JSON into `Value` (preserving 64-bit integer precision; never marks JSON strings as `VTrustedMarkup`).
 - `escape_html(text: str) -> str` — Escapes `&`, `<`, `>`, `"`, `'` and rejects NUL bytes in HTML output.
+- `trust_html_fragment(html: str) -> Value` — Promotes host-verified HTML to `MarkupContext.SafeHtml` (still downgraded/escaped outside `HtmlText` and stripped under `TrustTier.Restricted`).
+- `trust_attr_value(attr: str) -> Value` — Promotes host-verified attribute content to `MarkupContext.SafeAttr`.
+- `trust_url(url: str) -> Value` — Validates `url` against the URL scheme allowlist (`http`, `https`, `mailto`, `tel`, relative) and returns `MarkupContext.SafeUrl` (raises `GlyphSecurityError` upfront on unsafe schemes or obfuscation).
+- `trust_js_literal(js: str) -> Value` — Promotes host-generated JSON/JS literals to `MarkupContext.SafeJs` (preferred template pattern: `{{ data | tojson }}`).
+- `OutputContext` — Enum representing contextual HTML positions (`HtmlText`, `HtmlAttributeQuoted`, `HtmlAttributeUnquoted`, `HtmlUrlAttribute`, `HtmlJs`, `HtmlEventHandler`, `HtmlCss`, `StyleAttribute`, `HtmlTagOrAttrName`, `HtmlRawUnsafeAttr`, `HtmlComment`, `Unknown`).
 
 ## 4. Loaders, Cache, Options & Registries (`Experimental` until `v1.0.0`)
 

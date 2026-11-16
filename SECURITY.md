@@ -18,7 +18,7 @@ Glyph treats templates as **data, not programs**, and follows a **fail-closed, s
 | **Restricted templates** | Admin/tenant-editable templates with strict policy | Opt-in restricted mode (no `|safe`, no dynamic includes, tight budgets) |
 | **Untrusted hostile templates** | Arbitrary attacker-controlled template source | **Not supported** as a standalone sandbox in `v1.0`; requires external host/WASM/process isolation |
 
-For detailed specifications, see [AGENTS.md](AGENTS.md) (§2, §10, §11) and `docs/security.md` (planned in Phase 6).
+For detailed specifications, see [AGENTS.md](AGENTS.md) (§2, §10, §11), [docs/security.md](docs/security.md), and the security ADRs ([ADR-0003](docs/adr/0003-contextual-html-escaping.md), [ADR-0004](docs/adr/0004-trusted-markup-and-safe-policy.md), [ADR-0012](docs/adr/0012-user-created-templates-threat-model.md)).
 
 ## Reporting a Vulnerability
 

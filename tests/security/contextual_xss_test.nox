@@ -1,0 +1,353 @@
+# Phase 6 Security Test Suite: Contextual HTML Escaping, URL Allowlist, |tojson, and TrustedMarkup Provenance.
+import nox.test
+import nox.strings
+from nox.collections import OrderedDict
+import glyph.api
+from glyph.api import Value, MarkupContext, MemoryLoader, Environment, EnvironmentOptions
+from glyph.api import RenderOptions, Template, Context, TrustTier, OutputMode, UndefinedPolicy
+from glyph.api import ResourceBudget, GlyphSecurityError, GlyphTypeError
+from glyph.errors import GLYPH_SECURITY_CONTEXT, GLYPH_SECURITY_POLICY, GLYPH_EVAL_TYPE
+
+def _expect_security_error(tpl_src: str, ctx_json: str, expected_code: str, label: str) -> None:
+    loader: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(loader)
+    tpl: Template = glyph.api.compile_string(tpl_src, "sec.html", env)
+    ctx: Context = glyph.api.context_from_json(ctx_json)
+    caught: str = ""
+    try:
+        ignored: str = glyph.api.render(tpl, ctx, env)
+    except GlyphSecurityError as e:
+        caught = e.code
+    if caught != expected_code:
+        print("FAILED_CASE=" + label + " expected=" + expected_code + " got=" + caught)
+    nox.test.assert_eq_str(caught, expected_code, label)
+
+def _expect_security_error_with_val(tpl_src: str, key: str, val: Value, expected_code: str, label: str) -> None:
+    loader: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(loader)
+    tpl: Template = glyph.api.compile_string(tpl_src, "sec_val.html", env)
+    m: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    m.set(key, val)
+    ctx: Context = Context(m)
+    caught: str = ""
+    try:
+        ignored: str = glyph.api.render(tpl, ctx, env)
+    except GlyphSecurityError as e:
+        caught = e.code
+    if caught != expected_code:
+        print("FAILED_CASE=" + label + " expected=" + expected_code + " got=" + caught)
+    nox.test.assert_eq_str(caught, expected_code, label)
+
+def test_unsafe_html_contexts_denied() -> None:
+    # Unquoted attribute rejected
+    _expect_security_error("<div title={{ x }}>ok</div>", '{"x":"a onmouseover=alert(1)"}', GLYPH_SECURITY_CONTEXT, "unquoted attr denied")
+    _expect_security_error("<div class={{ x }}>ok</div>", '{"x":"btn"}', GLYPH_SECURITY_CONTEXT, "unquoted class attr denied")
+
+    # Event handlers rejected
+    _expect_security_error("<button onclick=\"{{ x }}\">go</button>", '{"x":"alert(1)"}', GLYPH_SECURITY_CONTEXT, "onclick double-quoted denied")
+    _expect_security_error("<img src=\"a.png\" onerror='{{ x }}'>", '{"x":"alert(1)"}', GLYPH_SECURITY_CONTEXT, "onerror single-quoted denied")
+    _expect_security_error("<body ONLOAD=\"{{ x }}\">", '{"x":"alert(1)"}', GLYPH_SECURITY_CONTEXT, "uppercase ONLOAD denied")
+
+    # CSS / style attribute and <style> block rejected
+    _expect_security_error("<div style=\"color: {{ x }}\">hi</div>", '{"x":"red; background:url(javascript:1)"}', GLYPH_SECURITY_CONTEXT, "style attr denied")
+    _expect_security_error("<style>body { color: {{ x }}; }</style>", '{"x":"red"}', GLYPH_SECURITY_CONTEXT, "style element denied")
+
+    # Dynamic tag name / attribute name rejected
+    _expect_security_error("<{{ tag }}>hi</p>", '{"tag":"p"}', GLYPH_SECURITY_CONTEXT, "dynamic tag name denied")
+    _expect_security_error("<div {{ attr }}=\"1\">hi</div>", '{"attr":"data-x"}', GLYPH_SECURITY_CONTEXT, "dynamic attr name denied")
+
+    # Dangerous srcdoc attribute rejected
+    _expect_security_error("<iframe srcdoc=\"{{ x }}\"></iframe>", '{"x":"<script>alert(1)</script>"}', GLYPH_SECURITY_CONTEXT, "iframe srcdoc denied")
+
+    # HTML comment breakout rejected if containing -- or >
+    _expect_security_error("<!-- {{ x }} -->", '{"x":"--> <script>alert(1)</script>"}', GLYPH_SECURITY_CONTEXT, "comment breakout denied")
+    _expect_security_error("<!-- {{ x }} -->", '{"x":"--"}', GLYPH_SECURITY_CONTEXT, "comment double-dash denied")
+    _expect_security_error("<!-- {{ x }} -->", '{"x":"a>b"}', GLYPH_SECURITY_CONTEXT, "comment gt denied")
+
+    # Safe HTML comment content allowed
+    loader: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(loader)
+    tpl: Template = glyph.api.compile_string("<!-- build {{ v }} -->", "c.html", env)
+    out: str = glyph.api.render(tpl, glyph.api.context_from_json('{"v":"123"}'), env)
+    nox.test.assert_eq_str(out, "<!-- build 123 -->", "benign HTML comment allowed")
+
+def test_url_attribute_allowlist_and_obfuscation_blocking() -> None:
+    loader: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(loader)
+
+    # Safe URLs allowed and escaped
+    href_tpl: Template = glyph.api.compile_string("<a href=\"{{ u }}\">go</a>", "u.html", env)
+    nox.test.assert_eq_str(
+        glyph.api.render(href_tpl, glyph.api.context_from_json('{"u":"https://example.com/a?x=1&y=2"}'), env),
+        "<a href=\"https://example.com/a?x=1&amp;y=2\">go</a>",
+        "https URL allowed and & escaped"
+    )
+    nox.test.assert_eq_str(
+        glyph.api.render(href_tpl, glyph.api.context_from_json('{"u":"http://example.com"}'), env),
+        "<a href=\"http://example.com\">go</a>",
+        "http URL allowed"
+    )
+    nox.test.assert_eq_str(
+        glyph.api.render(href_tpl, glyph.api.context_from_json('{"u":"mailto:team@example.com"}'), env),
+        "<a href=\"mailto:team@example.com\">go</a>",
+        "mailto URL allowed"
+    )
+    nox.test.assert_eq_str(
+        glyph.api.render(href_tpl, glyph.api.context_from_json('{"u":"tel:+15550100"}'), env),
+        "<a href=\"tel:+15550100\">go</a>",
+        "tel URL allowed"
+    )
+    nox.test.assert_eq_str(
+        glyph.api.render(href_tpl, glyph.api.context_from_json('{"u":"/docs/intro?v=1#top"}'), env),
+        "<a href=\"/docs/intro?v=1#top\">go</a>",
+        "relative path URL allowed"
+    )
+    nox.test.assert_eq_str(
+        glyph.api.render(href_tpl, glyph.api.context_from_json('{"u":"#section-2"}'), env),
+        "<a href=\"#section-2\">go</a>",
+        "fragment URL allowed"
+    )
+
+    # Query interpolation after fixed safe prefix
+    q_tpl: Template = glyph.api.compile_string("<a href=\"https://example.com/search?q={{ q }}\">s</a>", "q.html", env)
+    nox.test.assert_eq_str(
+        glyph.api.render(q_tpl, glyph.api.context_from_json('{"q":"a&b"}'), env),
+        "<a href=\"https://example.com/search?q=a&amp;b\">s</a>",
+        "query param after safe origin allowed"
+    )
+
+    # Dangerous schemes and obfuscations blocked
+    _expect_security_error("<a href=\"{{ x }}\">x</a>", '{"x":"javascript:alert(1)"}', GLYPH_SECURITY_CONTEXT, "javascript: blocked")
+    _expect_security_error("<a href=\"{{ x }}\">x</a>", '{"x":"JaVaScRiPt:alert(1)"}', GLYPH_SECURITY_CONTEXT, "mixed-case javascript: blocked")
+    _expect_security_error("<a href=\"{{ x }}\">x</a>", '{"x":"   javascript:alert(1)"}', GLYPH_SECURITY_CONTEXT, "leading whitespace javascript: blocked")
+    _expect_security_error("<a href=\"{{ x }}\">x</a>", '{"x":"java\\tscript:alert(1)"}', GLYPH_SECURITY_CONTEXT, "tab-obfuscated javascript: blocked")
+    _expect_security_error("<a href=\"{{ x }}\">x</a>", '{"x":"&#106;avascript:alert(1)"}', GLYPH_SECURITY_CONTEXT, "decimal entity obfuscated javascript: blocked")
+    _expect_security_error("<a href=\"{{ x }}\">x</a>", '{"x":"&#x6a;avascript:alert(1)"}', GLYPH_SECURITY_CONTEXT, "hex entity obfuscated javascript: blocked")
+    _expect_security_error("<a href=\"{{ x }}\">x</a>", '{"x":"java%73cript:alert(1)"}', GLYPH_SECURITY_CONTEXT, "percent-encoded obfuscated javascript: blocked")
+    _expect_security_error("<a href=\"{{ x }}\">x</a>", '{"x":"vbscript:msgbox(1)"}', GLYPH_SECURITY_CONTEXT, "vbscript: blocked")
+    _expect_security_error("<img src=\"{{ x }}\">", '{"x":"data:text/html,<script>alert(1)</script>"}', GLYPH_SECURITY_CONTEXT, "data: URL blocked")
+    _expect_security_error("<form action=\"{{ x }}\"></form>", '{"x":"javascript:submit()"}', GLYPH_SECURITY_CONTEXT, "form action javascript: blocked")
+    _expect_security_error("<button formaction=\"{{ x }}\">go</button>", '{"x":"javascript:1"}', GLYPH_SECURITY_CONTEXT, "formaction javascript: blocked")
+    _expect_security_error("<a href=\"java{{ x }}\">x</a>", '{"x":"script:alert(1)"}', GLYPH_SECURITY_CONTEXT, "split prefix javascript: blocked")
+    _expect_security_error("<a href=\"{{ x }}\">x</a>", '{"x":"\\\\evil.example/foo"}', GLYPH_SECURITY_CONTEXT, "backslash URL blocked")
+    _expect_security_error("<a href=\"{{ x }}\">x</a>", '{"x":"//evil.example/foo"}', GLYPH_SECURITY_CONTEXT, "scheme-relative // URL blocked")
+
+    # Control char 0x01 inside URL blocked
+    _expect_security_error_with_val("<a href=\"{{ x }}\">x</a>", "x", Value.VStr("java" + nox.strings.char_from_byte(1) + "script:1"), GLYPH_SECURITY_CONTEXT, "C0 control char in URL blocked")
+
+    # srcset per-candidate validation
+    srcset_tpl: Template = glyph.api.compile_string("<img srcset=\"{{ s }}\">", "ss.html", env)
+    nox.test.assert_eq_str(
+        glyph.api.render(srcset_tpl, glyph.api.context_from_json('{"s":"/img/a.png 1x, https://cdn.example.com/b.png 2x"}'), env),
+        "<img srcset=\"/img/a.png 1x, https://cdn.example.com/b.png 2x\">",
+        "valid srcset allowed"
+    )
+    _expect_security_error("<img srcset=\"{{ s }}\">", '{"s":"/ok.png 1x, javascript:alert(1) 2x"}', GLYPH_SECURITY_CONTEXT, "poisoned srcset entry blocked")
+
+def test_tojson_and_script_context_safety() -> None:
+    loader: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(loader)
+
+    # Raw string or value in <script> is denied
+    _expect_security_error("<script>var name = {{ name }};</script>", '{"name":"Ada"}', GLYPH_SECURITY_CONTEXT, "raw string inside script denied")
+    _expect_security_error("<script>var n = {{ n }};</script>", '{"n":42}', GLYPH_SECURITY_CONTEXT, "raw int inside script denied")
+    _expect_security_error_with_val("<script>var h = {{ h }};</script>", "h", glyph.api.trust_html_fragment("<p>hi</p>"), GLYPH_SECURITY_CONTEXT, "SafeHtml inside script denied")
+
+    # |tojson inside <script> escapes HTML/script breakouts and produces SafeJs
+    tpl: Template = glyph.api.compile_string("<script>const cfg = {{ cfg | tojson }};</script>", "js.html", env)
+    ctx_map: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    cfg_map: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    ls: str = nox.strings.char_from_byte(226) + nox.strings.char_from_byte(128) + nox.strings.char_from_byte(168)
+    ps: str = nox.strings.char_from_byte(226) + nox.strings.char_from_byte(128) + nox.strings.char_from_byte(169)
+    cfg_map.set("html", Value.VStr("</script><script>alert('xss')&" + ls + ps))
+    cfg_map.set("ok", Value.VBool(True))
+    cfg_map.set("count", Value.VInt(3))
+    ctx_map.set("cfg", Value.VMap(cfg_map))
+    out: str = glyph.api.render(tpl, Context(ctx_map), env)
+    nox.test.assert_true(not nox.strings.contains(out, "</script><script>"), "</script> breakout must be escaped in |tojson")
+    nox.test.assert_true(nox.strings.contains(out, "\\u003c/script\\u003e\\u003cscript\\u003e"), "< and > escaped to \\u003c / \\u003e")
+    nox.test.assert_true(nox.strings.contains(out, "\\u0026"), "& escaped to \\u0026")
+    nox.test.assert_true(nox.strings.contains(out, "\\u2028\\u2029"), "U+2028/U+2029 escaped")
+
+    # SafeJs emitted in <a href> is denied (wrong context tag!)
+    _expect_security_error("<a href=\"{{ x | tojson }}\">bad</a>", '{"x":"javascript:1"}', GLYPH_SECURITY_CONTEXT, "SafeJs rejected in href")
+
+    # Restricted template tier CANNOT interpolate inside <script> even with |tojson
+    res_opts: RenderOptions = RenderOptions(
+        OutputMode.Html,
+        True,
+        UndefinedPolicy.StrictUndefined,
+        TrustTier.Restricted,
+        glyph.api.default_budget(),
+        "en-US"
+    )
+    caught_res: str = ""
+    try:
+        ignored: str = glyph.api.render_with_options(tpl, Context(ctx_map), res_opts, env)
+    except GlyphSecurityError as e:
+        caught_res = e.code
+    nox.test.assert_eq_str(caught_res, GLYPH_SECURITY_CONTEXT, "Restricted tier denied <script> interpolation even with |tojson")
+
+def test_trusted_markup_provenance_and_context_boundaries() -> None:
+    loader: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(loader)
+
+    # SafeHtml works unescaped in HtmlText
+    tpl_txt: Template = glyph.api.compile_string("<div>{{ badge }}</div>", "badge.html", env)
+    m: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    m.set("badge", glyph.api.trust_html_fragment("<b>PRO</b>"))
+    nox.test.assert_eq_str(glyph.api.render(tpl_txt, Context(m), env), "<div><b>PRO</b></div>", "SafeHtml rendered raw in HtmlText")
+
+    # SafeHtml in quoted HtmlAttribute is NOT trusted for attribute breakout -> escaped!
+    tpl_attr: Template = glyph.api.compile_string("<div title=\"{{ badge }}\">ok</div>", "ba.html", env)
+    m2: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    m2.set("badge", glyph.api.trust_html_fragment("a\" onmouseover=\"alert(1)"))
+    nox.test.assert_eq_str(
+        glyph.api.render(tpl_attr, Context(m2), env),
+        "<div title=\"a&quot; onmouseover=&quot;alert(1)\">ok</div>",
+        "SafeHtml downgraded/escaped inside HtmlAttributeQuoted"
+    )
+
+    # SafeAttr works in quoted attribute, escaped if placed in HtmlText
+    m3: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    m3.set("a", glyph.api.trust_attr_value("x\" onload=\"y"))
+    nox.test.assert_eq_str(
+        glyph.api.render(glyph.api.compile_string("<span>{{ a }}</span>", "sa.html", env), Context(m3), env),
+        "<span>x&quot; onload=&quot;y</span>",
+        "SafeAttr escaped in HtmlText"
+    )
+
+    # Concatenating SafeHtml with raw VStr strips trust
+    tpl_cat: Template = glyph.api.compile_string("<div>{{ badge + raw_str }}</div>", "cat.html", env)
+    m4: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    m4.set("badge", glyph.api.trust_html_fragment("<b>ok</b>"))
+    m4.set("raw_str", Value.VStr("<script>"))
+    nox.test.assert_eq_str(
+        glyph.api.render(tpl_cat, Context(m4), env),
+        "<div>&lt;b&gt;ok&lt;/b&gt;&lt;script&gt;</div>",
+        "SafeHtml + VStr strips trust provenance"
+    )
+
+    # trust_url rejects unsafe URLs upfront
+    bad_url_code: str = ""
+    try:
+        u: Value = glyph.api.trust_url("javascript:alert(1)")
+    except GlyphSecurityError as e:
+        bad_url_code = e.code
+    nox.test.assert_eq_str(bad_url_code, GLYPH_SECURITY_CONTEXT, "trust_url validates URL scheme upfront")
+
+    # Valid trust_url works in href
+    m5: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    m5.set("link", glyph.api.trust_url("https://nox-lang.dev/docs"))
+    nox.test.assert_eq_str(
+        glyph.api.render(glyph.api.compile_string("<a href=\"{{ link }}\">docs</a>", "tu.html", env), Context(m5), env),
+        "<a href=\"https://nox-lang.dev/docs\">docs</a>",
+        "valid SafeUrl rendered in href"
+    )
+
+    # Restricted TrustTier strips SafeHtml trust
+    res_opts: RenderOptions = RenderOptions(
+        OutputMode.Html,
+        True,
+        UndefinedPolicy.StrictUndefined,
+        TrustTier.Restricted,
+        glyph.api.default_budget(),
+        "en-US"
+    )
+    nox.test.assert_eq_str(
+        glyph.api.render_with_options(tpl_txt, Context(m), res_opts, env),
+        "<div>&lt;b&gt;PRO&lt;/b&gt;</div>",
+        "Restricted trust tier escapes SafeHtml"
+    )
+
+def test_control_flow_and_include_context_boundaries() -> None:
+    loader: MemoryLoader = MemoryLoader()
+    loader.put("part.html", "<span>{{ x }}</span>")
+    env: Environment = glyph.api.default_environment(loader)
+
+    # Divergent if branch enters <script> without closing -> Unknown -> subsequent {{ x }} fails closed
+    _expect_security_error(
+        "{% if flag %}<script>{% endif %}{{ x }}",
+        '{"flag":true,"x":"alert(1)"}',
+        GLYPH_SECURITY_CONTEXT,
+        "divergent if entering <script> fails closed"
+    )
+
+    # Balanced tag inside if stays safe in HtmlText
+    bal_tpl: Template = glyph.api.compile_string("{% if flag %}<div class=\"ok\">{% endif %}{{ x }}", "bal.html", env)
+    nox.test.assert_eq_str(
+        glyph.api.render(bal_tpl, glyph.api.context_from_json('{"flag":true,"x":"<b>"}'), env),
+        "<div class=\"ok\">&lt;b&gt;",
+        "balanced tag in if preserves HtmlText state"
+    )
+
+    # Attribute inside if on open tag returns to tag attr state cleanly
+    attr_if: Template = glyph.api.compile_string("<a {% if cls %}class=\"{{ cls }}\"{% endif %} href=\"{{ u }}\">x</a>", "aif.html", env)
+    nox.test.assert_eq_str(
+        glyph.api.render(attr_if, glyph.api.context_from_json('{"cls":"btn","u":"https://example.com"}'), env),
+        "<a class=\"btn\" href=\"https://example.com\">x</a>",
+        "attribute inside if returns cleanly to tag attr state"
+    )
+
+    # {% include %} inside <script> or attribute context denied
+    _expect_security_error("<script>{% include 'part.html' %}</script>", '{"x":"hi"}', GLYPH_SECURITY_CONTEXT, "include inside <script> denied")
+    _expect_security_error("<div title=\"{% include 'part.html' %}\"></div>", '{"x":"hi"}', GLYPH_SECURITY_CONTEXT, "include inside attr denied")
+
+    # Normal {% include %} in HtmlText allowed (with explicit 'with context')
+    inc_tpl: Template = glyph.api.compile_string("<div>{% include 'part.html' with context %}</div>", "inc_ok.html", env)
+    nox.test.assert_eq_str(
+        glyph.api.render(inc_tpl, glyph.api.context_from_json('{"x":"<ok>"}'), env),
+        "<div><span>&lt;ok&gt;</span></div>",
+        "include in HtmlText succeeds cleanly"
+    )
+
+    # SVG/MathML vector: onload handler interpolation blocked; <svg><script> interpolation blocked
+    _expect_security_error("<svg onload=\"{{ x }}\"></svg>", '{"x":"alert(1)"}', GLYPH_SECURITY_CONTEXT, "svg onload blocked")
+    _expect_security_error("<svg><script>var a = {{ x }};</script></svg>", '{"x":"1"}', GLYPH_SECURITY_CONTEXT, "svg nested script raw interpolation blocked")
+
+    # SafeHtml containing javascript: scheme is STILL blocked in href!
+    _expect_security_error_with_val("<a href=\"{{ u }}\">x</a>", "u", glyph.api.trust_html_fragment("javascript:alert(1)"), GLYPH_SECURITY_CONTEXT, "SafeHtml cannot bypass URL scheme validation")
+
+    # Partial leaving unclosed <script> marks caller Unknown -> fail-closed
+    loader.put("evil_part.html", "<script>")
+    bad_inc_tpl: Template = glyph.api.compile_string("{% include 'evil_part.html' %}{{ x }}", "bad_inc.html", env)
+    inc_u_code: str = ""
+    try:
+        _r_inc: str = glyph.api.render(bad_inc_tpl, glyph.api.context_from_json('{"x":"1"}'), env)
+    except GlyphSecurityError as e:
+        inc_u_code = e.code
+    nox.test.assert_eq_str(inc_u_code, GLYPH_SECURITY_CONTEXT, "unclosed script inside include fails closed in caller")
+
+    # Macro returning unclosed <script> does not receive SafeHtml trust in caller (escaped as VStr)
+    unclosed_mac: Template = glyph.api.compile_string("{% macro evil() %}<script>{% endmacro %}<div>{{ evil() }}</div>", "emac.html", env)
+    nox.test.assert_eq_str(
+        glyph.api.render(unclosed_mac, glyph.api.empty_context(), env),
+        "<div>&lt;script&gt;</div>",
+        "macro leaving unbalanced HTML state stripped of SafeHtml trust"
+    )
+
+    # Host-enabled allow_safe_filter STILL cannot run |safe in Restricted template
+    safe_opts: EnvironmentOptions = EnvironmentOptions(
+        OutputMode.Html,
+        True,
+        UndefinedPolicy.StrictUndefined,
+        TrustTier.Trusted,
+        True,
+        False,
+        glyph.api.default_budget(),
+        "en-US"
+    )
+    env_safe: Environment = glyph.api.new_environment(loader, safe_opts)
+    loader.put_with_trust("res_safe.html", "<div>{{ x | safe }}</div>", TrustTier.Restricted)
+    safe_res_code: str = ""
+    try:
+        _r_safe: str = glyph.api.render(glyph.api.get_template("res_safe.html", env_safe), glyph.api.context_from_json('{"x":"<b>ok</b>"}'), env_safe)
+    except GlyphSecurityError as e:
+        safe_res_code = e.code
+    nox.test.assert_eq_str(safe_res_code, GLYPH_SECURITY_POLICY, "|safe denied inside Restricted template even if env allow_safe_filter=true")
+
+test_unsafe_html_contexts_denied()
+test_url_attribute_allowlist_and_obfuscation_blocking()
+test_tojson_and_script_context_safety()
+test_trusted_markup_provenance_and_context_boundaries()
+test_control_flow_and_include_context_boundaries()

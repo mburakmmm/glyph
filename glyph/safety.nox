@@ -1,9 +1,66 @@
-# Core escaping and output safety policy for Glyph (MVP Phase 3).
-# Enforces AGENTS.md §2.3-2.5, §10.1-10.3: O(n) HTML escape, NUL rejection, context-tagged trust.
+# Contextual HTML escaping, URL scheme validation, JS-in-HTML encoding, and OutputContext tracker.
+# Enforces AGENTS.md §2.3-2.5, §10.1-10.4 and ADR-0003, ADR-0004. Pure NOX, freestanding-safe.
 import nox.strings
 from glyph.errors import SourceSpan, GlyphSecurityError, GLYPH_SECURITY_CONTEXT
 from glyph.value import Value, MarkupContext, UndefinedPolicy, stringify
-from glyph.options import OutputMode
+from glyph.options import OutputMode, TrustTier
+
+enum OutputContext:
+    HtmlText
+    HtmlAttributeQuoted
+    HtmlAttributeUnquoted
+    HtmlUrlAttribute
+    HtmlJs
+    HtmlEventHandler
+    HtmlCss
+    StyleAttribute
+    HtmlTagOrAttrName
+    HtmlRawUnsafeAttr
+    HtmlComment
+    Unknown
+
+# Scanner state constants
+ST_DATA: int = 0
+ST_TAG_OPEN: int = 1
+ST_TAG_NAME: int = 2
+ST_BEFORE_ATTR_NAME: int = 3
+ST_ATTR_NAME: int = 4
+ST_AFTER_ATTR_NAME: int = 5
+ST_BEFORE_ATTR_VALUE: int = 6
+ST_ATTR_VAL_DQ: int = 7
+ST_ATTR_VAL_SQ: int = 8
+ST_ATTR_VAL_UNQUOTED: int = 9
+ST_RAW_SCRIPT: int = 10
+ST_RAW_STYLE: int = 11
+ST_COMMENT: int = 12
+ST_DOCTYPE: int = 13
+ST_UNKNOWN: int = 14
+
+def _is_ascii_ws(b: int) -> bool:
+    return b == 32 or b == 9 or b == 10 or b == 13 or b == 12
+
+def _is_ascii_alpha(b: int) -> bool:
+    return (b >= 65 and b <= 90) or (b >= 97 and b <= 122)
+
+def _is_name_char(b: int) -> bool:
+    if _is_ascii_alpha(b) or (b >= 48 and b <= 57):
+        return True
+    return b == 45 or b == 95 or b == 58 or b == 46
+
+def _is_url_attribute_name(attr_lower: str) -> bool:
+    if attr_lower == "href" or attr_lower == "src" or attr_lower == "action" or attr_lower == "formaction":
+        return True
+    if attr_lower == "poster" or attr_lower == "cite" or attr_lower == "data" or attr_lower == "xlink:href":
+        return True
+    if attr_lower == "srcset":
+        return True
+    return False
+
+def _is_unsafe_raw_attr_name(attr_lower: str) -> bool:
+    return attr_lower == "srcdoc"
+
+def _is_event_handler_attr(attr_lower: str) -> bool:
+    return len(attr_lower) >= 3 and nox.strings.starts_with(attr_lower, "on")
 
 # O(n) HTML escaping with zero allocation when no special characters are present.
 # Rejects NUL bytes in HTML output to prevent truncation/bypass payloads.
@@ -52,7 +109,6 @@ def escape_html_with_span(s: str, span: SourceSpan) -> str:
             cpos = cpos + 1
             seg_cstart = cpos
         else:
-            # Advance UTF-8 codepoint boundary so slice indices stay aligned
             if b0 < 128:
                 bpos = bpos + 1
             elif b0 < 224:
@@ -69,11 +125,471 @@ def escape_html_with_span(s: str, span: SourceSpan) -> str:
 def escape_html(s: str) -> str:
     return escape_html_with_span(s, SourceSpan("<escape>", 1, 1, 0, 0))
 
-def render_value_for_mode(
+def _hex_val(b: int) -> int:
+    if b >= 48 and b <= 57:
+        return b - 48
+    if b >= 65 and b <= 70:
+        return b - 55
+    if b >= 97 and b <= 102:
+        return b - 87
+    return -1
+
+# Normalizes HTML entities and percent-escapes to expose obfuscated URL schemes (e.g. &#106;avascript:, java%73cript:).
+def _normalize_for_scheme_check(raw: str, span: SourceSpan) -> str:
+    blen: int = nox.strings.byte_len(raw)
+    out: list[str] = []
+    i: int = 0
+    while i < blen:
+        b: int = nox.strings.byte_at(raw, i)
+        if b < 32 or b == 127:
+            raise GlyphSecurityError(
+                GLYPH_SECURITY_CONTEXT,
+                "control characters are forbidden in URL attribute",
+                span,
+                "remove control bytes and newlines from URL"
+            )
+        if b == 92:
+            raise GlyphSecurityError(
+                GLYPH_SECURITY_CONTEXT,
+                "backslash is forbidden in URL attribute",
+                span,
+                "use forward slashes in URLs"
+            )
+        if b == 38:
+            # Inspect HTML character reference up to ';'
+            j: int = i + 1
+            semi: int = -1
+            limit: int = i + 12
+            if limit > blen:
+                limit = blen
+            while j < limit and semi < 0:
+                if nox.strings.byte_at(raw, j) == 59:
+                    semi = j
+                j = j + 1
+            if semi > i + 1:
+                ent_raw: str = nox.strings.lower(raw[i + 1:semi])
+                if ent_raw == "colon":
+                    out.append(":")
+                    i = semi + 1
+                elif ent_raw == "tab" or ent_raw == "newline":
+                    i = semi + 1
+                elif nox.strings.starts_with(ent_raw, "#x"):
+                    code_hex: int = 0
+                    valid_hex: bool = len(ent_raw) > 2
+                    hi: int = 2
+                    while hi < nox.strings.byte_len(ent_raw) and valid_hex:
+                        hv: int = _hex_val(nox.strings.byte_at(ent_raw, hi))
+                        if hv < 0:
+                            valid_hex = False
+                        else:
+                            code_hex = code_hex * 16 + hv
+                            if code_hex > 1114111:
+                                code_hex = 65533
+                        hi = hi + 1
+                    if valid_hex:
+                        if code_hex >= 33 and code_hex <= 126:
+                            out.append(nox.strings.char_from_byte(code_hex))
+                        i = semi + 1
+                    else:
+                        out.append("&")
+                        i = i + 1
+                elif nox.strings.starts_with(ent_raw, "#"):
+                    code_dec: int = 0
+                    valid_dec: bool = len(ent_raw) > 1
+                    di: int = 1
+                    while di < nox.strings.byte_len(ent_raw) and valid_dec:
+                        db: int = nox.strings.byte_at(ent_raw, di)
+                        if db < 48 or db > 57:
+                            valid_dec = False
+                        else:
+                            code_dec = code_dec * 10 + (db - 48)
+                            if code_dec > 1114111:
+                                code_dec = 65533
+                        di = di + 1
+                    if valid_dec:
+                        if code_dec >= 33 and code_dec <= 126:
+                            out.append(nox.strings.char_from_byte(code_dec))
+                        i = semi + 1
+                    else:
+                        out.append("&")
+                        i = i + 1
+                else:
+                    out.append("&")
+                    i = i + 1
+            else:
+                out.append("&")
+                i = i + 1
+        elif b == 37 and i + 2 < blen:
+            h1: int = _hex_val(nox.strings.byte_at(raw, i + 1))
+            h2: int = _hex_val(nox.strings.byte_at(raw, i + 2))
+            if h1 >= 0 and h2 >= 0:
+                pv: int = h1 * 16 + h2
+                if pv < 32 or pv == 127:
+                    # Ignore control bytes smuggled via %09/%0A/%0D before scheme
+                    if pv == 0:
+                        raise GlyphSecurityError(GLYPH_SECURITY_CONTEXT, "encoded NUL byte forbidden in URL", span, "reject encoded NUL")
+                elif pv <= 126:
+                    out.append(nox.strings.char_from_byte(pv))
+                i = i + 3
+            else:
+                out.append("%")
+                i = i + 1
+        else:
+            if b != 32:
+                if b < 128:
+                    out.append(nox.strings.char_from_byte(b))
+                    i = i + 1
+                else:
+                    # Non-ASCII bytes cannot form ASCII URL schemes
+                    out.append("_")
+                    if b < 224:
+                        i = i + 2
+                    elif b < 240:
+                        i = i + 3
+                    else:
+                        i = i + 4
+            else:
+                i = i + 1
+    return nox.strings.join(out, "")
+
+def _is_allowed_scheme(scheme_lower: str) -> bool:
+    return scheme_lower == "http" or scheme_lower == "https" or scheme_lower == "mailto" or scheme_lower == "tel"
+
+def validate_single_url(candidate: str, span: SourceSpan) -> None:
+    norm: str = _normalize_for_scheme_check(candidate, span)
+    nlen: int = nox.strings.byte_len(norm)
+    if nlen == 0:
+        return
+    if nox.strings.starts_with(norm, "//"):
+        raise GlyphSecurityError(
+            GLYPH_SECURITY_CONTEXT,
+            "protocol-relative '//' URL is forbidden in URL attribute",
+            span,
+            "use an explicit https:// URL or a single-slash relative path"
+        )
+    # Allowlist checks scheme before first ':', '/', '?', '#'
+    i: int = 0
+    found_delim: bool = False
+    while i < nlen and not found_delim:
+        b: int = nox.strings.byte_at(norm, i)
+        if b == 58:
+            scheme: str = nox.strings.lower(norm[0:i])
+            if not _is_allowed_scheme(scheme):
+                raise GlyphSecurityError(
+                    GLYPH_SECURITY_CONTEXT,
+                    "disallowed URL scheme '" + scheme + "' in URL attribute",
+                    span,
+                    "only http, https, mailto, tel, and relative URLs are permitted"
+                )
+            found_delim = True
+        elif b == 47 or b == 63 or b == 35:
+            # '/', '?', '#' appeared before any ':', so it is a relative URL
+            found_delim = True
+        i = i + 1
+
+def validate_url_value(url_val: str, attr_name: str, prefix: str, span: SourceSpan) -> None:
+    if attr_name == "srcset":
+        combined: str = prefix + url_val
+        entries: list[str] = nox.strings.split(combined, ",")
+        ei: int = 0
+        while ei < len(entries):
+            part: str = nox.strings.trim(entries[ei])
+            if len(part) > 0:
+                toks: list[str] = nox.strings.splitn(part, " ", 2)
+                validate_single_url(toks[0], span)
+            ei = ei + 1
+        return
+    validate_single_url(prefix + url_val, span)
+
+# Escapes JSON output for safe embedding inside HTML <script> tags.
+# Neutralizes <, >, &, </script>, and JS line separators U+2028 / U+2029.
+def escape_json_for_html_script(json_str: str) -> str:
+    blen: int = nox.strings.byte_len(json_str)
+    parts: list[str] = []
+    bpos: int = 0
+    cpos: int = 0
+    seg_cstart: int = 0
+    while bpos < blen:
+        b0: int = nox.strings.byte_at(json_str, bpos)
+        if b0 == 60 or b0 == 62 or b0 == 38:
+            if cpos > seg_cstart:
+                parts.append(json_str[seg_cstart:cpos])
+            if b0 == 60:
+                parts.append("\\u003c")
+            elif b0 == 62:
+                parts.append("\\u003e")
+            else:
+                parts.append("\\u0026")
+            bpos = bpos + 1
+            cpos = cpos + 1
+            seg_cstart = cpos
+        elif b0 == 226 and bpos + 2 < blen and nox.strings.byte_at(json_str, bpos + 1) == 128:
+            b2: int = nox.strings.byte_at(json_str, bpos + 2)
+            if b2 == 168 or b2 == 169:
+                if cpos > seg_cstart:
+                    parts.append(json_str[seg_cstart:cpos])
+                if b2 == 168:
+                    parts.append("\\u2028")
+                else:
+                    parts.append("\\u2029")
+                bpos = bpos + 3
+                cpos = cpos + 1
+                seg_cstart = cpos
+            else:
+                bpos = bpos + 3
+                cpos = cpos + 1
+        else:
+            if b0 < 128:
+                bpos = bpos + 1
+            elif b0 < 224:
+                bpos = bpos + 2
+            elif b0 < 240:
+                bpos = bpos + 3
+            else:
+                bpos = bpos + 4
+            cpos = cpos + 1
+    if cpos > seg_cstart:
+        parts.append(json_str[seg_cstart:cpos])
+    return nox.strings.join(parts, "")
+
+class HtmlContextTracker:
+    state: int
+    cur_tag: str
+    cur_attr: str
+    attr_prefix: str
+    raw_close_buf: str
+
+    def __init__(self: HtmlContextTracker) -> None:
+        self.state = ST_DATA
+        self.cur_tag = ""
+        self.cur_attr = ""
+        self.attr_prefix = ""
+        self.raw_close_buf = ""
+
+    def clone(self: HtmlContextTracker) -> HtmlContextTracker:
+        c: HtmlContextTracker = HtmlContextTracker()
+        c.state = self.state
+        c.cur_tag = self.cur_tag
+        c.cur_attr = self.cur_attr
+        c.attr_prefix = self.attr_prefix
+        c.raw_close_buf = self.raw_close_buf
+        return c
+
+    def same_state(self: HtmlContextTracker, other: HtmlContextTracker) -> bool:
+        if self.state != other.state:
+            return False
+        if self.cur_tag != other.cur_tag:
+            return False
+        if self.cur_attr != other.cur_attr:
+            return False
+        return True
+
+    def mark_unknown(self: HtmlContextTracker) -> None:
+        self.state = ST_UNKNOWN
+
+    def _enter_tag_body_end(self: HtmlContextTracker) -> None:
+        tag_l: str = nox.strings.lower(self.cur_tag)
+        if tag_l == "script":
+            self.state = ST_RAW_SCRIPT
+            self.cur_tag = tag_l
+            self.raw_close_buf = ""
+        elif tag_l == "style":
+            self.state = ST_RAW_STYLE
+            self.cur_tag = tag_l
+            self.raw_close_buf = ""
+        else:
+            self.state = ST_DATA
+            self.cur_tag = ""
+        self.cur_attr = ""
+        self.attr_prefix = ""
+
+    def advance_text(self: HtmlContextTracker, text: str) -> None:
+        if self.state == ST_UNKNOWN:
+            return
+        blen: int = nox.strings.byte_len(text)
+        i: int = 0
+        while i < blen and self.state != ST_UNKNOWN:
+            b: int = nox.strings.byte_at(text, i)
+            if self.state == ST_DATA:
+                if b == 60:
+                    self.state = ST_TAG_OPEN
+                    self.cur_tag = ""
+                    self.cur_attr = ""
+                    self.attr_prefix = ""
+            elif self.state == ST_TAG_OPEN:
+                if b == 33:
+                    if i + 2 < blen and nox.strings.byte_at(text, i + 1) == 45 and nox.strings.byte_at(text, i + 2) == 45:
+                        self.state = ST_COMMENT
+                        self.raw_close_buf = ""
+                        i = i + 2
+                    else:
+                        self.state = ST_DOCTYPE
+                elif b == 47:
+                    self.state = ST_TAG_NAME
+                    self.cur_tag = "/"
+                elif _is_ascii_alpha(b):
+                    self.state = ST_TAG_NAME
+                    self.cur_tag = nox.strings.lower(nox.strings.char_from_byte(b))
+                elif b == 63:
+                    self.state = ST_DOCTYPE
+                else:
+                    # Bare '<' not starting a tag returns to DATA
+                    self.state = ST_DATA
+            elif self.state == ST_DOCTYPE:
+                if b == 62:
+                    self.state = ST_DATA
+            elif self.state == ST_COMMENT:
+                if b == 62 and nox.strings.ends_with(self.raw_close_buf, "--"):
+                    self.state = ST_DATA
+                    self.raw_close_buf = ""
+                else:
+                    ch_c: str = nox.strings.char_from_byte(b)
+                    if len(self.raw_close_buf) >= 2:
+                        self.raw_close_buf = self.raw_close_buf[len(self.raw_close_buf) - 1:len(self.raw_close_buf)] + ch_c
+                    else:
+                        self.raw_close_buf = self.raw_close_buf + ch_c
+            elif self.state == ST_TAG_NAME:
+                if _is_ascii_ws(b):
+                    self.state = ST_BEFORE_ATTR_NAME
+                elif b == 62:
+                    self._enter_tag_body_end()
+                elif b == 47:
+                    self.state = ST_BEFORE_ATTR_NAME
+                elif _is_name_char(b):
+                    if len(self.cur_tag) < 32:
+                        self.cur_tag = self.cur_tag + nox.strings.lower(nox.strings.char_from_byte(b))
+                else:
+                    self.state = ST_UNKNOWN
+            elif self.state == ST_BEFORE_ATTR_NAME:
+                if _is_ascii_ws(b) or b == 47:
+                    pass
+                elif b == 62:
+                    self._enter_tag_body_end()
+                elif _is_name_char(b):
+                    self.state = ST_ATTR_NAME
+                    self.cur_attr = nox.strings.lower(nox.strings.char_from_byte(b))
+                    self.attr_prefix = ""
+                else:
+                    self.state = ST_UNKNOWN
+            elif self.state == ST_ATTR_NAME:
+                if _is_ascii_ws(b):
+                    self.state = ST_AFTER_ATTR_NAME
+                elif b == 61:
+                    self.state = ST_BEFORE_ATTR_VALUE
+                elif b == 62:
+                    self._enter_tag_body_end()
+                elif b == 47:
+                    self.state = ST_BEFORE_ATTR_NAME
+                elif _is_name_char(b):
+                    if len(self.cur_attr) < 64:
+                        self.cur_attr = self.cur_attr + nox.strings.lower(nox.strings.char_from_byte(b))
+                else:
+                    self.state = ST_UNKNOWN
+            elif self.state == ST_AFTER_ATTR_NAME:
+                if _is_ascii_ws(b):
+                    pass
+                elif b == 61:
+                    self.state = ST_BEFORE_ATTR_VALUE
+                elif b == 62:
+                    self._enter_tag_body_end()
+                elif b == 47:
+                    self.state = ST_BEFORE_ATTR_NAME
+                elif _is_name_char(b):
+                    self.state = ST_ATTR_NAME
+                    self.cur_attr = nox.strings.lower(nox.strings.char_from_byte(b))
+                    self.attr_prefix = ""
+                else:
+                    self.state = ST_UNKNOWN
+            elif self.state == ST_BEFORE_ATTR_VALUE:
+                if _is_ascii_ws(b):
+                    pass
+                elif b == 34:
+                    self.state = ST_ATTR_VAL_DQ
+                    self.attr_prefix = ""
+                elif b == 39:
+                    self.state = ST_ATTR_VAL_SQ
+                    self.attr_prefix = ""
+                elif b == 62:
+                    self._enter_tag_body_end()
+                else:
+                    self.state = ST_ATTR_VAL_UNQUOTED
+            elif self.state == ST_ATTR_VAL_DQ:
+                if b == 34:
+                    self.state = ST_BEFORE_ATTR_NAME
+                    self.cur_attr = ""
+                    self.attr_prefix = ""
+                elif len(self.attr_prefix) < 128 and b < 128:
+                    self.attr_prefix = self.attr_prefix + nox.strings.char_from_byte(b)
+            elif self.state == ST_ATTR_VAL_SQ:
+                if b == 39:
+                    self.state = ST_BEFORE_ATTR_NAME
+                    self.cur_attr = ""
+                    self.attr_prefix = ""
+                elif len(self.attr_prefix) < 128 and b < 128:
+                    self.attr_prefix = self.attr_prefix + nox.strings.char_from_byte(b)
+            elif self.state == ST_ATTR_VAL_UNQUOTED:
+                if _is_ascii_ws(b):
+                    self.state = ST_BEFORE_ATTR_NAME
+                    self.cur_attr = ""
+                elif b == 62:
+                    self._enter_tag_body_end()
+            elif self.state == ST_RAW_SCRIPT:
+                if b < 128:
+                    ch_s: str = nox.strings.lower(nox.strings.char_from_byte(b))
+                    self.raw_close_buf = self.raw_close_buf + ch_s
+                    if len(self.raw_close_buf) > 16:
+                        self.raw_close_buf = self.raw_close_buf[len(self.raw_close_buf) - 16:len(self.raw_close_buf)]
+                    if nox.strings.ends_with(self.raw_close_buf, "</script>"):
+                        self.state = ST_DATA
+                        self.cur_tag = ""
+                        self.raw_close_buf = ""
+            elif self.state == ST_RAW_STYLE:
+                if b < 128:
+                    ch_st: str = nox.strings.lower(nox.strings.char_from_byte(b))
+                    self.raw_close_buf = self.raw_close_buf + ch_st
+                    if len(self.raw_close_buf) > 16:
+                        self.raw_close_buf = self.raw_close_buf[len(self.raw_close_buf) - 16:len(self.raw_close_buf)]
+                    if nox.strings.ends_with(self.raw_close_buf, "</style>"):
+                        self.state = ST_DATA
+                        self.cur_tag = ""
+                        self.raw_close_buf = ""
+            i = i + 1
+
+    def current_output_context(self: HtmlContextTracker) -> OutputContext:
+        if self.state == ST_DATA:
+            return OutputContext.HtmlText
+        if self.state == ST_RAW_SCRIPT:
+            return OutputContext.HtmlJs
+        if self.state == ST_RAW_STYLE:
+            return OutputContext.HtmlCss
+        if self.state == ST_COMMENT:
+            return OutputContext.HtmlComment
+        if self.state == ST_TAG_OPEN or self.state == ST_TAG_NAME or self.state == ST_BEFORE_ATTR_NAME or self.state == ST_ATTR_NAME or self.state == ST_AFTER_ATTR_NAME:
+            return OutputContext.HtmlTagOrAttrName
+        if self.state == ST_BEFORE_ATTR_VALUE or self.state == ST_ATTR_VAL_UNQUOTED:
+            return OutputContext.HtmlAttributeUnquoted
+        if self.state == ST_ATTR_VAL_DQ or self.state == ST_ATTR_VAL_SQ:
+            if _is_event_handler_attr(self.cur_attr):
+                return OutputContext.HtmlEventHandler
+            if self.cur_attr == "style":
+                return OutputContext.StyleAttribute
+            if _is_unsafe_raw_attr_name(self.cur_attr):
+                return OutputContext.HtmlRawUnsafeAttr
+            if _is_url_attribute_name(self.cur_attr):
+                return OutputContext.HtmlUrlAttribute
+            return OutputContext.HtmlAttributeQuoted
+        return OutputContext.Unknown
+
+def _is_trusted_ctx_for(mctx: MarkupContext, expected: MarkupContext) -> bool:
+    return mctx == expected
+
+def render_contextual_value(
     val: Value,
     autoescape: bool,
     mode: OutputMode,
     policy: UndefinedPolicy,
+    trust_tier: TrustTier,
+    tracker: HtmlContextTracker,
     span: SourceSpan
 ) -> str:
     match mode:
@@ -81,18 +597,84 @@ def render_value_for_mode(
             return stringify(val, policy, span)
         case OutputMode.Markdown:
             return stringify(val, policy, span)
+        case OutputMode.Xml:
+            return escape_html_with_span(stringify(val, policy, span), span)
         case OutputMode.Html:
             if not autoescape:
                 return stringify(val, policy, span)
-            match val:
-                case Value.VTrustedMarkup(content, ctx):
-                    match ctx:
-                        case MarkupContext.SafeHtml:
-                            return content
-                        case _:
-                            # Non-HTML trusted markers (SafeUrl/SafeAttr/SafeJs) are still escaped in HTML text
-                            return escape_html_with_span(content, span)
+            is_trusted_tpl: bool = False
+            match trust_tier:
+                case TrustTier.Trusted:
+                    is_trusted_tpl = True
                 case _:
-                    return escape_html_with_span(stringify(val, policy, span), span)
-        case OutputMode.Xml:
-            return escape_html_with_span(stringify(val, policy, span), span)
+                    is_trusted_tpl = False
+
+            octx: OutputContext = tracker.current_output_context()
+            match octx:
+                case OutputContext.HtmlText:
+                    match val:
+                        case Value.VTrustedMarkup(content, mctx):
+                            if is_trusted_tpl and _is_trusted_ctx_for(mctx, MarkupContext.SafeHtml):
+                                return content
+                            return escape_html_with_span(content, span)
+                        case _:
+                            return escape_html_with_span(stringify(val, policy, span), span)
+                case OutputContext.HtmlAttributeQuoted:
+                    match val:
+                        case Value.VTrustedMarkup(content2, mctx2):
+                            if is_trusted_tpl and _is_trusted_ctx_for(mctx2, MarkupContext.SafeAttr):
+                                return content2
+                            return escape_html_with_span(content2, span)
+                        case _:
+                            return escape_html_with_span(stringify(val, policy, span), span)
+                case OutputContext.HtmlUrlAttribute:
+                    raw_url: str = ""
+                    match val:
+                        case Value.VTrustedMarkup(content3, mctx3):
+                            match mctx3:
+                                case MarkupContext.SafeJs:
+                                    raise GlyphSecurityError(GLYPH_SECURITY_CONTEXT, "SafeJs value cannot be placed in URL attribute", span, "use a URL value")
+                                case _:
+                                    raw_url = content3
+                        case _:
+                            raw_url = stringify(val, policy, span)
+                    validate_url_value(raw_url, tracker.cur_attr, tracker.attr_prefix, span)
+                    return escape_html_with_span(raw_url, span)
+                case OutputContext.HtmlJs:
+                    if not is_trusted_tpl:
+                        raise GlyphSecurityError(GLYPH_SECURITY_CONTEXT, "script interpolation is forbidden in restricted/untrusted templates", span, "avoid interpolation inside <script>")
+                    match val:
+                        case Value.VTrustedMarkup(js_content, mctx4):
+                            if _is_trusted_ctx_for(mctx4, MarkupContext.SafeJs):
+                                return js_content
+                            raise GlyphSecurityError(GLYPH_SECURITY_CONTEXT, "only SafeJs (e.g. |tojson) is permitted inside <script>", span, "use {{ value | tojson }} inside <script>")
+                        case _:
+                            raise GlyphSecurityError(GLYPH_SECURITY_CONTEXT, "raw interpolation inside <script> is forbidden", span, "use {{ value | tojson }} inside <script>")
+                case OutputContext.HtmlComment:
+                    cstr: str = stringify(val, policy, span)
+                    if nox.strings.contains(cstr, "--") or nox.strings.contains(cstr, ">"):
+                        raise GlyphSecurityError(GLYPH_SECURITY_CONTEXT, "HTML comment breakout sequence is forbidden", span, "avoid '--' and '>' inside HTML comments")
+                    return escape_html_with_span(cstr, span)
+                case OutputContext.HtmlAttributeUnquoted:
+                    raise GlyphSecurityError(GLYPH_SECURITY_CONTEXT, "interpolation inside unquoted HTML attribute is forbidden", span, "wrap the attribute value in quotes: attr=\"{{ x }}\"")
+                case OutputContext.HtmlEventHandler:
+                    raise GlyphSecurityError(GLYPH_SECURITY_CONTEXT, "interpolation inside inline event handler attribute is forbidden", span, "attach event listeners from external scripts")
+                case OutputContext.HtmlCss:
+                    raise GlyphSecurityError(GLYPH_SECURITY_CONTEXT, "interpolation inside <style> is forbidden", span, "use static CSS classes instead")
+                case OutputContext.StyleAttribute:
+                    raise GlyphSecurityError(GLYPH_SECURITY_CONTEXT, "interpolation inside style attribute is forbidden", span, "use static CSS classes instead")
+                case OutputContext.HtmlTagOrAttrName:
+                    raise GlyphSecurityError(GLYPH_SECURITY_CONTEXT, "dynamic HTML tag or attribute names are forbidden", span, "use static tag and attribute names")
+                case OutputContext.HtmlRawUnsafeAttr:
+                    raise GlyphSecurityError(GLYPH_SECURITY_CONTEXT, "interpolation inside unsafe attribute (srcdoc) is forbidden", span, "avoid dynamic srcdoc interpolation")
+                case OutputContext.Unknown:
+                    raise GlyphSecurityError(GLYPH_SECURITY_CONTEXT, "unsafe or ambiguous HTML output context (fail-closed)", span, "ensure well-formed HTML tags around expressions")
+
+def render_value_for_mode(
+    val: Value,
+    autoescape: bool,
+    mode: OutputMode,
+    policy: UndefinedPolicy,
+    span: SourceSpan
+) -> str:
+    return render_contextual_value(val, autoescape, mode, policy, TrustTier.Trusted, HtmlContextTracker(), span)

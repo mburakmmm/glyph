@@ -38,6 +38,7 @@ from glyph.validate import TemplateInfo
 from glyph.options import OutputMode, TrustTier, EnvironmentOptions, RenderOptions
 from glyph.scope import Context
 from glyph.writer import GlyphWriter, RenderResult
+from glyph.safety import OutputContext
 from glyph.filters import FilterRegistry, FilterArgValue
 from glyph.tests_registry import TestRegistry
 from glyph.functions import FunctionRegistry
@@ -124,3 +125,16 @@ def inspect(template: Template) -> TemplateInfo:
 
 def escape_html(text: str) -> str:
     return glyph.safety.escape_html(text)
+
+def trust_html_fragment(html: str) -> Value:
+    return Value.VTrustedMarkup(html, MarkupContext.SafeHtml)
+
+def trust_attr_value(attr: str) -> Value:
+    return Value.VTrustedMarkup(attr, MarkupContext.SafeAttr)
+
+def trust_url(url: str) -> Value:
+    glyph.safety.validate_url_value(url, "href", "", SourceSpan("<trust_url>", 1, 1, 0, 0))
+    return Value.VTrustedMarkup(url, MarkupContext.SafeUrl)
+
+def trust_js_literal(js: str) -> Value:
+    return Value.VTrustedMarkup(js, MarkupContext.SafeJs)
