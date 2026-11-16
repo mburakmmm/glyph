@@ -156,8 +156,24 @@ jobs:
                     set -e
                     echo "QBE binary result for $t: rc=$rc_qbe"
                   fi
-                  ls -la "$HOME/Library/Logs/DiagnosticReports/" 2>/dev/null || true
-                  python3 -c 'import glob,json,os; fs=sorted(glob.glob(os.path.expanduser("~/Library/Logs/DiagnosticReports/*.ips")),key=os.path.getmtime); d=json.loads("\n".join(open(fs[-1],encoding="utf-8",errors="replace").read().splitlines()[1:])) if fs else {}; print("ips:", fs[-1] if fs else None, "exc:", d.get("exception"), "term:", d.get("termination"), "frames:", d.get("threads",[{}])[d.get("faultingThread",0)].get("frames",[])[:15])' || true
+                  if [ "$t" = "tests/lexer/lexer_test.nox" ]; then
+                    echo "==> Bisecting functions inside tests/lexer/lexer_test.nox"
+                    head -n 159 tests/lexer/lexer_test.nox > .tmp_probe_hdr.nox
+                    for fn in test_basic_tokens test_strings_and_escapes test_minus_vs_trim test_whitespace_trim_and_raw test_numbers_and_utf8_spans test_syntax_and_utf8_errors test_lexer_budgets_and_fuzz_smoke; do
+                      cp .tmp_probe_hdr.nox .tmp_probe.nox
+                      echo "${fn}()" >> .tmp_probe.nox
+                      if noxc build -o /tmp/probe_bin .tmp_probe.nox >/dev/null 2>&1; then
+                        set +e
+                        /tmp/probe_bin
+                        prc=$?
+                        set -e
+                        echo "  probe ${fn}: rc=${prc}"
+                      else
+                        echo "  probe ${fn}: compile failed"
+                      fi
+                    done
+                    rm -f .tmp_probe_hdr.nox .tmp_probe.nox /tmp/probe_bin
+                  fi
                   if command -v lldb >/dev/null 2>&1; then lldb -b -o run -o bt -- /tmp/diag_test_bin || true; fi
                 fi
               else
