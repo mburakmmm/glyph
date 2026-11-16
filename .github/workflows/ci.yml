@@ -186,7 +186,7 @@ jobs:
                     ])
                     q = chr(39)
                     alpha = "alphabet: list[str] = [\"{\", \"}\", \"%\", \"#\", \"-\", \"\\\"\", \"" + q + "\", \"\\\\\", \" \", \"\\n\", \"a\", \"1\", \".\", \"+\", nox.strings.char_from_byte(0), nox.strings.char_from_byte(13), nox.strings.char_from_byte(195), nox.strings.char_from_byte(167), nox.strings.char_from_byte(255)]"
-                    for lim in [55, 60, 65, 70, 75, 80, 85, 90, 95, 100]:
+                    for lim in [61, 62, 63, 64, 65]:
                         run_probe(f"p3_fuzz_{lim}", [
                             alpha,
                             "seed: int = 1337",
@@ -209,22 +209,11 @@ jobs:
                             "        pass",
                             "    fc = fc + 1",
                         ])
-                    run_probe("p3_fixed_throw_200", [
-                        "i: int = 0",
-                        "fb: ResourceBudget = ResourceBudget(1024, 256, 256, 256, 4, 4, 8, 256, 1024, 1024)",
-                        "while i < 200:",
-                        "    try:",
-                        "        _ft: list[Token] = tokenize_with_budget(\"abc {{\", \"fuzz.html\", BudgetTracker(fb))",
-                        "    except GlyphSyntaxError:",
-                        "        pass",
-                        "    i = i + 1",
-                    ])
-                    run_probe("p3_only_50_to_100", [
+                    run_probe("p3_join_only_200", [
                         alpha,
                         "seed: int = 1337",
                         "fc: int = 0",
-                        "fb: ResourceBudget = ResourceBudget(1024, 256, 256, 256, 4, 4, 8, 256, 1024, 1024)",
-                        "while fc < 100:",
+                        "while fc < 200:",
                         "    parts: list[str] = []",
                         "    k: int = 0",
                         "    sl: int = (fc % 24) + 1",
@@ -232,14 +221,52 @@ jobs:
                         "        seed = (seed * 1103515245 + 12345) % 2147483647",
                         "        parts.append(alphabet[seed % len(alphabet)])",
                         "        k = k + 1",
-                        "    if fc >= 50:",
-                        "        sample: str = nox.strings.join(parts, \"\")",
-                        "        try:",
-                        "            _ft: list[Token] = tokenize_with_budget(sample, \"fuzz.html\", BudgetTracker(fb))",
-                        "        except GlyphSyntaxError:",
-                        "            pass",
-                        "        except GlyphLimitError:",
-                        "            pass",
+                        "    sample: str = nox.strings.join(parts, \"\")",
+                        "    fc = fc + 1",
+                    ])
+                    alpha_no_nul = alpha.replace("nox.strings.char_from_byte(0)", "\"Z\"")
+                    run_probe("p3_fuzz_200_no_nul", [
+                        alpha_no_nul,
+                        "seed: int = 1337",
+                        "fc: int = 0",
+                        "fb: ResourceBudget = ResourceBudget(1024, 256, 256, 256, 4, 4, 8, 256, 1024, 1024)",
+                        "while fc < 200:",
+                        "    parts: list[str] = []",
+                        "    k: int = 0",
+                        "    sl: int = (fc % 24) + 1",
+                        "    while k < sl:",
+                        "        seed = (seed * 1103515245 + 12345) % 2147483647",
+                        "        parts.append(alphabet[seed % len(alphabet)])",
+                        "        k = k + 1",
+                        "    sample: str = nox.strings.join(parts, \"\")",
+                        "    try:",
+                        "        _ft: list[Token] = tokenize_with_budget(sample, \"fuzz.html\", BudgetTracker(fb))",
+                        "    except GlyphSyntaxError:",
+                        "        pass",
+                        "    except GlyphLimitError:",
+                        "        pass",
+                        "    fc = fc + 1",
+                    ])
+                    run_probe("p3_fuzz_65_diff_budget", [
+                        alpha,
+                        "seed: int = 1337",
+                        "fc: int = 0",
+                        "while fc < 65:",
+                        "    parts: list[str] = []",
+                        "    k: int = 0",
+                        "    sl: int = (fc % 24) + 1",
+                        "    while k < sl:",
+                        "        seed = (seed * 1103515245 + 12345) % 2147483647",
+                        "        parts.append(alphabet[seed % len(alphabet)])",
+                        "        k = k + 1",
+                        "    sample: str = nox.strings.join(parts, \"\")",
+                        "    fb: ResourceBudget = ResourceBudget(1024, 256, 256, 256, 4, 4, 8, 256, 1024, 1024)",
+                        "    try:",
+                        "        _ft: list[Token] = tokenize_with_budget(sample, \"fuzz.html\", BudgetTracker(fb))",
+                        "    except GlyphSyntaxError:",
+                        "        pass",
+                        "    except GlyphLimitError:",
+                        "        pass",
                         "    fc = fc + 1",
                     ])
                     ' || true
