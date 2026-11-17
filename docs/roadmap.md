@@ -16,4 +16,4 @@
 | **Phase 8** | `v0.6.0` | `ADR-0008`, `ADR-0009`, i18n/locale/plural, HTML/Text/XML/MD/JSON/Email modes, streaming `GlyphWriter` | **Done** (`tests/locale/`, `examples/email/`) |
 | **Phase 9** | `v0.7.0` | `ADR-0010`, `integrations/nyx/`, `integrations/aether/`, `glyph` CLI, diagnostic JSON, Vertical Slice #3 | **Done** (`tests/integration/`, `cli/`, `examples/nyx/`, `examples/aether/`) |
 | **Phase 10** | `v1.0.0` **(STABLE)** | Fuzzing, property/differential/mutation/concurrency tests, benchmarks, WASM verification, CI/SBOM, **v1.0 Release Gate** | **Done** (`tests/fuzz/`, `tests/concurrency/`, `benchmarks/`, `docs/performance.md`, `docs/testing.md`) |
-| **Phase 11** | `v1.1.0+` / `v2.0` | `with`/`filter` blocks, component/slot DSL, constant folding, LSP/grammar, Aura export, AOT & sandbox research | Planned |
+| **Phase 11** | `v1.1.0` | `ADR-0011`, `ADR-0013`, `with`/`filter` blocks, `component`/`slot`, `namespace()`, constant folding, `PackageLoader`/`ReadOnlyAdapterLoader`, `TelemetryHook`, `aura_export`, Tree-sitter, AOT codegen PoC | **Done** (`tests/advanced/advanced_v11_test.nox`; async I/O writer deferred to `v2.0`) |

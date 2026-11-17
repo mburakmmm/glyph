@@ -1,0 +1,70 @@
+# Explicit opt-in Aura HTML/Text/Email export adapter for Glyph (Phase 11).
+# Enforces AGENTS.md §1.1.6 and §2.18:
+#   - Used strictly for document/HTML/email export payloads from Aura state.
+#   - NEVER replaces Aura's retained UI / widget tree; Glyph core remains decoupled.
+from nox.collections import OrderedDict
+import glyph.api
+from glyph.api import Environment, Template, Context, RenderOptions, OutputMode, TrustTier
+from glyph.api import default_render_options, render_with_options, restricted_budget
+
+class AuraExportDocument:
+    title: str
+    mime_type: str
+    charset: str
+    content: str
+    mode: OutputMode
+
+    def __init__(
+        self: AuraExportDocument,
+        title: str,
+        mime_type: str,
+        charset: str,
+        content: str,
+        mode: OutputMode
+    ) -> None:
+        self.title = title
+        self.mime_type = mime_type
+        self.charset = charset
+        self.content = content
+        self.mode = mode
+
+def export_html_document(
+    tpl: Template,
+    title: str,
+    context: Context,
+    env: Environment
+) -> AuraExportDocument:
+    opts: RenderOptions = default_render_options(env.options)
+    opts.output_mode = OutputMode.Html
+    opts.autoescape = True
+    out: str = render_with_options(tpl, context, opts, env)
+    return AuraExportDocument(title, "text/html; charset=utf-8", "utf-8", out, OutputMode.Html)
+
+def export_plain_text_document(
+    tpl: Template,
+    title: str,
+    context: Context,
+    env: Environment
+) -> AuraExportDocument:
+    opts: RenderOptions = default_render_options(env.options)
+    opts.output_mode = OutputMode.Text
+    opts.autoescape = False
+    out: str = render_with_options(tpl, context, opts, env)
+    return AuraExportDocument(title, "text/plain; charset=utf-8", "utf-8", out, OutputMode.Text)
+
+def export_restricted_snapshot(
+    tpl: Template,
+    title: str,
+    context: Context,
+    env: Environment
+) -> AuraExportDocument:
+    opts: RenderOptions = RenderOptions(
+        OutputMode.Html,
+        True,
+        env.options.undefined_policy,
+        TrustTier.Restricted,
+        restricted_budget(),
+        env.options.default_locale
+    )
+    out: str = render_with_options(tpl, context, opts, env)
+    return AuraExportDocument(title, "text/html; charset=utf-8", "utf-8", out, OutputMode.Html)

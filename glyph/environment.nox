@@ -8,6 +8,8 @@ from glyph.lexer import tokenize_with_budget
 from glyph.ast import TemplateAst
 from glyph.parser import parse_tokens, parse_string, lint_tokens
 from glyph.validate import TemplateInfo, validate_ast
+from glyph.const_fold import fold_ast
+from glyph.telemetry import TelemetryHook, noop_telemetry_hook
 from glyph.options import EnvironmentOptions, RenderOptions, TrustTier, html_safe_defaults, default_render_options, min_trust_tier
 from glyph.scope import Context
 from glyph.writer import GlyphWriter, RenderResult
@@ -30,6 +32,7 @@ class Environment:
     parse_cache: ParseCache
     compile_cache: CompileCache
     catalog: TranslationCatalog
+    telemetry: TelemetryHook
 
     def __init__(
         self: Environment,
@@ -49,6 +52,7 @@ class Environment:
         self.parse_cache = parse_cache
         self.compile_cache = compile_cache
         self.catalog = TranslationCatalog(options.default_locale)
+        self.telemetry = noop_telemetry_hook()
 
 def environment_with_loader(loader: Loader, options: EnvironmentOptions) -> Environment:
     return Environment(
@@ -77,12 +81,19 @@ def freeze_environment(env: Environment) -> None:
     env.functions.freeze()
     env.catalog.freeze()
 
+def set_telemetry_hook(env: Environment, hook: TelemetryHook) -> None:
+    env.telemetry = hook
+
 def compile_string(source: str, logical_name: str, env: Environment) -> Template:
     tracker: BudgetTracker = BudgetTracker(env.options.default_budget)
     ast: TemplateAst = parse_string(source, logical_name, tracker)
     info: TemplateInfo = validate_ast(ast, env.options.allow_dynamic_include)
+    final_ast: TemplateAst = ast
+    if env.options.enable_constant_folding:
+        final_ast = fold_ast(ast)
     fp: str = compute_fingerprint(source)
-    return Template(logical_name, ast, info, fp, env.options.trust_tier)
+    env.telemetry.emit_trace("glyph.compile", logical_name, False, tracker.total_ops_used, 0, True, "")
+    return Template(logical_name, final_ast, info, fp, env.options.trust_tier)
 
 def _deps_are_valid(deps: list[DepFingerprint], env: Environment) -> bool:
     i: int = 0
@@ -180,20 +191,25 @@ def _get_template_with_tracker(name: str, env: Environment, tracker: BudgetTrack
         entry: CompileCacheEntry = env.compile_cache.get(ckey)
         if _deps_are_valid(entry.deps, env):
             env.compile_cache.record_hit()
+            env.telemetry.emit_trace("glyph.load", rec.logical_name, True, 0, 0, True, "")
             return entry.template
         env.compile_cache.invalidate_key(ckey)
 
     env.compile_cache.record_miss()
     ast: TemplateAst = _parse_with_cache(rec, env, tracker)
     info: TemplateInfo = validate_ast(ast, env.options.allow_dynamic_include)
+    final_ast: TemplateAst = ast
+    if env.options.enable_constant_folding:
+        final_ast = fold_ast(ast)
 
     deps: list[DepFingerprint] = []
     visited: list[str] = [rec.logical_name]
     _collect_static_deps(_all_dep_names(info), env, visited, deps, 0)
 
-    tpl: Template = Template(rec.logical_name, ast, info, rec.fingerprint, eff_trust)
+    tpl: Template = Template(rec.logical_name, final_ast, info, rec.fingerprint, eff_trust)
     new_entry: CompileCacheEntry = CompileCacheEntry(tpl, deps, nox.strings.byte_len(rec.content))
     env.compile_cache.put(ckey, new_entry)
+    env.telemetry.emit_trace("glyph.compile", rec.logical_name, False, tracker.total_ops_used, 0, True, "")
     return tpl
 
 def get_template(name: str, env: Environment) -> Template:
@@ -210,20 +226,27 @@ def render_to_writer(
     def _resolve(inc_name: str, tr: BudgetTracker) -> Template:
         return _get_template_with_tracker(inc_name, env, tr)
 
-    return execute_template_with_catalog(
-        template,
-        context.data,
-        writer,
-        writer.tracker,
-        env.filters,
-        env.tests,
-        env.functions,
-        options,
-        env.options.allow_dynamic_include,
-        True,
-        _resolve,
-        env.catalog
-    )
+    try:
+        res: RenderResult = execute_template_with_catalog(
+            template,
+            context.data,
+            writer,
+            writer.tracker,
+            env.filters,
+            env.tests,
+            env.functions,
+            options,
+            env.options.allow_dynamic_include,
+            True,
+            _resolve,
+            env.catalog
+        )
+        env.telemetry.emit_trace("glyph.render", template.logical_name, False, res.ops_used, res.bytes_written, True, "")
+        return res
+    except GlyphError as ge:
+        env.telemetry.emit_trace("glyph.render", template.logical_name, False, writer.tracker.total_ops_used, writer.bytes_written, False, ge.code)
+        env.telemetry.emit_log("error", "runtime", template.logical_name, ge.message, ge.code)
+        raise ge
 
 def render_with_options(
     template: Template,

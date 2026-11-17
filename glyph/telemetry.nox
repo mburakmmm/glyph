@@ -1,0 +1,111 @@
+# Zero-overhead, opt-in redacted telemetry and trace hooks for Glyph (Pulse / Obsidian integration).
+# Enforces AGENTS.md §19 and §2.12-2.13:
+#   - Zero process globals; per-Environment instance hook (default no-op).
+#   - Never emits PII, template source, context values, or physical disk paths.
+from glyph.errors import redact_logical_name
+
+class TraceEvent:
+    phase: str
+    template_name: str
+    cache_hit: bool
+    ops_used: int
+    bytes_out: int
+    ok: bool
+    error_code: str
+
+    def __init__(
+        self: TraceEvent,
+        phase: str,
+        template_name: str,
+        cache_hit: bool,
+        ops_used: int,
+        bytes_out: int,
+        ok: bool,
+        error_code: str
+    ) -> None:
+        self.phase = phase
+        self.template_name = redact_logical_name(template_name)
+        self.cache_hit = cache_hit
+        self.ops_used = ops_used
+        self.bytes_out = bytes_out
+        self.ok = ok
+        self.error_code = error_code
+
+class RedactedLogEvent:
+    level: str
+    component: str
+    template_name: str
+    message: str
+    error_code: str
+
+    def __init__(
+        self: RedactedLogEvent,
+        level: str,
+        component: str,
+        template_name: str,
+        message: str,
+        error_code: str
+    ) -> None:
+        self.level = level
+        self.component = component
+        self.template_name = redact_logical_name(template_name)
+        self.message = message
+        self.error_code = error_code
+
+class TelemetryHook:
+    enabled: bool
+    on_trace: (TraceEvent) -> None
+    on_log: (RedactedLogEvent) -> None
+
+    def __init__(
+        self: TelemetryHook,
+        enabled: bool,
+        on_trace: (TraceEvent) -> None,
+        on_log: (RedactedLogEvent) -> None
+    ) -> None:
+        self.enabled = enabled
+        self.on_trace = on_trace
+        self.on_log = on_log
+
+    def emit_trace(
+        self: TelemetryHook,
+        phase: str,
+        template_name: str,
+        cache_hit: bool,
+        ops_used: int,
+        bytes_out: int,
+        ok: bool,
+        error_code: str
+    ) -> None:
+        if not self.enabled:
+            return
+        fn: (TraceEvent) -> None = self.on_trace
+        fn(TraceEvent(phase, template_name, cache_hit, ops_used, bytes_out, ok, error_code))
+
+    def emit_log(
+        self: TelemetryHook,
+        level: str,
+        component: str,
+        template_name: str,
+        message: str,
+        error_code: str
+    ) -> None:
+        if not self.enabled:
+            return
+        fn: (RedactedLogEvent) -> None = self.on_log
+        fn(RedactedLogEvent(level, component, template_name, message, error_code))
+
+def _noop_trace(_ev: TraceEvent) -> None:
+    return
+
+def _noop_log(_ev: RedactedLogEvent) -> None:
+    return
+
+def noop_telemetry_hook() -> TelemetryHook:
+    return TelemetryHook(False, _noop_trace, _noop_log)
+
+def telemetry_hook(
+    on_trace: (TraceEvent) -> None,
+    on_log: (RedactedLogEvent) -> None
+) -> TelemetryHook:
+    return TelemetryHook(True, on_trace, on_log)

@@ -87,3 +87,42 @@ def format_template_info_human(info: TemplateInfo) -> str:
     lines.append("macros:   " + nox.strings.join(info.macros, ", "))
     lines.append("imports:  " + nox.strings.join(info.imports, ", "))
     return nox.strings.join(lines, "\n")
+
+class SourceMapSpan:
+    logical_name: str
+    line: int
+    column: int
+    start_byte: int
+    end_byte: int
+    kind: str
+
+    def __init__(
+        self: SourceMapSpan,
+        logical_name: str,
+        line: int,
+        column: int,
+        start_byte: int,
+        end_byte: int,
+        kind: str
+    ) -> None:
+        self.logical_name = logical_name
+        self.line = line
+        self.column = column
+        self.start_byte = start_byte
+        self.end_byte = end_byte
+        self.kind = kind
+
+def build_source_map_json(logical_name: str, spans: list[SourceMapSpan]) -> str:
+    entries: list[str] = []
+    i: int = 0
+    while i < len(spans):
+        sp: SourceMapSpan = spans[i]
+        entries.append(
+            '{"line":' + str(sp.line)
+            + ',"col":' + str(sp.column)
+            + ',"start":' + str(sp.start_byte)
+            + ',"end":' + str(sp.end_byte)
+            + ',"kind":' + nox.json.dump_string(sp.kind) + '}'
+        )
+        i = i + 1
+    return '{"logical_name":' + nox.json.dump_string(logical_name) + ',"mappings":[' + nox.strings.join(entries, ",") + ']}'

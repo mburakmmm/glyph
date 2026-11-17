@@ -25,12 +25,33 @@ class MacroParam:
         self.default_expr = default_expr
         self.span = span
 
+class WithBinding:
+    name: str
+    value: Expr
+    span: SourceSpan
+
+    def __init__(self: WithBinding, name: str, value: Expr, span: SourceSpan) -> None:
+        self.name = name
+        self.value = value
+        self.span = span
+
+class ComponentSlot:
+    name: str
+    body: list[Stmt]
+    span: SourceSpan
+
+    def __init__(self: ComponentSlot, name: str, body: list[Stmt], span: SourceSpan) -> None:
+        self.name = name
+        self.body = body
+        self.span = span
+
 enum StmtKind:
     SText(text: str)
     SOutput(expr: Expr)
     SIf(branches: list[IfBranch], else_body: list[Stmt])
     SFor(targets: list[str], iterable: Expr, body: list[Stmt], else_body: list[Stmt])
     SSet(target: str, value: Expr)
+    SSetAttr(target: str, field: str, value: Expr)
     SInclude(template_expr: Expr, with_context: bool, ignore_missing: bool)
     SExtends(template_name: str)
     SBlock(name: str, body: list[Stmt])
@@ -38,6 +59,9 @@ enum StmtKind:
     SImport(template_name: str, alias: str)
     SFromImport(template_name: str, names: list[str])
     SCallBlock(macro_name: str, args: list[CallArg], caller_params: list[str], body: list[Stmt])
+    SWith(bindings: list[WithBinding], body: list[Stmt])
+    SFilterBlock(filter_name: str, args: list[CallArg], body: list[Stmt])
+    SComponent(template_expr: Expr, props: list[CallArg], slots: list[ComponentSlot])
 
 class Stmt:
     kind: StmtKind

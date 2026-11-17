@@ -1,7 +1,7 @@
-# Glyph version metadata (v1.0.0 STABLE).
+# Glyph version metadata (v1.1.0).
 # Pure NOX, freestanding-compatible (no hosted-only imports).
 
-GLYPH_VERSION: str = "1.0.0"
+GLYPH_VERSION: str = "1.1.0"
 GLYPH_MIN_NOX_VERSION: str = "2.1.186"
 
 def version() -> str:

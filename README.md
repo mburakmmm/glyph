@@ -24,7 +24,7 @@
 
 ---
 
-> **Current Release (`v1.0.0` STABLE, Phases 0–10 Complete):** Core engine, contextual HTML/URL/JS escaping, 50+ pure filters/tests, i18n catalogs & plural rules, 6 output profiles, streaming `GlyphWriter`, opt-in **Nyx** & **Aether** adapters, `glyph` CLI, property/differential/500-byte-fuzz/mutation/concurrency gates, and 3-round reproducible benchmarks verified with **16/16 passing test suites** (`noxc test`) across **Linux x86_64**, **Linux ARM64**, **macOS ARM64**, **Windows x86_64**, and **`wasm32-freestanding`**.
+> **Current Release (`v1.1.0`, Phases 0–11 Complete):** Core engine, contextual HTML/URL/JS escaping, 50+ pure filters/tests, i18n catalogs & plural rules, 6 output profiles, streaming `GlyphWriter`, `{% with %}`/`{% filter %}` blocks, `{% component %}`/`{% slot %}` DSL, `namespace()`, pure constant folding, `PackageLoader`/`ReadOnlyAdapterLoader`, `TelemetryHook`, opt-in **Nyx** / **Aether** / **Aura Export** adapters, `glyph` CLI, Tree-sitter grammar & AOT codegen PoC, and full property/fuzz/mutation/concurrency gates verified across **Linux x86_64**, **Linux ARM64**, **macOS ARM64**, **Windows x86_64**, and **`wasm32-freestanding`**.
 
 ---
 
@@ -128,6 +128,7 @@ Exit codes are deterministic: `0` OK, `2` usage, `3` syntax, `4` loader, `5` sec
 
 - **Nyx (`integrations/nyx/glyph_nyx.nox`):** Opt-in `render_view(...)` and preflight `render_view_stream(...)` managing `Content-Type`, `X-Content-Type-Options: nosniff`, `Cache-Control`, and validated single-line `Content-Security-Policy` nonces without touching `nyx.view.render`. See [docs/integration-nyx.md](docs/integration-nyx.md).
 - **Aether (`integrations/aether/glyph_aether.nox`):** Explicit HTTP `Accept` content-negotiation across `text/html`, `application/xml`, and `text/plain` (directing `application/json` payloads to `nox.json`). See [docs/integration-aether.md](docs/integration-aether.md).
+- **Aura Export (`integrations/aura_export/glyph_aura_export.nox`):** Opt-in HTML, plain-text, and restricted snapshot export helpers (`export_html_document`, `export_plain_text_document`, `export_restricted_snapshot`) — strictly for document/email exports, never UI widget trees.
 
 ---
 
@@ -137,10 +138,10 @@ Verified against **`noxc 2.1.186`** across:
 
 | Target | Runner | Backends & Verification |
 |---|---|---|
-| **Linux x86_64** | `ubuntu-latest` | LLVM, QBE, `--strict-spawn-shared`, CLI build, 16/16 `noxc test`, examples, benchmarks, SBOM |
-| **Linux ARM64** | `ubuntu-24.04-arm` | LLVM, QBE, `--strict-spawn-shared`, CLI build, 16/16 `noxc test`, examples |
-| **macOS ARM64** | `macos-latest` | LLVM, QBE, `--strict-spawn-shared`, CLI build, 16/16 `noxc test`, examples |
-| **Windows x86_64** | `windows-latest` | LLVM, QBE, `--strict-spawn-shared`, CLI build, 16/16 `noxc test`, examples |
+| **Linux x86_64** | `ubuntu-latest` | LLVM, QBE, `--strict-spawn-shared`, CLI build, 17/17 `noxc test`, examples, benchmarks, SBOM |
+| **Linux ARM64** | `ubuntu-24.04-arm` | LLVM, QBE, `--strict-spawn-shared`, CLI build, 17/17 `noxc test`, examples |
+| **macOS ARM64** | `macos-latest` | LLVM, QBE, `--strict-spawn-shared`, CLI build, 17/17 `noxc test`, examples |
+| **Windows x86_64** | `windows-latest` | LLVM, QBE, `--strict-spawn-shared`, CLI build, 17/17 `noxc test`, examples |
 | **WebAssembly** | `wasm32-freestanding` | `noxc build --target wasm32-freestanding` on `glyph/api.nox`, `audit_consumer`, `wasm_memory` |
 
 ```sh
@@ -156,6 +157,7 @@ noxc run examples/nyx/main.nox
 noxc run examples/aether/main.nox
 noxc run examples/static_site/main.nox
 noxc run examples/wasm_memory/main.nox
+noxc run examples/aura_export/main.nox
 noxc sbom . -o glyph.sbom.json
 noxc sign check .
 ```
@@ -177,7 +179,7 @@ noxc sign check .
 | **Phase 8** | `v0.6.0` | `ADR-0008`, `ADR-0009`, i18n/plural, XML/MD/JSON/Email modes, streaming `Writer` | Done |
 | **Phase 9** | `v0.7.0` | `ADR-0010`, `integrations/nyx`, `integrations/aether`, `glyph` CLI, diagnostics | Done |
 | **Phase 10** | `v1.0.0` **(STABLE)** | Fuzzing, property/differential/concurrency tests, benchmarks, Release Gate | Done |
-| **Phase 11** | `v1.1.0+` / `v2.0` | `with`/`filter` blocks, component/slot DSL, const-folding, LSP, AOT research | Planned |
+| **Phase 11** | `v1.1.0` | `with`/`filter` blocks, `component`/`slot`, `namespace()`, const-folding, telemetry, Aura export, Tree-sitter & AOT PoC | Done (`tests/advanced/`) |
 
 ---
 
@@ -194,8 +196,8 @@ noxc sign check .
 | [docs/loaders.md](docs/loaders.md) | Canonical root confinement, `ChoiceLoader`/`PrefixLoader` & cache keys |
 | [docs/integration-nyx.md](docs/integration-nyx.md) · [docs/integration-aether.md](docs/integration-aether.md) | Nyx SSR & Aether HTTP adapter guides |
 | [docs/performance.md](docs/performance.md) · [docs/testing.md](docs/testing.md) | 3-round reproducible benchmarks, O(n) writer scaling & verification matrix |
-| [docs/compatibility.md](docs/compatibility.md) | Verified `noxc 2.1.186` stdlib & compiler capability matrix |
-| [docs/adr/](docs/adr/) | Architecture Decision Records (`ADR-0001` – `ADR-0012`) |
+| [docs/compatibility.md](docs/compatibility.md) · [docs/tooling.md](docs/tooling.md) | Verified `noxc 2.1.186` matrix, Tree-sitter grammar, CLI & telemetry tooling |
+| [docs/adr/](docs/adr/) | Architecture Decision Records (`ADR-0001` – `ADR-0013`) |
 | [CONTRIBUTING.md](CONTRIBUTING.md) · [CHANGELOG.md](CHANGELOG.md) | Contribution workflow & version history |
 
 ---

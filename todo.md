@@ -344,15 +344,15 @@ Her PoC derlenip `noxc check` + `noxc test` ile doğrulanmış ve sonucu `docs/c
 
 > Not: Bu faz `v1.0.0` önkoşulu değildir. Her madde için ayrı ADR, güvenlik modeli, compatibility proof ve benchmark gerekir.
 
-### 11.1. Advanced (`v1.x`)
-- [ ] `{% with x = expr %}...{% endwith %}` ve `{% filter name %}...{% endfilter %}` blokları.
-- [ ] Namespace modülleri ve `PackageLoader` / read-only `DatabaseLoader` adaptör örnekleri.
-- [ ] Component / slot DSL (`{% component %}...{% slot %}`) — yalnızca macro+block karşılaştırmalı ADR sonrası, SSR HTML odaklı (Aura widget'ı değil).
-- [ ] Yan etkisiz ifadelerde sabit katlama (constant folding) + diferansiyel (optimize vs non-optimize) doğrulama testleri.
-- [ ] Geliştirici araçları: Source-map, editor grammar (tree-sitter), opsiyonel LSP entegrasyonu.
-- [ ] Ekosistem hook'ları: `integrations/aura_export/` (e-posta/HTML export), `Obsidian` redacted log sink, `Pulse` trace/metrics hook'ları.
+### 11.1. Advanced (`v1.1.0`)
+- [x] `{% with x = expr %}...{% endwith %}` ve `{% filter name %}...{% endfilter %}` blokları.
+- [x] `namespace()` scoped accumulator (`{% set ns.key = ... %}`) ve `PackageLoader` / `ReadOnlyAdapterLoader` adaptörleri (`glyph/loader.nox`).
+- [x] Component / slot DSL (`{% component %}...{% slot %}`) — **ADR-0013** sonrası, izole prop+slot kapsamı ve SSR HTML odaklı (Aura widget'ı değil).
+- [x] Yan etkisiz/policy-bağımsız ifadelerde sabit katlama (`glyph/const_fold.nox`) + diferansiyel (`fold=True` vs `fold=False`) doğrulama testleri.
+- [x] Geliştirici araçları: Source-map (`SourceMapSpan`/`build_source_map_json`), Tree-sitter grammar (`tools/tree-sitter-glyph/grammar.js`), `docs/tooling.md`.
+- [x] Ekosistem hook'ları: `integrations/aura_export/glyph_aura_export.nox` (HTML/Text export), `glyph/telemetry.nox` (`TelemetryHook` / `TraceEvent` / `RedactedLogEvent` Obsidian/Pulse arayüzleri).
 
-### 11.2. Research (`v2.0` Adayları)
-- [ ] Async writer / platform-bağımlı async cancellation araştırması.
-- [ ] **ADR-0011:** Ahead-of-Time (AOT) template -> typed NOX source code generation fizibilitesi (compiler yaması olmadan).
-- [ ] **ADR-0012 Uygulaması:** Hostile multi-tenant ortamda kullanıcı kaynaklı template çalıştırma (WASM / ayrı process host izolasyonu ile).
+### 11.2. Research (`v1.1.0` PoC & `v2.0` Adayları)
+- [ ] Async I/O writer / platform-bağımlı async cancellation (`v2.0` adayı; mevcut senkron `streaming_writer` `v0.6.0`'dan beri kooperatif iptal ve backpressure destekler).
+- [x] **ADR-0011:** Ahead-of-Time (AOT) `TemplateAst -> typed .nox` source codegen fizibilite ve çalışan PoC (`tools/aot_codegen.nox`, compiler yaması olmadan).
+- [x] **ADR-0012 Güncellemesi:** Hostile multi-tenant sınırları ve WASM/process host izolasyon dokümantasyonu + `TrustTier`/`PackageLoader`/`TelemetryHook` korumaları.

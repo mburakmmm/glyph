@@ -1,0 +1,388 @@
+# Pure, deterministic, policy-independent constant folding pass for Glyph ASTs.
+# Enforces AGENTS.md §7.3 and ADR-0013 §4:
+#   NEVER folds locale-sensitive filters (upper/lower/date/currency/number/trans/plural),
+#   policy-sensitive filters (safe/raw/escape/tojson/urlencode), undefined lookups, or div-by-zero/overflow ops.
+import nox.strings
+from glyph.errors import SourceSpan
+from glyph.value import INT64_MAX, INT64_MIN
+from glyph.expressions import Expr, ExprKind, UnaryOp, BinaryOp, CallArg, MapEntry
+from glyph.ast import Stmt, StmtKind, IfBranch, MacroParam, WithBinding, ComponentSlot, TemplateAst
+
+def _is_scalar_truthy_known(kind: ExprKind) -> bool:
+    match kind:
+        case ExprKind.ENull:
+            return True
+        case ExprKind.EBool(_):
+            return True
+        case ExprKind.EInt(_):
+            return True
+        case ExprKind.EStr(_):
+            return True
+        case _:
+            return False
+
+def _scalar_truthy(kind: ExprKind) -> bool:
+    match kind:
+        case ExprKind.ENull:
+            return False
+        case ExprKind.EBool(b):
+            return b
+        case ExprKind.EInt(i):
+            return i != 0
+        case ExprKind.EStr(s):
+            return len(s) > 0
+        case _:
+            return False
+
+def _safe_iadd_ok(a: int, b: int) -> bool:
+    if b > 0 and a > INT64_MAX - b:
+        return False
+    if b < 0 and a < INT64_MIN - b:
+        return False
+    return True
+
+def _safe_isub_ok(a: int, b: int) -> bool:
+    if b < 0 and a > INT64_MAX + b:
+        return False
+    if b > 0 and a < INT64_MIN + b:
+        return False
+    return True
+
+def _safe_imul_ok(a: int, b: int) -> bool:
+    return a >= -1000000 and a <= 1000000 and b >= -1000000 and b <= 1000000
+
+def _fold_args(args: list[CallArg]) -> list[CallArg]:
+    out: list[CallArg] = []
+    i: int = 0
+    while i < len(args):
+        a: CallArg = args[i]
+        out.append(CallArg(a.name, fold_expr(a.value), a.span))
+        i = i + 1
+    return out
+
+def _fold_unary(op: UnaryOp, sub: Expr, span: SourceSpan) -> Expr:
+    match op:
+        case UnaryOp.UNeg:
+            match sub.kind:
+                case ExprKind.EInt(iv):
+                    if iv != INT64_MIN:
+                        return Expr(ExprKind.EInt(0 - iv), span)
+                case ExprKind.EFloat(fv):
+                    return Expr(ExprKind.EFloat(0.0 - fv), span)
+                case _:
+                    pass
+        case UnaryOp.UPos:
+            match sub.kind:
+                case ExprKind.EInt(_):
+                    return Expr(sub.kind, span)
+                case ExprKind.EFloat(_):
+                    return Expr(sub.kind, span)
+                case _:
+                    pass
+        case UnaryOp.UNot:
+            if _is_scalar_truthy_known(sub.kind):
+                return Expr(ExprKind.EBool(not _scalar_truthy(sub.kind)), span)
+    return Expr(ExprKind.EUnary(op, sub), span)
+
+def _fold_binary(op: BinaryOp, l: Expr, r: Expr, span: SourceSpan) -> Expr:
+    match op:
+        case BinaryOp.BAnd:
+            if _is_scalar_truthy_known(l.kind):
+                if not _scalar_truthy(l.kind):
+                    return Expr(l.kind, span)
+                return r
+            return Expr(ExprKind.EBinary(op, l, r), span)
+        case BinaryOp.BOr:
+            if _is_scalar_truthy_known(l.kind):
+                if _scalar_truthy(l.kind):
+                    return Expr(l.kind, span)
+                return r
+            return Expr(ExprKind.EBinary(op, l, r), span)
+        case BinaryOp.BAdd:
+            match l.kind:
+                case ExprKind.EInt(ia):
+                    match r.kind:
+                        case ExprKind.EInt(ib):
+                            if _safe_iadd_ok(ia, ib):
+                                return Expr(ExprKind.EInt(ia + ib), span)
+                        case _:
+                            pass
+                case ExprKind.EStr(sa):
+                    match r.kind:
+                        case ExprKind.EStr(sb):
+                            if nox.strings.byte_len(sa) + nox.strings.byte_len(sb) <= 65536:
+                                return Expr(ExprKind.EStr(sa + sb), span)
+                        case _:
+                            pass
+                case _:
+                    pass
+        case BinaryOp.BSub:
+            match l.kind:
+                case ExprKind.EInt(ia2):
+                    match r.kind:
+                        case ExprKind.EInt(ib2):
+                            if _safe_isub_ok(ia2, ib2):
+                                return Expr(ExprKind.EInt(ia2 - ib2), span)
+                        case _:
+                            pass
+                case _:
+                    pass
+        case BinaryOp.BMul:
+            match l.kind:
+                case ExprKind.EInt(ia3):
+                    match r.kind:
+                        case ExprKind.EInt(ib3):
+                            if _safe_imul_ok(ia3, ib3):
+                                return Expr(ExprKind.EInt(ia3 * ib3), span)
+                        case _:
+                            pass
+                case _:
+                    pass
+        case BinaryOp.BFloorDiv:
+            match l.kind:
+                case ExprKind.EInt(ia4):
+                    match r.kind:
+                        case ExprKind.EInt(ib4):
+                            if ib4 != 0 and not (ia4 == INT64_MIN and ib4 == -1):
+                                return Expr(ExprKind.EInt(ia4 // ib4), span)
+                        case _:
+                            pass
+                case _:
+                    pass
+        case BinaryOp.BMod:
+            match l.kind:
+                case ExprKind.EInt(ia5):
+                    match r.kind:
+                        case ExprKind.EInt(ib5):
+                            if ib5 != 0 and not (ia5 == INT64_MIN and ib5 == -1):
+                                return Expr(ExprKind.EInt(ia5 % ib5), span)
+                        case _:
+                            pass
+                case _:
+                    pass
+        case BinaryOp.BEq:
+            match l.kind:
+                case ExprKind.ENull:
+                    match r.kind:
+                        case ExprKind.ENull:
+                            return Expr(ExprKind.EBool(True), span)
+                        case _:
+                            pass
+                case ExprKind.EBool(ba):
+                    match r.kind:
+                        case ExprKind.EBool(bb):
+                            return Expr(ExprKind.EBool(ba == bb), span)
+                        case _:
+                            pass
+                case ExprKind.EInt(ia6):
+                    match r.kind:
+                        case ExprKind.EInt(ib6):
+                            return Expr(ExprKind.EBool(ia6 == ib6), span)
+                        case _:
+                            pass
+                case ExprKind.EStr(sa2):
+                    match r.kind:
+                        case ExprKind.EStr(sb2):
+                            return Expr(ExprKind.EBool(sa2 == sb2), span)
+                        case _:
+                            pass
+                case _:
+                    pass
+        case BinaryOp.BNotEq:
+            match l.kind:
+                case ExprKind.ENull:
+                    match r.kind:
+                        case ExprKind.ENull:
+                            return Expr(ExprKind.EBool(False), span)
+                        case _:
+                            pass
+                case ExprKind.EBool(ba2):
+                    match r.kind:
+                        case ExprKind.EBool(bb2):
+                            return Expr(ExprKind.EBool(ba2 != bb2), span)
+                        case _:
+                            pass
+                case ExprKind.EInt(ia7):
+                    match r.kind:
+                        case ExprKind.EInt(ib7):
+                            return Expr(ExprKind.EBool(ia7 != ib7), span)
+                        case _:
+                            pass
+                case ExprKind.EStr(sa3):
+                    match r.kind:
+                        case ExprKind.EStr(sb3):
+                            return Expr(ExprKind.EBool(sa3 != sb3), span)
+                        case _:
+                            pass
+                case _:
+                    pass
+        case BinaryOp.BLt:
+            match l.kind:
+                case ExprKind.EInt(ia8):
+                    match r.kind:
+                        case ExprKind.EInt(ib8):
+                            return Expr(ExprKind.EBool(ia8 < ib8), span)
+                        case _:
+                            pass
+                case _:
+                    pass
+        case BinaryOp.BLtEq:
+            match l.kind:
+                case ExprKind.EInt(ia9):
+                    match r.kind:
+                        case ExprKind.EInt(ib9):
+                            return Expr(ExprKind.EBool(ia9 <= ib9), span)
+                        case _:
+                            pass
+                case _:
+                    pass
+        case BinaryOp.BGt:
+            match l.kind:
+                case ExprKind.EInt(ia10):
+                    match r.kind:
+                        case ExprKind.EInt(ib10):
+                            return Expr(ExprKind.EBool(ia10 > ib10), span)
+                        case _:
+                            pass
+                case _:
+                    pass
+        case BinaryOp.BGtEq:
+            match l.kind:
+                case ExprKind.EInt(ia11):
+                    match r.kind:
+                        case ExprKind.EInt(ib11):
+                            return Expr(ExprKind.EBool(ia11 >= ib11), span)
+                        case _:
+                            pass
+                case _:
+                    pass
+        case _:
+            pass
+    return Expr(ExprKind.EBinary(op, l, r), span)
+
+def fold_expr(expr: Expr) -> Expr:
+    sp: SourceSpan = expr.span
+    match expr.kind:
+        case ExprKind.ENull:
+            return expr
+        case ExprKind.EBool(_):
+            return expr
+        case ExprKind.EInt(_):
+            return expr
+        case ExprKind.EFloat(_):
+            return expr
+        case ExprKind.EStr(_):
+            return expr
+        case ExprKind.EIdent(_):
+            return expr
+        case ExprKind.EList(items):
+            f_items: list[Expr] = []
+            i: int = 0
+            while i < len(items):
+                f_items.append(fold_expr(items[i]))
+                i = i + 1
+            return Expr(ExprKind.EList(f_items), sp)
+        case ExprKind.EMap(entries):
+            f_entries: list[MapEntry] = []
+            j: int = 0
+            while j < len(entries):
+                e: MapEntry = entries[j]
+                f_entries.append(MapEntry(fold_expr(e.key), fold_expr(e.value), e.span))
+                j = j + 1
+            return Expr(ExprKind.EMap(f_entries), sp)
+        case ExprKind.EMember(target, field):
+            return Expr(ExprKind.EMember(fold_expr(target), field), sp)
+        case ExprKind.EIndex(target, index):
+            return Expr(ExprKind.EIndex(fold_expr(target), fold_expr(index)), sp)
+        case ExprKind.EUnary(op, operand):
+            return _fold_unary(op, fold_expr(operand), sp)
+        case ExprKind.EBinary(op, left, right):
+            return _fold_binary(op, fold_expr(left), fold_expr(right), sp)
+        case ExprKind.EConditional(cond, then_expr, else_expr):
+            fc: Expr = fold_expr(cond)
+            ft: Expr = fold_expr(then_expr)
+            fe: Expr = fold_expr(else_expr)
+            if _is_scalar_truthy_known(fc.kind):
+                if _scalar_truthy(fc.kind):
+                    return ft
+                return fe
+            return Expr(ExprKind.EConditional(fc, ft, fe), sp)
+        case ExprKind.EFilter(target, fname, args):
+            # Never fold filter execution itself: filters may depend on policy, trust, or locale.
+            return Expr(ExprKind.EFilter(fold_expr(target), fname, _fold_args(args)), sp)
+        case ExprKind.EIsTest(target, tname, negated, args):
+            return Expr(ExprKind.EIsTest(fold_expr(target), tname, negated, _fold_args(args)), sp)
+        case ExprKind.ECall(cname, args):
+            return Expr(ExprKind.ECall(cname, _fold_args(args)), sp)
+
+def fold_stmts(stmts: list[Stmt]) -> list[Stmt]:
+    out: list[Stmt] = []
+    i: int = 0
+    while i < len(stmts):
+        st: Stmt = stmts[i]
+        sp: SourceSpan = st.span
+        match st.kind:
+            case StmtKind.SText(_):
+                out.append(st)
+            case StmtKind.SOutput(expr):
+                out.append(Stmt(StmtKind.SOutput(fold_expr(expr)), sp))
+            case StmtKind.SIf(branches, else_body):
+                f_branches: list[IfBranch] = []
+                bi: int = 0
+                while bi < len(branches):
+                    br: IfBranch = branches[bi]
+                    f_branches.append(IfBranch(fold_expr(br.cond), fold_stmts(br.body), br.span))
+                    bi = bi + 1
+                out.append(Stmt(StmtKind.SIf(f_branches, fold_stmts(else_body)), sp))
+            case StmtKind.SFor(targets, iterable, body, else_body):
+                out.append(Stmt(StmtKind.SFor(targets, fold_expr(iterable), fold_stmts(body), fold_stmts(else_body)), sp))
+            case StmtKind.SSet(target, val):
+                out.append(Stmt(StmtKind.SSet(target, fold_expr(val)), sp))
+            case StmtKind.SSetAttr(target, field, val):
+                out.append(Stmt(StmtKind.SSetAttr(target, field, fold_expr(val)), sp))
+            case StmtKind.SInclude(tpl_expr, with_ctx, ign):
+                out.append(Stmt(StmtKind.SInclude(fold_expr(tpl_expr), with_ctx, ign), sp))
+            case StmtKind.SExtends(_):
+                out.append(st)
+            case StmtKind.SBlock(bname, body):
+                out.append(Stmt(StmtKind.SBlock(bname, fold_stmts(body)), sp))
+            case StmtKind.SMacro(mname, params, body):
+                f_params: list[MacroParam] = []
+                pi: int = 0
+                while pi < len(params):
+                    mp: MacroParam = params[pi]
+                    if mp.has_default:
+                        f_params.append(MacroParam(mp.name, True, fold_expr(mp.default_expr), mp.span))
+                    else:
+                        f_params.append(mp)
+                    pi = pi + 1
+                out.append(Stmt(StmtKind.SMacro(mname, f_params, fold_stmts(body)), sp))
+            case StmtKind.SImport(_, _):
+                out.append(st)
+            case StmtKind.SFromImport(_, _):
+                out.append(st)
+            case StmtKind.SCallBlock(mtarget, args, caller_params, body):
+                out.append(Stmt(StmtKind.SCallBlock(mtarget, _fold_args(args), caller_params, fold_stmts(body)), sp))
+            case StmtKind.SWith(bindings, body):
+                f_bindings: list[WithBinding] = []
+                wi: int = 0
+                while wi < len(bindings):
+                    wb: WithBinding = bindings[wi]
+                    f_bindings.append(WithBinding(wb.name, fold_expr(wb.value), wb.span))
+                    wi = wi + 1
+                out.append(Stmt(StmtKind.SWith(f_bindings, fold_stmts(body)), sp))
+            case StmtKind.SFilterBlock(fname, args, body):
+                out.append(Stmt(StmtKind.SFilterBlock(fname, _fold_args(args), fold_stmts(body)), sp))
+            case StmtKind.SComponent(tpl_expr, props, slots):
+                f_slots: list[ComponentSlot] = []
+                sli: int = 0
+                while sli < len(slots):
+                    sl: ComponentSlot = slots[sli]
+                    f_slots.append(ComponentSlot(sl.name, fold_stmts(sl.body), sl.span))
+                    sli = sli + 1
+                out.append(Stmt(StmtKind.SComponent(fold_expr(tpl_expr), _fold_args(props), f_slots), sp))
+        i = i + 1
+    return out
+
+def fold_ast(ast: TemplateAst) -> TemplateAst:
+    return TemplateAst(ast.logical_name, fold_stmts(ast.body), ast.has_extends, ast.extends_target)

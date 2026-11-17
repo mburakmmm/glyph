@@ -3,7 +3,7 @@
 from glyph.errors import SourceSpan, GlyphSyntaxError, GlyphSecurityError
 from glyph.errors import GLYPH_SYNTAX_INVALID_NESTING, GLYPH_SYNTAX_DUPLICATE_BLOCK, GLYPH_SECURITY_POLICY
 from glyph.expressions import Expr, ExprKind, CallArg, MapEntry
-from glyph.ast import Stmt, StmtKind, IfBranch, MacroParam, TemplateAst
+from glyph.ast import Stmt, StmtKind, IfBranch, MacroParam, WithBinding, ComponentSlot, TemplateAst
 
 class TemplateInfo:
     logical_name: str
@@ -182,6 +182,10 @@ class _Validator:
                 case StmtKind.SSet(target, val):
                     self.visit_expr(val, bound_locals)
                     bound_locals = _append_unique(bound_locals, target)
+                case StmtKind.SSetAttr(target, _, val):
+                    if not _has_name(bound_locals, target):
+                        self.referenced_vars = _append_unique(self.referenced_vars, target)
+                    self.visit_expr(val, bound_locals)
                 case StmtKind.SInclude(tpl_expr, _, _):
                     self.visit_expr(tpl_expr, bound_locals)
                     match tpl_expr.kind:
@@ -249,6 +253,37 @@ class _Validator:
                         call_locals = _append_unique(call_locals, caller_params[ci])
                         ci = ci + 1
                     self.visit_stmts(body, call_locals, False)
+                case StmtKind.SWith(bindings, body):
+                    with_locals: list[str] = _copy_names(bound_locals)
+                    wi: int = 0
+                    while wi < len(bindings):
+                        wb: WithBinding = bindings[wi]
+                        self.visit_expr(wb.value, bound_locals)
+                        with_locals = _append_unique(with_locals, wb.name)
+                        wi = wi + 1
+                    self.visit_stmts(body, with_locals, False)
+                case StmtKind.SFilterBlock(_, args, body):
+                    self.visit_args(args, bound_locals)
+                    self.visit_stmts(body, _copy_names(bound_locals), False)
+                case StmtKind.SComponent(tpl_expr, props, slots):
+                    self.visit_expr(tpl_expr, bound_locals)
+                    match tpl_expr.kind:
+                        case ExprKind.EStr(lit_comp):
+                            self.includes = _append_unique(self.includes, lit_comp)
+                        case _:
+                            if not self.allow_dynamic_include:
+                                raise GlyphSecurityError(
+                                    GLYPH_SECURITY_POLICY,
+                                    "dynamic component path requires trusted-template dynamic-include policy",
+                                    st.span,
+                                    "pass a literal component template path string"
+                                )
+                    self.visit_args(props, bound_locals)
+                    si: int = 0
+                    while si < len(slots):
+                        sl: ComponentSlot = slots[si]
+                        self.visit_stmts(sl.body, _copy_names(bound_locals), False)
+                        si = si + 1
             i = i + 1
 
 def _copy_names(src: list[str]) -> list[str]:

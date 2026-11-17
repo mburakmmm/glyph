@@ -59,7 +59,34 @@ Single target or 2-target key/value unpacking:
 - `{% import "macros.html" as m %}` / `{% from "macros.html" import btn %}`
 - `{% call card(title="Hi") %}...{% endcall %}`
 
-## 4. Forbidden Constructs
+## 4. Advanced Composition, Scoped Bindings & Filter Blocks (`v1.1.0`)
+
+- **Scoped `with` blocks:**
+  ```jinja2
+  {% with title = "Notice", count = items | length %}
+    <h1>{{ title }} ({{ count }})</h1>
+  {% endwith %}
+  ```
+  RHS expressions evaluate in the enclosing scope before binding; nested modifications never leak outside `{% endwith %}`.
+- **Scoped `namespace()` accumulators:**
+  ```jinja2
+  {% set ns = namespace(total=0) %}
+  {% for n in numbers %}{% set ns.total = ns.total + n %}{% endfor %}
+  Total: {{ ns.total }}
+  ```
+  Field assignment (`{% set target.field = expr %}`) is permitted **only** on `namespace()` objects; plain maps and objects remain immutable.
+- **Filter blocks (`{% filter ... %}`):**
+  Render body into an isolated sub-writer under active autoescaping/context rules and apply the pure filter to the resulting string. The block result still respects contextual HTML escaping (`filter safe` remains disabled unless `TrustTier.Trusted` and `allow_safe_filter=True`).
+- **Component & slot composition (`{% component %} / {% slot %}`):**
+  ```jinja2
+  {% component "ui/card.html" title=heading %}
+    {% slot "header" %}<b>{{ tag }}</b>{% endslot %}
+    <p>Default slot body</p>
+  {% endcomponent %}
+  ```
+  Target component templates render in an isolated scope with explicit named props plus `slot("header")` / `slot()` / `slot("footer", "fallback")` and `slots.<name>`. Slots preserve caller trust tier and fail-closed escaping, and cycles/context violations abort safely. Components compile SSR text/HTML only (not client/retained UI widgets).
+
+## 5. Forbidden Constructs
 
 - No `{% break %}`, `{% continue %}`, `{% do %}`, `{% debug %}`, `eval`, `exec`, `import` of NOX/Python code, or shell commands.
 - Parse errors abort compilation: an invalid AST is never passed to the renderer.

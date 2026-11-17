@@ -3,7 +3,7 @@
 import nox.strings
 from glyph.errors import SourceSpan, GlyphLoadError, empty_span, redact_logical_name
 from glyph.errors import GLYPH_LOADER_NOT_FOUND, GLYPH_LOADER_OUTSIDE_ROOT
-from glyph.options import TrustTier
+from glyph.options import TrustTier, min_trust_tier
 
 class SourceRecord:
     logical_name: str
@@ -167,3 +167,98 @@ class PrefixLoader:
             pl: PrefixLoader = PrefixLoader(prefixes, loaders)
             return pl.load(name)
         return Loader("prefix", _load)
+
+def _validate_package_name(pkg: str) -> str:
+    safe_pkg: str = validate_logical_template_name(pkg)
+    if nox.strings.contains(safe_pkg, "/") or nox.strings.starts_with(safe_pkg, "@"):
+        raise GlyphLoadError(
+            GLYPH_LOADER_OUTSIDE_ROOT,
+            "invalid package identifier '" + safe_pkg + "'",
+            empty_span(safe_pkg),
+            "use a single-segment package name without slashes"
+        )
+    return safe_pkg
+
+# Isolated package-scoped loader: mounts templates of a package under `@pkg/...` or directly when behind PrefixLoader,
+# rewriting origin_id and clamping trust tier with `max_trust`.
+class PackageLoader:
+    package_name: str
+    inner: Loader
+    max_trust: TrustTier
+
+    def __init__(self: PackageLoader, package_name: str, inner: Loader, max_trust: TrustTier) -> None:
+        self.package_name = _validate_package_name(package_name)
+        self.inner = inner
+        self.max_trust = max_trust
+
+    def load(self: PackageLoader, logical_name: str) -> SourceRecord:
+        safe_name: str = validate_logical_template_name(logical_name)
+        target: str = safe_name
+        at_prefix: str = "@" + self.package_name + "/"
+        if nox.strings.starts_with(safe_name, at_prefix):
+            target = safe_name[len(at_prefix):len(safe_name)]
+            if len(target) == 0:
+                raise GlyphLoadError(GLYPH_LOADER_NOT_FOUND, "empty template name inside package", empty_span(safe_name), "specify a template path")
+            target = validate_logical_template_name(target)
+        rec: SourceRecord = self.inner.load(target)
+        fp: str = rec.fingerprint
+        if len(fp) == 0:
+            fp = compute_fingerprint(rec.content)
+        eff_trust: TrustTier = min_trust_tier(self.max_trust, rec.trust_tier)
+        return SourceRecord(
+            safe_name,
+            rec.content,
+            "pkg:" + self.package_name + ":" + rec.origin_id,
+            fp,
+            eff_trust
+        )
+
+    def as_loader(self: PackageLoader) -> Loader:
+        pkg: str = self.package_name
+        inner: Loader = self.inner
+        mt: TrustTier = self.max_trust
+        def _load(name: str) -> SourceRecord:
+            pl: PackageLoader = PackageLoader(pkg, inner, mt)
+            return pl.load(name)
+        return Loader("package:" + pkg, _load)
+
+# Read-only host adapter loader (e.g. database/remote registry bridge supplied by caller) without I/O imports in glyph core.
+class ReadOnlyAdapterLoader:
+    adapter_name: str
+    fetch_fn: (str) -> SourceRecord
+    trust_floor: TrustTier
+
+    def __init__(
+        self: ReadOnlyAdapterLoader,
+        adapter_name: str,
+        fetch_fn: (str) -> SourceRecord,
+        trust_floor: TrustTier
+    ) -> None:
+        self.adapter_name = adapter_name
+        self.fetch_fn = fetch_fn
+        self.trust_floor = trust_floor
+
+    def load(self: ReadOnlyAdapterLoader, logical_name: str) -> SourceRecord:
+        safe_name: str = validate_logical_template_name(logical_name)
+        fn: (str) -> SourceRecord = self.fetch_fn
+        rec: SourceRecord = fn(safe_name)
+        fp: str = rec.fingerprint
+        if len(fp) == 0:
+            fp = compute_fingerprint(rec.content)
+        eff_trust: TrustTier = min_trust_tier(self.trust_floor, rec.trust_tier)
+        return SourceRecord(
+            safe_name,
+            rec.content,
+            "adapter:" + self.adapter_name + ":" + rec.origin_id,
+            fp,
+            eff_trust
+        )
+
+    def as_loader(self: ReadOnlyAdapterLoader) -> Loader:
+        aname: str = self.adapter_name
+        fn: (str) -> SourceRecord = self.fetch_fn
+        tf: TrustTier = self.trust_floor
+        def _load(name: str) -> SourceRecord:
+            al: ReadOnlyAdapterLoader = ReadOnlyAdapterLoader(aname, fn, tf)
+            return al.load(name)
+        return Loader("adapter:" + aname, _load)

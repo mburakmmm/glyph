@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-17
+
+### Added
+- `docs/adr/0011-aot-template-to-nox-codegen.md` (ADR-0011) & `docs/adr/0013-advanced-blocks-components-and-const-folding.md` (ADR-0013), plus Phase 11 host boundary update to `docs/adr/0012-user-created-templates-threat-model.md`.
+- Scoped lexical binding blocks (`{% with x = expr, ... %}...{% endwith %}`), filter blocks (`{% filter name(args...) %}...{% endfilter %}`), and `namespace(...)` scoped accumulators (`{% set ns.field = ... %}`) with fail-closed map immutability and escaping guarantees.
+- Isolated SSR component/slot composition (`{% component "tpl" k=v %}...{% slot "name" %}...{% endslot %}{% endcomponent %}`, `slot("name", fallback)`, and `slots.<name>`), preserving caller trust floor, cycle detection, and HTML context tracking.
+- `glyph/const_fold.nox`: Pure, locale-independent, policy-independent AST constant-folding pass (`EnvironmentOptions.enable_constant_folding`, isolated in `build_compile_cache_key`) verified against non-folded execution via differential tests.
+- `PackageLoader` & `ReadOnlyAdapterLoader` in `glyph/loader.nox`, zero-global opt-in `TelemetryHook` / `TraceEvent` / `RedactedLogEvent` in `glyph/telemetry.nox`, and `SourceMapSpan` / `build_source_map_json` in `glyph/diagnostics.nox`.
+- `integrations/aura_export/glyph_aura_export.nox` & `examples/aura_export/main.nox` (document/HTML/email export adapter), `tools/tree-sitter-glyph/grammar.js`, `docs/tooling.md`, and working ADR-0011 PoC compiler `tools/aot_codegen.nox`.
+- `tests/advanced/advanced_v11_test.nox` covering all Phase 11 features, XSS/isolation negatives, differential constant folding, loader redaction, telemetry secret redaction, Aura export, and AOT codegen output.
+
+### Changed
+- Bumped `GLYPH_VERSION` and `nox.json` to `1.1.0` and updated `tests/audit/audit_test.nox`, `README.md`, `docs/syntax.md`, `docs/api.md`, `docs/roadmap.md`, and `todo.md`.
+
 ## [1.0.0] - 2026-11-17
 
 ### Added

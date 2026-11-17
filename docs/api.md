@@ -1,6 +1,6 @@
 # Glyph Public API Reference (`docs/api.md`)
 
-> **Version:** `1.0.0` (STABLE)  
+> **Version:** `1.1.0` (STABLE)  
 > **Entry Module:** `import glyph.api`  
 > **Stability Legend (`AGENTS.md` §23):**
 > - **`Stable`**: Frozen for `v1.x` under SemVer; breaking signature or security-default changes require a MAJOR release and deprecation window.
@@ -19,6 +19,8 @@
 - `inspect(template: Template) -> TemplateInfo` — Returns referenced external variables, blocks, includes, macros, and imports.
 
 - `clear_cache(env: Environment)` & `freeze_environment(env: Environment)` — Clears compilation caches or freezes `filters`, `tests`, `functions`, and `catalog` for lock-free shared read-only concurrent renders across `spawn` fibers.
+- `EnvironmentOptions.enable_constant_folding` & `fold_ast(ast: TemplateAst)` — Pure, policy/locale-independent constant folding pass (`v1.1.0`; compile-cache isolated).
+- `set_telemetry_hook(env: Environment, hook: TelemetryHook)` & `telemetry_hook(on_trace, on_log)` (`TraceEvent`, `RedactedLogEvent`) — Zero-global opt-in tracing and redacted log hooks for Pulse / Obsidian (`v1.1.0`).
 
 ## 2. Rendering & Writer (`Stable`)
 
@@ -46,6 +48,7 @@
 
 - `Loader` (`load`), `MemoryLoader` (`put`, `put_with_trust`, `has`, `load`, `as_loader`)
 - `ChoiceLoader` & `PrefixLoader` (composite loaders; `ChoiceLoader` never falls back on security/path confinement errors)
+- `PackageLoader` & `ReadOnlyAdapterLoader` (`v1.1.0`: `@pkg/...` package prefix isolation, host adapter callback bridge without core I/O, trust clamping)
 - `FilesystemLoader` (`glyph/loader_fs.nox` — hosted-only, canonical root lock, path traversal & sibling-prefix protection)
 - `environment_with_loader(loader: Loader, options: EnvironmentOptions) -> Environment`
 - `ParseCache`, `CompileCache`, `clear_cache(env)` (composite policy/version/locale/registry keys + transitive dependency invalidation)
@@ -58,9 +61,11 @@
 
 ## 5. Diagnostics, Framework Adapters & CLI (`Stable` Core / `Experimental` Adapters)
 
-- `glyph/diagnostics.nox`: `format_error_human`, `format_error_json`, `format_template_info_json`, `format_template_info_human`, `exit_code_for_error` (`0 OK`, `2 usage`, `3 syntax`, `4 loader`, `5 security`, `6 resource`, `7 runtime`, `8 internal`).
+- `glyph/diagnostics.nox`: `format_error_human`, `format_error_json`, `format_template_info_json`, `format_template_info_human`, `exit_code_for_error` (`0 OK`, `2 usage`, `3 syntax`, `4 loader`, `5 security`, `6 resource`, `7 runtime`, `8 internal`), plus `SourceMapSpan` & `build_source_map_json`.
 - `integrations/nyx/glyph_nyx.nox`: Opt-in `render_view` and preflight `render_view_stream` (see [docs/integration-nyx.md](integration-nyx.md)).
 - `integrations/aether/glyph_aether.nox`: Explicit `Accept` content-negotiation adapter (`text/html`, `application/xml`, `text/plain`; see [docs/integration-aether.md](integration-aether.md)).
+- `integrations/aura_export/glyph_aura_export.nox`: Opt-in Aura HTML/Text document export helpers (`export_html_document`, `export_plain_text_document`, `export_restricted_snapshot`; never replaces Aura UI widgets).
+- `tools/aot_codegen.nox` & `tools/tree-sitter-glyph/grammar.js`: Research PoC `TemplateAst -> .nox` source codegen (ADR-0011) and Tree-sitter syntax grammar (see [docs/tooling.md](tooling.md)).
 - `cli/main.nox` (`cli/app.nox`): Hosted `glyph` CLI (`check`, `lint`, `render`, `inspect`, `deps`, `bench`, `version`).
 
 ## 6. Error Hierarchy (`Stable`)

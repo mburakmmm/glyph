@@ -10,11 +10,13 @@ from glyph.value import Value
 MAX_RANGE_ITEMS: int = 10000
 
 def _is_core_function_name(name: str) -> bool:
-    return name == "range" or name == "super" or name == "caller"
+    return name == "range" or name == "super" or name == "caller" or name == "namespace" or name == "slot"
 
 def builtin_function_specs() -> list[FunctionSpec]:
     return [
-        FunctionSpec("core", "range", 1, 3, "integer", "list", True, True, "any", False, CostClass.Linear, MAX_RANGE_ITEMS, TrustTier.Untrusted)
+        FunctionSpec("core", "range", 1, 3, "integer", "list", True, True, "any", False, CostClass.Linear, MAX_RANGE_ITEMS, TrustTier.Untrusted),
+        FunctionSpec("core", "namespace", 0, 64, "any", "map", True, True, "any", False, CostClass.Linear, 64, TrustTier.Untrusted),
+        FunctionSpec("core", "slot", 0, 2, "string", "any", True, True, "html", False, CostClass.Trivial, 1, TrustTier.Untrusted)
     ]
 
 class FunctionRegistry:

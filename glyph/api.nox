@@ -27,6 +27,8 @@ import glyph.loader_memory
 import glyph.catalog
 import glyph.runtime
 import glyph.cache
+import glyph.const_fold
+import glyph.telemetry
 import glyph.environment
 import glyph.email
 
@@ -38,7 +40,7 @@ from glyph.limits import ResourceBudget, BudgetTracker
 from glyph.value import Value, MarkupContext, UndefinedPolicy
 from glyph.token import Token, TokenKind
 from glyph.expressions import Expr, ExprKind, UnaryOp, BinaryOp, CallArg, MapEntry
-from glyph.ast import Stmt, StmtKind, IfBranch, MacroParam, TemplateAst
+from glyph.ast import Stmt, StmtKind, IfBranch, MacroParam, WithBinding, ComponentSlot, TemplateAst
 from glyph.validate import TemplateInfo
 from glyph.options import OutputMode, TrustTier, EnvironmentOptions, RenderOptions
 from glyph.scope import Context
@@ -49,11 +51,12 @@ from glyph.filters_text import FilterArgValue
 from glyph.filters import FilterRegistry
 from glyph.tests_registry import TestRegistry
 from glyph.functions import FunctionRegistry
-from glyph.loader import SourceRecord, Loader, ChoiceLoader, PrefixLoader
+from glyph.loader import SourceRecord, Loader, ChoiceLoader, PrefixLoader, PackageLoader, ReadOnlyAdapterLoader
 from glyph.loader_memory import MemoryLoader
 from glyph.catalog import MissingTranslationPolicy, PluralForms, LocaleCatalog, TranslationCatalog
 from glyph.runtime import Template
 from glyph.cache import DepFingerprint, ParseCache, CompileCacheEntry, CompileCache
+from glyph.telemetry import TraceEvent, RedactedLogEvent, TelemetryHook, noop_telemetry_hook, telemetry_hook
 from glyph.environment import Environment
 from glyph.email import EmailMessage
 
@@ -107,6 +110,12 @@ def clear_cache(env: Environment) -> None:
 
 def freeze_environment(env: Environment) -> None:
     glyph.environment.freeze_environment(env)
+
+def set_telemetry_hook(env: Environment, hook: TelemetryHook) -> None:
+    glyph.environment.set_telemetry_hook(env, hook)
+
+def fold_ast(ast: TemplateAst) -> TemplateAst:
+    return glyph.const_fold.fold_ast(ast)
 
 def compile_string(source: str, logical_name: str, env: Environment) -> Template:
     return glyph.environment.compile_string(source, logical_name, env)

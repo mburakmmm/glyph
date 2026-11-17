@@ -10,7 +10,7 @@ from glyph.value import is_forbidden_key, validate_float
 from glyph.token import Token, TokenKind
 from glyph.lexer import tokenize_with_budget
 from glyph.expressions import Expr, ExprKind, UnaryOp, BinaryOp, CallArg, MapEntry
-from glyph.ast import Stmt, StmtKind, IfBranch, MacroParam, TemplateAst
+from glyph.ast import Stmt, StmtKind, IfBranch, MacroParam, WithBinding, ComponentSlot, TemplateAst
 from glyph.validate import TemplateInfo, validate_ast
 
 def _is_reserved_word(w: str) -> bool:
@@ -535,8 +535,14 @@ class _Parser:
             return self.parse_from_import(start_tok.span)
         if tag == "call":
             return self.parse_call_block(start_tok.span)
+        if tag == "with":
+            return self.parse_with(start_tok.span)
+        if tag == "filter":
+            return self.parse_filter_block(start_tok.span)
+        if tag == "component":
+            return self.parse_component(start_tok.span)
 
-        if tag == "elif" or tag == "else" or tag == "endif" or tag == "endfor" or tag == "endblock" or tag == "endmacro" or tag == "endcall":
+        if tag == "elif" or tag == "else" or tag == "endif" or tag == "endfor" or tag == "endblock" or tag == "endmacro" or tag == "endcall" or tag == "endwith" or tag == "endfilter" or tag == "endcomponent" or tag == "slot" or tag == "endslot":
             raise GlyphSyntaxError(GLYPH_SYNTAX_INVALID_NESTING, "unexpected '" + tag + "' without matching opening tag", tag_tok.span, "check block nesting")
 
         raise GlyphSyntaxError(GLYPH_SYNTAX_UNKNOWN_TAG, "unknown statement tag '" + tag + "'", tag_tok.span, "check supported statement tags")
@@ -608,6 +614,15 @@ class _Parser:
 
     def parse_set(self: _Parser, start_span: SourceSpan) -> Stmt:
         target: Token = self.expect_name("expected variable name after 'set'")
+        if self.check_kind(TokenKind.TDot):
+            _dot: Token = self.advance()
+            field_tok: Token = self.expect_name("expected namespace field name after '.'")
+            if is_forbidden_key(field_tok.text):
+                raise GlyphSecurityError(GLYPH_SECURITY_REFLECTION, "cannot assign to restricted attribute name", field_tok.span, "use a plain field name on namespace()")
+            _eqf: Token = self.expect_kind(TokenKind.TAssign, "expected '=' in namespace field assignment")
+            valf: Expr = self.parse_expr()
+            _sef: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after set statement")
+            return self._make_stmt(StmtKind.SSetAttr(target.text, field_tok.text, valf), start_span)
         _eq: Token = self.expect_kind(TokenKind.TAssign, "expected '=' in set statement")
         val: Expr = self.parse_expr()
         _se: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after set statement")
@@ -746,6 +761,126 @@ class _Parser:
         _ec: Token = self.expect_ident_word("endcall", "expected 'endcall'")
         _s2: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after endcall")
         return self._make_stmt(StmtKind.SCallBlock(call_target, args, caller_params, body), start_span)
+
+    def parse_with(self: _Parser, start_span: SourceSpan) -> Stmt:
+        bindings: list[WithBinding] = []
+        seen: list[str] = []
+        done: bool = False
+        while not done:
+            btok: Token = self.expect_name("expected binding variable name in 'with'")
+            si: int = 0
+            while si < len(seen):
+                if seen[si] == btok.text:
+                    raise GlyphSyntaxError(GLYPH_SYNTAX_UNEXPECTED_TOKEN, "duplicate binding '" + btok.text + "' in with statement", btok.span, "use distinct binding names")
+                si = si + 1
+            seen.append(btok.text)
+            _eq: Token = self.expect_kind(TokenKind.TAssign, "expected '=' in with binding")
+            bval: Expr = self.parse_expr()
+            bindings.append(WithBinding(btok.text, bval, btok.span))
+            if self.check_kind(TokenKind.TComma):
+                _cm: Token = self.advance()
+            else:
+                done = True
+        _se: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after with bindings")
+        stop_w: list[str] = ["endwith"]
+        body: list[Stmt] = self.parse_body(stop_w, "with", start_span)
+        _s1: Token = self.expect_kind(TokenKind.TStmtStart, "expected '{% endwith %}'")
+        _ew: Token = self.expect_ident_word("endwith", "expected 'endwith'")
+        _s2: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after endwith")
+        return self._make_stmt(StmtKind.SWith(bindings, body), start_span)
+
+    def parse_filter_block(self: _Parser, start_span: SourceSpan) -> Stmt:
+        ftok: Token = self.expect_name("expected filter name after 'filter'")
+        if _is_blocked_call_name(ftok.text):
+            raise GlyphSecurityError(GLYPH_SECURITY_REFLECTION, "disallowed filter name", ftok.span, "use a registered safe filter")
+        fname: str = ftok.text
+        while self.check_kind(TokenKind.TDot):
+            _dot: Token = self.advance()
+            sub: Token = self.expect_name("expected filter name after '.'")
+            fname = fname + "." + sub.text
+        args: list[CallArg] = []
+        if self.check_kind(TokenKind.TLParen):
+            args = self.parse_call_args()
+        _se: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after filter header")
+        stop_f: list[str] = ["endfilter"]
+        body: list[Stmt] = self.parse_body(stop_f, "filter", start_span)
+        _s1: Token = self.expect_kind(TokenKind.TStmtStart, "expected '{% endfilter %}'")
+        _ef: Token = self.expect_ident_word("endfilter", "expected 'endfilter'")
+        _s2: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after endfilter")
+        return self._make_stmt(StmtKind.SFilterBlock(fname, args, body), start_span)
+
+    def parse_component(self: _Parser, start_span: SourceSpan) -> Stmt:
+        tpl_expr: Expr = self.parse_expr()
+        if self.check_ident("with"):
+            _w: Token = self.advance()
+        props: list[CallArg] = []
+        while not self.check_kind(TokenKind.TStmtEnd):
+            if self.check_kind(TokenKind.TComma):
+                _cm: Token = self.advance()
+            ptok: Token = self.expect_name("expected component prop name or '%}'")
+            _eq: Token = self.expect_kind(TokenKind.TAssign, "expected '=' after component prop name")
+            pval: Expr = self.parse_expr()
+            props.append(CallArg(ptok.text, pval, ptok.span))
+            if self.check_kind(TokenKind.TComma):
+                _cm2: Token = self.advance()
+        _se: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after component header")
+
+        slots: list[ComponentSlot] = []
+        seen_slots: list[str] = []
+        default_body: list[Stmt] = []
+        has_non_ws_default: bool = False
+        stop_comp: list[str] = ["slot", "endcomponent"]
+
+        comp_done: bool = False
+        while not comp_done:
+            chunk: list[Stmt] = self.parse_body(stop_comp, "component", start_span)
+            ci: int = 0
+            while ci < len(chunk):
+                cst: Stmt = chunk[ci]
+                match cst.kind:
+                    case StmtKind.SText(txt):
+                        if not _is_ws_only(txt):
+                            has_non_ws_default = True
+                    case _:
+                        has_non_ws_default = True
+                default_body.append(cst)
+                ci = ci + 1
+            next_tag: str = self._peek_stmt_tag()
+            if next_tag == "slot":
+                _s1: Token = self.advance()
+                sl_tok: Token = self.advance()
+                sname_tok: Token = self.expect_kind(TokenKind.TString, "expected slot name string after 'slot'")
+                if len(sname_tok.text) == 0 or is_forbidden_key(sname_tok.text):
+                    raise GlyphSecurityError(GLYPH_SECURITY_REFLECTION, "invalid slot name", sname_tok.span, "use a valid non-empty slot name")
+                sli: int = 0
+                while sli < len(seen_slots):
+                    if seen_slots[sli] == sname_tok.text:
+                        raise GlyphSyntaxError(GLYPH_SYNTAX_UNEXPECTED_TOKEN, "duplicate slot '" + sname_tok.text + "' in component", sname_tok.span, "slot names must be unique per component")
+                    sli = sli + 1
+                seen_slots.append(sname_tok.text)
+                _sl_end: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after slot header")
+                stop_sl: list[str] = ["endslot"]
+                slot_body: list[Stmt] = self.parse_body(stop_sl, "slot", sl_tok.span)
+                _es1: Token = self.expect_kind(TokenKind.TStmtStart, "expected '{% endslot %}'")
+                _esl: Token = self.expect_ident_word("endslot", "expected 'endslot'")
+                _es2: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after endslot")
+                slots.append(ComponentSlot(sname_tok.text, slot_body, sl_tok.span))
+            else:
+                comp_done = True
+
+        _ec1: Token = self.expect_kind(TokenKind.TStmtStart, "expected '{% endcomponent %}'")
+        _ec: Token = self.expect_ident_word("endcomponent", "expected 'endcomponent'")
+        _ec2: Token = self.expect_kind(TokenKind.TStmtEnd, "expected '%}' after endcomponent")
+
+        has_explicit_default: bool = _has_alias(seen_slots, "default")
+        if has_non_ws_default:
+            if has_explicit_default:
+                raise GlyphSyntaxError(GLYPH_SYNTAX_INVALID_NESTING, "cannot combine explicit 'slot \"default\"' with top-level component body content", start_span, "put default content either inside slot 'default' or directly inside component")
+            slots.append(ComponentSlot("default", default_body, start_span))
+        elif len(slots) == 0 and len(default_body) > 0:
+            slots.append(ComponentSlot("default", default_body, start_span))
+
+        return self._make_stmt(StmtKind.SComponent(tpl_expr, props, slots), start_span)
 
 def parse_tokens(tokens: list[Token], logical_name: str, tracker: BudgetTracker) -> TemplateAst:
     p: _Parser = _Parser(tokens, logical_name, tracker)

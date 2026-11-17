@@ -1,0 +1,311 @@
+# Phase 11 (v1.1.0) Advanced Features, Differential Folding, Component/Slot, Loaders, Telemetry, Aura Export & AOT Codegen Tests
+import nox.test
+import nox.strings
+from nox.collections import OrderedDict
+import glyph.api
+from glyph.api import Environment, EnvironmentOptions, RenderOptions, Template, Context, MemoryLoader, Loader
+from glyph.api import PackageLoader, ReadOnlyAdapterLoader, SourceRecord, PrefixLoader
+from glyph.api import OutputMode, TrustTier, UndefinedPolicy, Value
+from glyph.api import GlyphError, GlyphSyntaxError, GlyphSecurityError, GlyphRenderError, GlyphTypeError
+from glyph.api import html_safe_defaults, text_safe_defaults, restricted_defaults, default_render_options
+from glyph.api import environment_with_loader, new_environment, compile_string, get_template, render, render_with_options, empty_context, context_from_map
+from glyph.api import TelemetryHook, TraceEvent, RedactedLogEvent, telemetry_hook, set_telemetry_hook, fold_ast
+from glyph.diagnostics import SourceMapSpan, build_source_map_json
+from glyph.cache import build_compile_cache_key
+from integrations.aura_export.glyph_aura_export import AuraExportDocument, export_html_document, export_plain_text_document, export_restricted_snapshot
+from tools.aot_codegen import compile_template_to_nox
+
+def _mem_env(sources: OrderedDict[str, str], opts: EnvironmentOptions) -> Environment:
+    ml: MemoryLoader = MemoryLoader()
+    keys: list[str] = sources.keys_list()
+    i: int = 0
+    while i < len(keys):
+        k: str = keys[i]
+        ml.put(k, sources.get(k))
+        i = i + 1
+    return new_environment(ml, opts)
+
+class _TraceCollector:
+    phases: list[str]
+    names: list[str]
+    hits: list[bool]
+    errs: list[str]
+    logs: list[str]
+
+    def __init__(self: _TraceCollector) -> None:
+        p: list[str] = []
+        n: list[str] = []
+        h: list[bool] = []
+        e: list[str] = []
+        l: list[str] = []
+        self.phases = p
+        self.names = n
+        self.hits = h
+        self.errs = e
+        self.logs = l
+
+# -----------------------------------------------------------------
+# 1. {% with %} Scoped Bindings & Unwind
+# -----------------------------------------------------------------
+m1: OrderedDict[str, str] = OrderedDict[str, str]()
+m1.set("w.html", "{% set x = 'outer' %}{% with x = 'inner', y = 40 + 2 %}{{ x }}:{{ y }}{% endwith %}|{{ x }}")
+e1: Environment = _mem_env(m1, html_safe_defaults())
+out1: str = render(get_template("w.html", e1), empty_context(), e1)
+nox.test.assert_eq_str(out1, "inner:42|outer", "with shadows without mutating outer scope")
+
+# Duplicate binding inside {% with %} must fail cleanly
+dup_failed: bool = False
+try:
+    _t_dup: Template = compile_string("{% with a = 1, a = 2 %}{{ a }}{% endwith %}", "dup.html", e1)
+except GlyphSyntaxError:
+    dup_failed = True
+nox.test.assert_true(dup_failed, "with rejects duplicate binding name")
+
+# -----------------------------------------------------------------
+# 2. {% filter %} Block Escaping & Security Contract
+# -----------------------------------------------------------------
+m2: OrderedDict[str, str] = OrderedDict[str, str]()
+m2.set("f1.html", "{% filter trim %}{% filter upper %}  hi {{ name }}  {% endfilter %}{% endfilter %}")
+m2.set("f2.html", "{% filter safe %}<em>{{ name }}</em>{% endfilter %}")
+e2: Environment = _mem_env(m2, html_safe_defaults())
+cm2: OrderedDict[str, Value] = OrderedDict[str, Value]()
+cm2.set("name", Value.VStr("<Bob>"))
+out_f1: str = render(get_template("f1.html", e2), context_from_map(cm2), e2)
+nox.test.assert_eq_str(out_f1, "HI &amp;amp;LT;BOB&amp;amp;GT;", "nested filter blocks keep VStr escaped at each fail-closed filter boundary")
+
+# Fail-closed when allow_safe_filter is False
+safe_blocked: bool = False
+try:
+    _sbad: str = render(get_template("f2.html", e2), context_from_map(cm2), e2)
+except GlyphSecurityError:
+    safe_blocked = True
+nox.test.assert_true(safe_blocked, "filter safe blocked when allow_safe_filter is false")
+
+# Allowed in Trusted + allow_safe_filter=True, while user variable inside body stays escaped
+opts_sf: EnvironmentOptions = html_safe_defaults()
+opts_sf.allow_safe_filter = True
+e2_sf: Environment = _mem_env(m2, opts_sf)
+out_f2: str = render(get_template("f2.html", e2_sf), context_from_map(cm2), e2_sf)
+nox.test.assert_eq_str(out_f2, "<em>&lt;Bob&gt;</em>", "filter safe emits trusted body while keeping variable escaped")
+
+# Never allowed in Restricted mode even if allow_safe_filter attempted
+opts_rest: EnvironmentOptions = restricted_defaults()
+opts_rest.allow_safe_filter = True
+e2_r: Environment = _mem_env(m2, opts_rest)
+safe_rest_blocked: bool = False
+try:
+    _srbad: str = render(get_template("f2.html", e2_r), context_from_map(cm2), e2_r)
+except GlyphSecurityError:
+    safe_rest_blocked = True
+nox.test.assert_true(safe_rest_blocked, "filter safe strictly forbidden in restricted tier")
+
+# -----------------------------------------------------------------
+# 3. {% component %} / {% slot %} Isolation & XSS Preservation
+# -----------------------------------------------------------------
+m3: OrderedDict[str, str] = OrderedDict[str, str]()
+m3.set("comp/card.html", "<section><h2>{{ title }}</h2><header>{{ slot('header') }}</header><main>{{ slot() }}</main><footer>{{ slot('footer', 'none') }}</footer>{% if secret is defined %}{{ secret }}{% endif %}</section>")
+m3.set("page.html", "{% component 'comp/card.html' title=heading %}{% slot 'header' %}<b>{{ tag }}</b>{% endslot %}<p>Body: {{ body_text }}</p>{% endcomponent %}")
+m3.set("cycle_a.html", "{% component 'cycle_b.html' %}x{% endcomponent %}")
+m3.set("cycle_b.html", "{% component 'cycle_a.html' %}y{% endcomponent %}")
+m3.set("bad_ctx.html", "<script>var x = {% component 'comp/card.html' title='t' %}a{% endcomponent %};</script>")
+
+e3: Environment = _mem_env(m3, html_safe_defaults())
+cm3: OrderedDict[str, Value] = OrderedDict[str, Value]()
+cm3.set("heading", Value.VStr("<Title>"))
+cm3.set("tag", Value.VStr("<Badge>"))
+cm3.set("body_text", Value.VStr("<Payload>"))
+cm3.set("secret", Value.VStr("TOP_SECRET"))
+out_comp: str = render(get_template("page.html", e3), context_from_map(cm3), e3)
+nox.test.assert_eq_str(
+    out_comp,
+    "<section><h2>&lt;Title&gt;</h2><header><b>&lt;Badge&gt;</b></header><main><p>Body: &lt;Payload&gt;</p></main><footer>none</footer></section>",
+    "component renders isolated props, named/default slots, optional fallback, and hides parent scope"
+)
+
+# Cycle detection in component
+cycle_err: bool = False
+try:
+    _c_out: str = render(get_template("cycle_a.html", e3), empty_context(), e3)
+except GlyphRenderError as gre:
+    cycle_err = gre.code == "GLYPH_RENDER_CYCLE"
+nox.test.assert_true(cycle_err, "recursive component triggers GLYPH_RENDER_CYCLE")
+
+# Script context forbids component
+ctx_err: bool = False
+try:
+    _b_out: str = render(get_template("bad_ctx.html", e3), empty_context(), e3)
+except GlyphSecurityError as gse:
+    ctx_err = gse.code == "GLYPH_SECURITY_CONTEXT"
+nox.test.assert_true(ctx_err, "component rejected inside script tag")
+
+# Restricted caller slot cannot produce unescaped markup inside component
+e3_r: Environment = _mem_env(m3, restricted_defaults())
+out_comp_r: str = render(get_template("page.html", e3_r), context_from_map(cm3), e3_r)
+nox.test.assert_true(nox.strings.contains(out_comp_r, "&lt;b&gt;&amp;lt;Badge&amp;gt;&lt;/b&gt;"), "restricted slot html is escaped by fail-closed policy")
+
+# -----------------------------------------------------------------
+# 4. namespace() Scoped Accumulator & Map Immutability
+# -----------------------------------------------------------------
+m4: OrderedDict[str, str] = OrderedDict[str, str]()
+m4.set("ns.html", "{% set ns = namespace(total=0, label='sum') %}{% for n in nums %}{% set ns.total = ns.total + n %}{% endfor %}{{ ns.label }}={{ ns.total }}")
+m4.set("mut_map.html", "{% set m = {'a': 1} %}{% set m.a = 2 %}{{ m.a }}")
+e4: Environment = _mem_env(m4, html_safe_defaults())
+cm4: OrderedDict[str, Value] = OrderedDict[str, Value]()
+cm4.set("nums", Value.VList([Value.VInt(3), Value.VInt(5), Value.VInt(7)]))
+out_ns: str = render(get_template("ns.html", e4), context_from_map(cm4), e4)
+nox.test.assert_eq_str(out_ns, "sum=15", "namespace accumulator updates across loop")
+
+map_mut_blocked: bool = False
+try:
+    _mbad: str = render(get_template("mut_map.html", e4), empty_context(), e4)
+except GlyphSecurityError:
+    map_mut_blocked = True
+nox.test.assert_true(map_mut_blocked, "plain map cannot be mutated via set attr")
+
+# -----------------------------------------------------------------
+# 5. Differential Constant Folding (fold=True == fold=False)
+# -----------------------------------------------------------------
+diff_cases: list[str] = [
+    "{{ 2 + 3 * 4 }}|{{ 10 // 3 }}|{{ 10 % 3 }}",
+    "{{ 'ab' + 'cd' }}|{{ true and (1 < 2) }}|{{ false and missing_var }}",
+    "{{ 'yes' if (5 >= 3) else 'no' }}|{{ ('alpha' | upper) }}",
+    "{% set total = 10 + 20 %}{{ total + 5 }}"
+]
+opts_fold_on: EnvironmentOptions = html_safe_defaults()
+opts_fold_on.enable_constant_folding = True
+opts_fold_off: EnvironmentOptions = html_safe_defaults()
+opts_fold_off.enable_constant_folding = False
+
+k_on: str = build_compile_cache_key("m:t", "fp1", opts_fold_on, TrustTier.Trusted, 1, 1, 1, 1)
+k_off: str = build_compile_cache_key("m:t", "fp1", opts_fold_off, TrustTier.Trusted, 1, 1, 1, 1)
+nox.test.assert_true(k_on != k_off, "compile cache keys isolate constant folding toggle")
+
+m5: OrderedDict[str, str] = OrderedDict[str, str]()
+di: int = 0
+while di < len(diff_cases):
+    m5.set("d" + str(di) + ".html", diff_cases[di])
+    di = di + 1
+m5.set("divzero.html", "{{ 5 // 0 }}")
+m5.set("overflow.html", "{{ 9223372036854775807 + 1 }}")
+
+e_on: Environment = _mem_env(m5, opts_fold_on)
+e_off: Environment = _mem_env(m5, opts_fold_off)
+dj: int = 0
+while dj < len(diff_cases):
+    nm: str = "d" + str(dj) + ".html"
+    r_on: str = render(get_template(nm, e_on), empty_context(), e_on)
+    r_off: str = render(get_template(nm, e_off), empty_context(), e_off)
+    nox.test.assert_eq_str(r_on, r_off, "constant folding equivalence for " + nm)
+    dj = dj + 1
+
+# Error-preserving contract for constant divzero & overflow
+dz_on: bool = False
+dz_off: bool = False
+try:
+    _r1: str = render(get_template("divzero.html", e_on), empty_context(), e_on)
+except GlyphTypeError as ge1:
+    dz_on = ge1.code == "GLYPH_EVAL_DIV_ZERO"
+try:
+    _r2: str = render(get_template("divzero.html", e_off), empty_context(), e_off)
+except GlyphTypeError as ge2:
+    dz_off = ge2.code == "GLYPH_EVAL_DIV_ZERO"
+nox.test.assert_true(dz_on and dz_off, "constant folding preserves division-by-zero runtime error")
+
+ov_on: bool = False
+ov_off: bool = False
+try:
+    _r3: str = render(get_template("overflow.html", e_on), empty_context(), e_on)
+except GlyphTypeError as ge3:
+    ov_on = ge3.code == "GLYPH_EVAL_OVERFLOW"
+try:
+    _r4: str = render(get_template("overflow.html", e_off), empty_context(), e_off)
+except GlyphTypeError as ge4:
+    ov_off = ge4.code == "GLYPH_EVAL_OVERFLOW"
+nox.test.assert_true(ov_on and ov_off, "constant folding preserves int64 overflow runtime error")
+
+# -----------------------------------------------------------------
+# 6. PackageLoader & ReadOnlyAdapterLoader
+# -----------------------------------------------------------------
+pkg_mem: MemoryLoader = MemoryLoader()
+pkg_mem.put("banner.html", "<div class='b'>{{ text }}</div>")
+pkg_loader: PackageLoader = PackageLoader("uikit", pkg_mem.as_loader(), TrustTier.Restricted)
+
+def _host_fetch(name: str) -> SourceRecord:
+    if name == "db_tpl.html":
+        return SourceRecord(name, "Hello {{ who }}", "pg:1", "v1", TrustTier.Restricted)
+    return SourceRecord(name, "", "pg:0", "", TrustTier.Untrusted)
+
+adapter_loader: ReadOnlyAdapterLoader = ReadOnlyAdapterLoader("pg", _host_fetch, TrustTier.Trusted)
+pfx_loader: PrefixLoader = PrefixLoader(["@uikit/", "db/"], [pkg_loader.as_loader(), adapter_loader.as_loader()])
+e_ldr: Environment = environment_with_loader(pfx_loader.as_loader(), html_safe_defaults())
+cm6: OrderedDict[str, Value] = OrderedDict[str, Value]()
+cm6.set("text", Value.VStr("<Banner>"))
+cm6.set("who", Value.VStr("<World>"))
+nox.test.assert_eq_str(render(get_template("@uikit/banner.html", e_ldr), context_from_map(cm6), e_ldr), "<div class='b'>&lt;Banner&gt;</div>", "PackageLoader renders mounted package template")
+nox.test.assert_eq_str(render(get_template("db/db_tpl.html", e_ldr), context_from_map(cm6), e_ldr), "Hello &lt;World&gt;", "ReadOnlyAdapterLoader renders host callback source")
+
+trav_blocked: bool = False
+try:
+    _bad_p: Template = get_template("@uikit/../secret.html", e_ldr)
+except GlyphError:
+    trav_blocked = True
+nox.test.assert_true(trav_blocked, "PackageLoader rejects path traversal")
+
+# -----------------------------------------------------------------
+# 7. TelemetryHook & Redaction Guarantee
+# -----------------------------------------------------------------
+tc: _TraceCollector = _TraceCollector()
+def _on_t(ev: TraceEvent) -> None:
+    tc.phases.append(ev.phase)
+    tc.names.append(ev.template_name)
+    tc.hits.append(ev.cache_hit)
+    tc.errs.append(ev.error_code)
+
+def _on_l(ev: RedactedLogEvent) -> None:
+    tc.logs.append(ev.message + "|" + ev.error_code)
+
+m7: OrderedDict[str, str] = OrderedDict[str, str]()
+m7.set("ok.html", "Hi {{ secret_token }}")
+m7.set("boom.html", "Hi {{ missing_key }}")
+e7: Environment = _mem_env(m7, html_safe_defaults())
+set_telemetry_hook(e7, telemetry_hook(_on_t, _on_l))
+
+cm7: OrderedDict[str, Value] = OrderedDict[str, Value]()
+cm7.set("secret_token", Value.VStr("SUPER_SECRET_KEY_999"))
+_t_ok1: Template = get_template("ok.html", e7)
+_t_ok2: Template = get_template("ok.html", e7)
+_out7: str = render(_t_ok2, context_from_map(cm7), e7)
+nox.test.assert_eq_str(_out7, "Hi SUPER_SECRET_KEY_999", "telemetry render succeeds")
+nox.test.assert_true(len(tc.phases) >= 3, "telemetry captured compile, load hit, and render")
+nox.test.assert_true(tc.hits[1], "second get_template emitted cache_hit=true")
+
+log_leak_free: bool = True
+err_logged: bool = False
+try:
+    _t_boom: Template = get_template("boom.html", e7)
+    _boom_out: str = render(_t_boom, context_from_map(cm7), e7)
+except GlyphError:
+    err_logged = len(tc.logs) > 0
+li: int = 0
+while li < len(tc.logs):
+    if nox.strings.contains(tc.logs[li], "SUPER_SECRET_KEY_999"):
+        log_leak_free = False
+    li = li + 1
+nox.test.assert_true(err_logged and log_leak_free, "telemetry logs redacted error without leaking context secrets")
+
+# -----------------------------------------------------------------
+# 8. Aura Export Adapter, SourceMap JSON & AOT Codegen PoC
+# -----------------------------------------------------------------
+doc_html: AuraExportDocument = export_html_document(_t_ok2, "Export Report", context_from_map(cm7), e7)
+nox.test.assert_eq_str(doc_html.mime_type, "text/html; charset=utf-8", "aura html export mime type")
+doc_txt: AuraExportDocument = export_plain_text_document(_t_ok2, "Export Text", context_from_map(cm7), e7)
+nox.test.assert_eq_str(doc_txt.mime_type, "text/plain; charset=utf-8", "aura text export mime type")
+doc_r: AuraExportDocument = export_restricted_snapshot(_t_ok2, "Safe Export", context_from_map(cm7), e7)
+nox.test.assert_eq_str(doc_r.content, "Hi SUPER_SECRET_KEY_999", "aura restricted snapshot export works")
+
+smap_json: str = build_source_map_json("page.html", [SourceMapSpan("page.html", 1, 1, 0, 12, "SOutput")])
+nox.test.assert_true(nox.strings.contains(smap_json, '"kind":"SOutput"'), "source map json serializes spans")
+
+aot_src: str = compile_template_to_nox("<ul>{% for u in users %}<li>{{ u }}</li>{% endfor %}</ul>", "users.html", "render_users")
+nox.test.assert_true(nox.strings.contains(aot_src, "def render_users("), "AOT codegen emits typed NOX function")
+nox.test.assert_true(nox.strings.contains(aot_src, "_aot_render_html"), "AOT codegen emits HTML escaping helper")

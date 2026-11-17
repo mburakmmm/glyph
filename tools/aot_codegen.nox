@@ -1,0 +1,311 @@
+# ADR-0011 Proof-of-Concept: Ahead-of-Time `TemplateAst` -> Typed NOX Source Codegen.
+# Generates standalone NOX 2.x source from a validated TemplateAst subset (zero compiler patches).
+# Supported statements: SText, SOutput, SIf, SFor, SSet.
+import nox.json
+import nox.strings
+from glyph.errors import SourceSpan, GlyphTypeError, GLYPH_EVAL_TYPE, empty_span
+from glyph.limits import BudgetTracker, default_budget
+from glyph.expressions import Expr, ExprKind, UnaryOp, BinaryOp
+from glyph.ast import Stmt, StmtKind, IfBranch, TemplateAst
+from glyph.parser import parse_string
+
+def _indent(level: int) -> str:
+    out: str = ""
+    i: int = 0
+    while i < level:
+        out = out + "    "
+        i = i + 1
+    return out
+
+def _emit_expr(expr: Expr) -> str:
+    match expr.kind:
+        case ExprKind.ENull:
+            return "Value.VNull"
+        case ExprKind.EBool(b):
+            if b:
+                return "Value.VBool(True)"
+            return "Value.VBool(False)"
+        case ExprKind.EInt(iv):
+            return "Value.VInt(" + str(iv) + ")"
+        case ExprKind.EFloat(fv):
+            return "Value.VFloat(" + str(fv) + ")"
+        case ExprKind.EStr(sv):
+            return "Value.VStr(" + nox.json.dump_string(sv) + ")"
+        case ExprKind.EIdent(name):
+            return "_aot_get(frames, " + nox.json.dump_string(name) + ", sp)"
+        case ExprKind.EMember(target, field):
+            return "_aot_member(" + _emit_expr(target) + ", " + nox.json.dump_string(field) + ", sp)"
+        case ExprKind.EIndex(target, index):
+            return "_aot_index(" + _emit_expr(target) + ", " + _emit_expr(index) + ", sp)"
+        case ExprKind.EUnary(op, sub):
+            se: str = _emit_expr(sub)
+            match op:
+                case UnaryOp.UNot:
+                    return "Value.VBool(not is_truthy(" + se + ", pol, sp))"
+                case UnaryOp.UNeg:
+                    return "_aot_neg(" + se + ", sp)"
+                case UnaryOp.UPos:
+                    return se
+        case ExprKind.EBinary(op, l, r):
+            le: str = _emit_expr(l)
+            re: str = _emit_expr(r)
+            match op:
+                case BinaryOp.BAnd:
+                    return "_aot_and(" + le + ", " + re + ", pol, sp)"
+                case BinaryOp.BOr:
+                    return "_aot_or(" + le + ", " + re + ", pol, sp)"
+                case BinaryOp.BEq:
+                    return "Value.VBool(values_equal(" + le + ", " + re + ", pol, sp))"
+                case BinaryOp.BNotEq:
+                    return "Value.VBool(not values_equal(" + le + ", " + re + ", pol, sp))"
+                case BinaryOp.BLt:
+                    return "Value.VBool(values_compare(" + le + ", " + re + ", pol, sp) < 0)"
+                case BinaryOp.BLtEq:
+                    return "Value.VBool(values_compare(" + le + ", " + re + ", pol, sp) <= 0)"
+                case BinaryOp.BGt:
+                    return "Value.VBool(values_compare(" + le + ", " + re + ", pol, sp) > 0)"
+                case BinaryOp.BGtEq:
+                    return "Value.VBool(values_compare(" + le + ", " + re + ", pol, sp) >= 0)"
+                case BinaryOp.BAdd:
+                    return "_aot_add(" + le + ", " + re + ", pol, sp)"
+                case BinaryOp.BSub:
+                    return "_aot_sub(" + le + ", " + re + ", pol, sp)"
+                case BinaryOp.BMul:
+                    return "_aot_mul(" + le + ", " + re + ", pol, sp)"
+                case _:
+                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "AOT PoC does not support this binary operator yet", expr.span, "use interpreter for full operator set")
+        case ExprKind.EConditional(c, t, e):
+            return "(" + _emit_expr(t) + " if is_truthy(" + _emit_expr(c) + ", pol, sp) else " + _emit_expr(e) + ")"
+        case ExprKind.EFilter(target, fname, args):
+            if len(args) == 0 and (fname == "escape" or fname == "e"):
+                return "Value.VStr(escape_html(stringify(" + _emit_expr(target) + ", pol, sp)))"
+            if len(args) == 0 and fname == "upper":
+                return "Value.VStr(nox.strings.upper(stringify(" + _emit_expr(target) + ", pol, sp)))"
+            if len(args) == 0 and fname == "lower":
+                return "Value.VStr(nox.strings.lower(stringify(" + _emit_expr(target) + ", pol, sp)))"
+            if len(args) == 0 and fname == "length":
+                return "_aot_length(" + _emit_expr(target) + ", sp)"
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "AOT PoC does not support filter '" + fname + "' with arguments", expr.span, "use simple zero-arg filters or runtime interpreter")
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "AOT PoC does not support this expression node yet", expr.span, "compile with glyph.environment interpreter")
+
+def _emit_stmts(stmts: list[Stmt], indent_lvl: int, seq_id: int) -> list[str]:
+    lines: list[str] = []
+    ind: str = _indent(indent_lvl)
+    i: int = 0
+    while i < len(stmts):
+        st: Stmt = stmts[i]
+        cur_id: int = seq_id * 100 + i
+        match st.kind:
+            case StmtKind.SText(txt):
+                lines.append(ind + "tracker.consume_output(" + str(nox.strings.byte_len(txt)) + ", sp)")
+                lines.append(ind + "out_parts.append(" + nox.json.dump_string(txt) + ")")
+            case StmtKind.SOutput(expr):
+                vn: str = "_v" + str(cur_id)
+                lines.append(ind + "tracker.consume_op(sp)")
+                lines.append(ind + vn + ": str = _aot_render_html(" + _emit_expr(expr) + ", pol, sp)")
+                lines.append(ind + "tracker.consume_output(nox.strings.byte_len(" + vn + "), sp)")
+                lines.append(ind + "out_parts.append(" + vn + ")")
+            case StmtKind.SSet(target, val):
+                lines.append(ind + "tracker.consume_op(sp)")
+                lines.append(ind + "frames[len(frames) - 1].set(" + nox.json.dump_string(target) + ", " + _emit_expr(val) + ")")
+            case StmtKind.SIf(branches, else_body):
+                bi: int = 0
+                while bi < len(branches):
+                    br: IfBranch = branches[bi]
+                    kw: str = "if" if bi == 0 else "elif"
+                    lines.append(ind + kw + " is_truthy(" + _emit_expr(br.cond) + ", pol, sp):")
+                    lines.append(ind + "    frames.append(OrderedDict[str, Value]())")
+                    sub: list[str] = _emit_stmts(br.body, indent_lvl + 1, cur_id * 10 + bi)
+                    si: int = 0
+                    while si < len(sub):
+                        lines.append(sub[si])
+                        si = si + 1
+                    lines.append(ind + "    _p" + str(cur_id) + "_" + str(bi) + ": OrderedDict[str, Value] = frames.pop()")
+                    bi = bi + 1
+                if len(else_body) > 0:
+                    lines.append(ind + "else:")
+                    lines.append(ind + "    frames.append(OrderedDict[str, Value]())")
+                    esub: list[str] = _emit_stmts(else_body, indent_lvl + 1, cur_id * 10 + 9)
+                    esi: int = 0
+                    while esi < len(esub):
+                        lines.append(esub[esi])
+                        esi = esi + 1
+                    lines.append(ind + "    _pe" + str(cur_id) + ": OrderedDict[str, Value] = frames.pop()")
+            case StmtKind.SFor(targets, iterable, body, else_body):
+                if len(targets) != 1:
+                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "AOT PoC supports single-target loops", st.span, "use 1 loop variable")
+                ln: str = "_list" + str(cur_id)
+                idxn: str = "_i" + str(cur_id)
+                lines.append(ind + ln + ": list[Value] = _aot_as_list(" + _emit_expr(iterable) + ", sp)")
+                lines.append(ind + "if len(" + ln + ") > 0:")
+                lines.append(ind + "    " + idxn + ": int = 0")
+                lines.append(ind + "    while " + idxn + " < len(" + ln + "):")
+                lines.append(ind + "        tracker.consume_loop_step(sp)")
+                lines.append(ind + "        frames.append(OrderedDict[str, Value]())")
+                lines.append(ind + "        frames[len(frames) - 1].set(" + nox.json.dump_string(targets[0]) + ", " + ln + "[" + idxn + "])")
+                fsub: list[str] = _emit_stmts(body, indent_lvl + 2, cur_id * 10 + 1)
+                fsi: int = 0
+                while fsi < len(fsub):
+                    lines.append(fsub[fsi])
+                    fsi = fsi + 1
+                lines.append(ind + "        _pf" + str(cur_id) + ": OrderedDict[str, Value] = frames.pop()")
+                lines.append(ind + "        " + idxn + " = " + idxn + " + 1")
+                if len(else_body) > 0:
+                    lines.append(ind + "else:")
+                    esub2: list[str] = _emit_stmts(else_body, indent_lvl + 1, cur_id * 10 + 2)
+                    esi2: int = 0
+                    while esi2 < len(esub2):
+                        lines.append(esub2[esi2])
+                        esi2 = esi2 + 1
+            case _:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "AOT PoC only lowers SText/SOutput/SIf/SFor/SSet", st.span, "compile template with Environment interpreter")
+        i = i + 1
+    return lines
+
+def compile_ast_to_nox(ast: TemplateAst, fn_name: str) -> str:
+    header: list[str] = [
+        "# Generated by glyph/tools/aot_codegen.nox (ADR-0011 PoC)",
+        "import nox.strings",
+        "from nox.collections import OrderedDict",
+        "from glyph.errors import SourceSpan, GlyphTypeError, GlyphUndefinedError, GLYPH_EVAL_TYPE, GLYPH_EVAL_UNDEFINED, empty_span",
+        "from glyph.limits import BudgetTracker",
+        "from glyph.safety import escape_html",
+        "from glyph.value import Value, MarkupContext, UndefinedPolicy, check_not_undef, is_truthy, stringify, values_equal, values_compare, checked_add, checked_sub, checked_mul, is_forbidden_key",
+        "",
+        "def _aot_get(frames: list[OrderedDict[str, Value]], name: str, span: SourceSpan) -> Value:",
+        "    i: int = len(frames) - 1",
+        "    while i >= 0:",
+        "        if frames[i].contains(name):",
+        "            return frames[i].get(name)",
+        "        i = i - 1",
+        "    return Value.VUndefined(name)",
+        "",
+        "def _aot_member(target: Value, field: str, span: SourceSpan) -> Value:",
+        "    if is_forbidden_key(field):",
+        "        raise GlyphTypeError(GLYPH_EVAL_TYPE, 'forbidden key', span, 'avoid private fields')",
+        "    match target:",
+        "        case Value.VMap(m):",
+        "            if m.contains(field):",
+        "                return m.get(field)",
+        "            return Value.VUndefined(field)",
+        "        case _:",
+        "            raise GlyphTypeError(GLYPH_EVAL_TYPE, 'expected map for field lookup', span, 'use map target')",
+        "",
+        "def _aot_index(target: Value, idx: Value, span: SourceSpan) -> Value:",
+        "    match target:",
+        "        case Value.VList(items):",
+        "            match idx:",
+        "                case Value.VInt(i):",
+        "                    return items[i]",
+        "                case _:",
+        "                    raise GlyphTypeError(GLYPH_EVAL_TYPE, 'expected integer list index', span, 'pass int')",
+        "        case _:",
+        "            raise GlyphTypeError(GLYPH_EVAL_TYPE, 'index unsupported', span, 'pass list')",
+        "",
+        "def _aot_neg(v: Value, span: SourceSpan) -> Value:",
+        "    match v:",
+        "        case Value.VInt(i):",
+        "            return Value.VInt(0 - i)",
+        "        case _:",
+        "            raise GlyphTypeError(GLYPH_EVAL_TYPE, 'negation requires int', span, 'pass int')",
+        "",
+        "def _aot_and(l: Value, r: Value, pol: UndefinedPolicy, span: SourceSpan) -> Value:",
+        "    if not is_truthy(l, pol, span):",
+        "        return l",
+        "    return r",
+        "",
+        "def _aot_or(l: Value, r: Value, pol: UndefinedPolicy, span: SourceSpan) -> Value:",
+        "    if is_truthy(l, pol, span):",
+        "        return l",
+        "    return r",
+        "",
+        "def _aot_add(l: Value, r: Value, pol: UndefinedPolicy, span: SourceSpan) -> Value:",
+        "    vl: Value = check_not_undef(l, pol, span)",
+        "    vr: Value = check_not_undef(r, pol, span)",
+        "    match vl:",
+        "        case Value.VInt(a):",
+        "            match vr:",
+        "                case Value.VInt(b):",
+        "                    return Value.VInt(checked_add(a, b, span))",
+        "                case _:",
+        "                    raise GlyphTypeError(GLYPH_EVAL_TYPE, 'expected int', span, 'add ints')",
+        "        case Value.VStr(sa):",
+        "            match vr:",
+        "                case Value.VStr(sb):",
+        "                    return Value.VStr(sa + sb)",
+        "                case _:",
+        "                    raise GlyphTypeError(GLYPH_EVAL_TYPE, 'expected str', span, 'add strings')",
+        "        case _:",
+        "            raise GlyphTypeError(GLYPH_EVAL_TYPE, 'unsupported add', span, 'add matching types')",
+        "",
+        "def _aot_sub(l: Value, r: Value, pol: UndefinedPolicy, span: SourceSpan) -> Value:",
+        "    match check_not_undef(l, pol, span):",
+        "        case Value.VInt(a):",
+        "            match check_not_undef(r, pol, span):",
+        "                case Value.VInt(b):",
+        "                    return Value.VInt(checked_sub(a, b, span))",
+        "                case _:",
+        "                    raise GlyphTypeError(GLYPH_EVAL_TYPE, 'expected int', span, 'sub ints')",
+        "        case _:",
+        "            raise GlyphTypeError(GLYPH_EVAL_TYPE, 'expected int', span, 'sub ints')",
+        "",
+        "def _aot_mul(l: Value, r: Value, pol: UndefinedPolicy, span: SourceSpan) -> Value:",
+        "    match check_not_undef(l, pol, span):",
+        "        case Value.VInt(a):",
+        "            match check_not_undef(r, pol, span):",
+        "                case Value.VInt(b):",
+        "                    return Value.VInt(checked_mul(a, b, span))",
+        "                case _:",
+        "                    raise GlyphTypeError(GLYPH_EVAL_TYPE, 'expected int', span, 'mul ints')",
+        "        case _:",
+        "            raise GlyphTypeError(GLYPH_EVAL_TYPE, 'expected int', span, 'mul ints')",
+        "",
+        "def _aot_length(v: Value, span: SourceSpan) -> Value:",
+        "    match v:",
+        "        case Value.VStr(s):",
+        "            return Value.VInt(len(s))",
+        "        case Value.VList(items):",
+        "            return Value.VInt(len(items))",
+        "        case Value.VMap(m):",
+        "            return Value.VInt(len(m.keys_list()))",
+        "        case _:",
+        "            raise GlyphTypeError(GLYPH_EVAL_TYPE, 'length unsupported', span, 'pass string/list/map')",
+        "",
+        "def _aot_as_list(v: Value, span: SourceSpan) -> list[Value]:",
+        "    match v:",
+        "        case Value.VList(items):",
+        "            return items",
+        "        case _:",
+        "            raise GlyphTypeError(GLYPH_EVAL_TYPE, 'expected list for loop', span, 'pass list')",
+        "",
+        "def _aot_render_html(v: Value, pol: UndefinedPolicy, span: SourceSpan) -> str:",
+        "    match v:",
+        "        case Value.VTrustedMarkup(s, _):",
+        "            return s",
+        "        case _:",
+        "            return escape_html(stringify(v, pol, span))",
+        "",
+        "def " + fn_name + "(ctx: OrderedDict[str, Value], tracker: BudgetTracker) -> str:",
+        "    sp: SourceSpan = empty_span(" + nox.json.dump_string(ast.logical_name) + ")",
+        "    pol: UndefinedPolicy = UndefinedPolicy.StrictUndefined",
+        "    frames: list[OrderedDict[str, Value]] = [ctx]",
+        "    out_parts: list[str] = []"
+    ]
+    body_lines: list[str] = _emit_stmts(ast.body, 1, 1)
+    all_lines: list[str] = []
+    hi: int = 0
+    while hi < len(header):
+        all_lines.append(header[hi])
+        hi = hi + 1
+    bi: int = 0
+    while bi < len(body_lines):
+        all_lines.append(body_lines[bi])
+        bi = bi + 1
+    all_lines.append('    return nox.strings.join(out_parts, "")')
+    return nox.strings.join(all_lines, "\n")
+
+def compile_template_to_nox(source: str, logical_name: str, fn_name: str) -> str:
+    tr: BudgetTracker = BudgetTracker(default_budget())
+    ast: TemplateAst = parse_string(source, logical_name, tr)
+    return compile_ast_to_nox(ast, fn_name)

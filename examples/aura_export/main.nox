@@ -1,0 +1,30 @@
+# Example: Aura HTML/Text Document Export & Telemetry Integration (Phase 11).
+from nox.collections import OrderedDict
+import glyph.api
+from glyph.api import Context, Environment, MemoryLoader, TelemetryHook, TraceEvent, RedactedLogEvent, Template
+from glyph.api import Value, html_safe_defaults, new_environment, get_template, context_from_map, telemetry_hook, set_telemetry_hook
+from integrations.aura_export.glyph_aura_export import AuraExportDocument, export_html_document
+
+def _on_trace(ev: TraceEvent) -> None:
+    print("[trace] phase=" + ev.phase + " tpl=" + ev.template_name + " hit=" + str(ev.cache_hit))
+
+def _on_log(ev: RedactedLogEvent) -> None:
+    print("[log] level=" + ev.level + " code=" + ev.error_code)
+
+ml: MemoryLoader = MemoryLoader()
+ml.put("card.html", "<article><h1>{{ title }}</h1><div>{{ slot() }}</div></article>")
+ml.put(
+    "report.html",
+    "{% with period = 'Q4' %}{% component 'card.html' title=heading %}<p>{{ period }}: {{ summary }}</p>{% endcomponent %}{% endwith %}"
+)
+env: Environment = new_environment(ml, html_safe_defaults())
+set_telemetry_hook(env, telemetry_hook(_on_trace, _on_log))
+
+data: OrderedDict[str, Value] = OrderedDict[str, Value]()
+data.set("heading", Value.VStr("Aura Snapshot <2026>"))
+data.set("summary", Value.VStr("All checks passed."))
+ctx: Context = context_from_map(data)
+
+tpl: Template = get_template("report.html", env)
+doc: AuraExportDocument = export_html_document(tpl, "Snapshot", ctx, env)
+print(doc.content)

@@ -12,7 +12,7 @@ from glyph.value import map_get, list_get, is_forbidden_key, checked_add, checke
 from glyph.value import checked_mul, checked_floordiv, checked_mod, INT64_MIN
 from glyph.value import check_not_undef, values_equal, values_compare, values_contains
 from glyph.expressions import Expr, ExprKind, UnaryOp, BinaryOp, CallArg, MapEntry
-from glyph.ast import Stmt, StmtKind, IfBranch, MacroParam, TemplateAst
+from glyph.ast import Stmt, StmtKind, IfBranch, MacroParam, WithBinding, ComponentSlot, TemplateAst
 from glyph.validate import TemplateInfo
 from glyph.options import OutputMode, RenderOptions, TrustTier, min_trust_tier
 from glyph.scope import RenderScope, make_loop_metadata
@@ -170,6 +170,7 @@ class _Evaluator:
     active_caller: CallerClosure
     html_ctx: HtmlContextTracker
     catalog: TranslationCatalog
+    active_slots: OrderedDict[str, Value]
 
     def __init__(
         self: _Evaluator,
@@ -214,6 +215,8 @@ class _Evaluator:
         self.active_caller = active_caller
         self.html_ctx = html_ctx
         self.catalog = catalog
+        empty_sl: OrderedDict[str, Value] = OrderedDict[str, Value]()
+        self.active_slots = empty_sl
 
     def _helper_ctx(self: _Evaluator) -> HelperContext:
         return HelperContext(
@@ -440,6 +443,10 @@ class _Evaluator:
             return self._eval_i18n_call(False, args, span)
         if fn_name == "plural":
             return self._eval_i18n_call(True, args, span)
+        if fn_name == "namespace":
+            return self._eval_namespace(args, span)
+        if fn_name == "slot":
+            return self._eval_slot_call(args, span)
         if self._has_macro_target(fn_name):
             mdef: MacroDef = self._resolve_macro_target(fn_name, span)
             m_args: list[MacroCallArg] = []
@@ -538,6 +545,7 @@ class _Evaluator:
                 mac_scope.set_local(mp.name, def_ev.eval_expr(mp.default_expr), mp.span)
             pi = pi + 1
 
+        def_ev.active_slots = self.active_slots
         def_ev.exec_stmts(mdef.body)
         mac_writer.flush()
         out_str: str = mac_writer.to_string()
@@ -667,6 +675,7 @@ class _Evaluator:
             self.catalog
         )
         self.scope.push_frame()
+        sup_ev.active_slots = self.active_slots
         sup_ev.exec_stmts(parent_ver.body)
         self.scope.pop_frame()
         sup_writer.flush()
@@ -907,6 +916,8 @@ class _Evaluator:
                 case StmtKind.SSet(target, val_expr):
                     sval: Value = self.eval_expr(val_expr)
                     self.scope.set_local(target, sval, st.span)
+                case StmtKind.SSetAttr(target, field, val_expr):
+                    self._exec_set_attr(target, field, val_expr, st.span)
                 case StmtKind.SInclude(tpl_expr, with_context, ignore_missing):
                     self._exec_include(tpl_expr, with_context, ignore_missing, st.span)
                 case StmtKind.SExtends(_):
@@ -921,6 +932,12 @@ class _Evaluator:
                     self._exec_from_import(tpl_name, names, st.span)
                 case StmtKind.SCallBlock(mac_target, args, caller_params, body):
                     self._exec_call_block(mac_target, args, caller_params, body, st.span)
+                case StmtKind.SWith(bindings, body):
+                    self._exec_with(bindings, body, st.span)
+                case StmtKind.SFilterBlock(filter_name, args, body):
+                    self._exec_filter_block(filter_name, args, body, st.span)
+                case StmtKind.SComponent(tpl_expr, props, slots):
+                    self._exec_component(tpl_expr, props, slots, st.span)
             i = i + 1
 
     def _exec_block(self: _Evaluator, bname: str, default_body: list[Stmt], span: SourceSpan) -> None:
@@ -953,6 +970,7 @@ class _Evaluator:
                 self.catalog
             )
             self.scope.push_frame()
+            blk_ev.active_slots = self.active_slots
             blk_ev.exec_stmts(ver.body)
             self.scope.pop_frame()
         else:
@@ -1267,6 +1285,338 @@ class _Evaluator:
         if _tracks_markup_context(self.options.output_mode, self.options.autoescape):
             if not child_ev.html_ctx.same_state(child_inc_base):
                 self.html_ctx.mark_unknown()
+        self.tracker.exit_include()
+
+    def _eval_namespace(self: _Evaluator, args: list[CallArg], span: SourceSpan) -> Value:
+        if len(args) > 64:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "namespace() accepts at most 64 arguments", span, "pass fewer initial namespace fields")
+        ns_m: OrderedDict[str, Value] = OrderedDict[str, Value]()
+        ns_m.set("__glyph_ns__", Value.VBool(True))
+        ai: int = 0
+        while ai < len(args):
+            ca: CallArg = args[ai]
+            if len(ca.name) > 0:
+                if is_forbidden_key(ca.name):
+                    raise GlyphSecurityError(GLYPH_SECURITY_POLICY, "forbidden key name in namespace()", ca.span, "choose a plain field name")
+                ns_m.set(ca.name, self.eval_expr(ca.value))
+            else:
+                mv: Value = check_not_undef(self.eval_expr(ca.value), self.options.undefined_policy, ca.span)
+                match mv:
+                    case Value.VMap(src):
+                        skeys: list[str] = src.keys_list()
+                        si: int = 0
+                        while si < len(skeys):
+                            sk: str = skeys[si]
+                            if not is_forbidden_key(sk):
+                                ns_m.set(sk, src.get(sk))
+                            si = si + 1
+                    case _:
+                        raise GlyphTypeError(GLYPH_EVAL_TYPE, "namespace() positional arguments must be maps", ca.span, "pass keyword arguments like namespace(total=0)")
+            ai = ai + 1
+        return Value.VMap(ns_m)
+
+    def _eval_slot_call(self: _Evaluator, args: list[CallArg], span: SourceSpan) -> Value:
+        if len(args) > 2:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "slot() accepts at most 2 arguments", span, "use slot('name', fallback)")
+        slot_name: str = "default"
+        if len(args) >= 1:
+            if len(args[0].name) > 0:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "slot() takes positional arguments", args[0].span, "use slot('name')")
+            nv: Value = check_not_undef(self.eval_expr(args[0].value), self.options.undefined_policy, args[0].span)
+            match nv:
+                case Value.VStr(s):
+                    slot_name = s
+                case _:
+                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "slot name must be a string", args[0].span, "pass a slot name string")
+        if is_forbidden_key(slot_name) or len(slot_name) == 0:
+            raise GlyphSecurityError(GLYPH_SECURITY_POLICY, "invalid slot name", span, "pass a non-empty slot name")
+        if self.active_slots.contains(slot_name):
+            return self.active_slots.get(slot_name)
+        if len(args) >= 2:
+            return self.eval_expr(args[1].value)
+        return Value.VStr("")
+
+    def _exec_set_attr(self: _Evaluator, target: str, field: str, val_expr: Expr, span: SourceSpan) -> None:
+        if is_forbidden_key(target) or is_forbidden_key(field):
+            raise GlyphSecurityError(GLYPH_SECURITY_POLICY, "cannot mutate restricted identifier or attribute", span, "use plain names on namespace()")
+        cur: Value = check_not_undef(self.scope.get(target, span), self.options.undefined_policy, span)
+        match cur:
+            case Value.VMap(m):
+                if not m.contains("__glyph_ns__"):
+                    raise GlyphSecurityError(GLYPH_SECURITY_POLICY, "attribute mutation via set is only permitted on namespace() objects", span, "create a mutable accumulator with namespace()")
+                if not m.contains(field) and len(m.keys_list()) >= 1024:
+                    raise GlyphTypeError(GLYPH_EVAL_TYPE, "namespace() exceeded maximum field count (1024)", span, "reduce distinct fields stored in namespace()")
+                new_val: Value = self.eval_expr(val_expr)
+                m.set(field, new_val)
+            case _:
+                raise GlyphSecurityError(GLYPH_SECURITY_POLICY, "attribute mutation via set is only permitted on namespace() objects", span, "create a mutable accumulator with namespace()")
+
+    def _exec_with(self: _Evaluator, bindings: list[WithBinding], body: list[Stmt], span: SourceSpan) -> None:
+        bvals: list[Value] = []
+        bi: int = 0
+        while bi < len(bindings):
+            bvals.append(self.eval_expr(bindings[bi].value))
+            bi = bi + 1
+        self.scope.push_frame()
+        try:
+            si: int = 0
+            while si < len(bindings):
+                self.scope.set_local(bindings[si].name, bvals[si], bindings[si].span)
+                si = si + 1
+            self.exec_stmts(body)
+        except Exception as err:
+            self.scope.pop_frame()
+            raise err
+        self.scope.pop_frame()
+
+    def _exec_filter_block(
+        self: _Evaluator,
+        filter_name: str,
+        args: list[CallArg],
+        body: list[Stmt],
+        span: SourceSpan
+    ) -> None:
+        sub_writer: GlyphWriter = GlyphWriter(self.tracker)
+        sub_ev: _Evaluator = _Evaluator(
+            self.scope,
+            self.tracker,
+            sub_writer,
+            self.filters,
+            self.tests,
+            self.functions,
+            self.options,
+            self.active_templates,
+            self.allow_dynamic_include,
+            self.has_resolver,
+            self.resolve_fn,
+            self.macros,
+            self.has_chain,
+            self.chain,
+            self.cur_block_name,
+            self.cur_block_idx,
+            self.has_caller,
+            self.active_caller,
+            HtmlContextTracker(),
+            self.catalog
+        )
+        sub_ev.active_slots = self.active_slots
+        self.scope.push_frame()
+        try:
+            sub_ev.exec_stmts(body)
+        except Exception as err:
+            self.scope.pop_frame()
+            raise err
+        self.scope.pop_frame()
+        sub_writer.flush()
+        body_str: str = sub_writer.to_string()
+
+        fargs: list[FilterArgValue] = []
+        ai: int = 0
+        while ai < len(args):
+            ca: CallArg = args[ai]
+            fargs.append(FilterArgValue(ca.name, self.eval_expr(ca.value)))
+            ai = ai + 1
+
+        filtered: Value = apply_filter_with_context(
+            self.filters,
+            filter_name,
+            Value.VStr(body_str),
+            fargs,
+            self._helper_ctx(),
+            span
+        )
+        rendered: str = render_contextual_value(
+            filtered,
+            self.options.autoescape,
+            self.options.output_mode,
+            self.options.undefined_policy,
+            self.options.trust_tier,
+            self.html_ctx,
+            span
+        )
+        self.writer.write(rendered, span)
+
+    def _exec_component(
+        self: _Evaluator,
+        tpl_expr: Expr,
+        props: list[CallArg],
+        slots: list[ComponentSlot],
+        span: SourceSpan
+    ) -> None:
+        if _tracks_markup_context(self.options.output_mode, self.options.autoescape):
+            cur_octx: OutputContext = self.html_ctx.current_output_context()
+            match cur_octx:
+                case OutputContext.HtmlText:
+                    pass
+                case _:
+                    raise GlyphSecurityError(
+                        GLYPH_SECURITY_CONTEXT,
+                        "{% component %} is only allowed in text content context",
+                        span,
+                        "move {% component %} outside tags, attributes, comments, or <script>/<style> blocks"
+                    )
+
+        is_literal: bool = False
+        match tpl_expr.kind:
+            case ExprKind.EStr(_):
+                is_literal = True
+            case _:
+                is_literal = False
+        if not is_literal:
+            if not self.allow_dynamic_include:
+                raise GlyphSecurityError(
+                    GLYPH_SECURITY_POLICY,
+                    "dynamic component path requires allow_dynamic_include policy",
+                    span,
+                    "pass a literal component template path string"
+                )
+            match self.options.trust_tier:
+                case TrustTier.Trusted:
+                    pass
+                case _:
+                    raise GlyphSecurityError(
+                        GLYPH_SECURITY_POLICY,
+                        "dynamic component is forbidden in restricted/untrusted mode",
+                        span,
+                        "pass a literal component template path string"
+                    )
+
+        name_val: Value = check_not_undef(self.eval_expr(tpl_expr), self.options.undefined_policy, span)
+        comp_raw: str = ""
+        match name_val:
+            case Value.VStr(s):
+                comp_raw = s
+            case _:
+                raise GlyphTypeError(GLYPH_EVAL_TYPE, "component target must evaluate to a string", span, "pass a string component template path")
+
+        comp_name: str = validate_logical_template_name(comp_raw)
+        if not self.has_resolver:
+            raise GlyphRenderError(GLYPH_RENDER_ERROR, "component is not available without a template resolver", span, "render via Environment")
+
+        ai: int = 0
+        while ai < len(self.active_templates):
+            if self.active_templates[ai] == comp_name:
+                raise GlyphRenderError(GLYPH_RENDER_CYCLE, "cyclic component detected for '" + comp_name + "'", span, "break circular component invocation")
+            ai = ai + 1
+
+        # Evaluate props and render slots in isolated caller scope BEFORE entering component scope.
+        comp_root: OrderedDict[str, Value] = OrderedDict[str, Value]()
+        has_slots_prop: bool = False
+        pi: int = 0
+        while pi < len(props):
+            pa: CallArg = props[pi]
+            if len(pa.name) == 0 or is_forbidden_key(pa.name):
+                raise GlyphSecurityError(GLYPH_SECURITY_POLICY, "invalid component prop name", pa.span, "pass named keyword props to component")
+            if pa.name == "slots":
+                has_slots_prop = True
+            comp_root.set(pa.name, self.eval_expr(pa.value))
+            pi = pi + 1
+
+        slot_map: OrderedDict[str, Value] = OrderedDict[str, Value]()
+        sli: int = 0
+        while sli < len(slots):
+            sl: ComponentSlot = slots[sli]
+            sl_writer: GlyphWriter = GlyphWriter(self.tracker)
+            sl_base: HtmlContextTracker = HtmlContextTracker()
+            sl_ev: _Evaluator = _Evaluator(
+                self.scope,
+                self.tracker,
+                sl_writer,
+                self.filters,
+                self.tests,
+                self.functions,
+                self.options,
+                self.active_templates,
+                self.allow_dynamic_include,
+                self.has_resolver,
+                self.resolve_fn,
+                self.macros,
+                self.has_chain,
+                self.chain,
+                self.cur_block_name,
+                self.cur_block_idx,
+                self.has_caller,
+                self.active_caller,
+                HtmlContextTracker(),
+                self.catalog
+            )
+            sl_ev.active_slots = self.active_slots
+            self.scope.push_frame()
+            try:
+                sl_ev.exec_stmts(sl.body)
+            except Exception as err:
+                self.scope.pop_frame()
+                raise err
+            self.scope.pop_frame()
+            sl_writer.flush()
+            sl_str: str = sl_writer.to_string()
+
+            slot_val: Value = Value.VStr(sl_str)
+            match self.options.output_mode:
+                case OutputMode.Html:
+                    if self.options.autoescape and sl_ev.html_ctx.same_state(sl_base):
+                        match self.options.trust_tier:
+                            case TrustTier.Trusted:
+                                slot_val = Value.VTrustedMarkup(sl_str, MarkupContext.SafeHtml)
+                            case _:
+                                pass
+                case _:
+                    pass
+            slot_map.set(sl.name, slot_val)
+            sli = sli + 1
+
+        if not has_slots_prop:
+            comp_root.set("slots", Value.VMap(slot_map))
+
+        self.tracker.enter_include(span)
+        comp_tpl: Template = Template("", TemplateAst("", [], False, ""), TemplateInfo("", [], [], [], [], [], False, ""), "", TrustTier.Untrusted)
+        try:
+            resolver: (str, BudgetTracker) -> Template = self.resolve_fn
+            comp_tpl = resolver(comp_name, self.tracker)
+
+            comp_trust: TrustTier = min_trust_tier(self.options.trust_tier, comp_tpl.trust_tier)
+            comp_opts: RenderOptions = _opts_with_trust(self.options, comp_trust)
+            comp_filters: FilterRegistry = _filters_for_trust(self.filters, comp_trust)
+
+            comp_active: list[str] = []
+            bi: int = 0
+            while bi < len(self.active_templates):
+                comp_active.append(self.active_templates[bi])
+                bi = bi + 1
+            comp_active.append(comp_name)
+
+            comp_scope: RenderScope = RenderScope(comp_root)
+            comp_base: HtmlContextTracker = HtmlContextTracker()
+            comp_ev: _Evaluator = _Evaluator(
+                comp_scope,
+                self.tracker,
+                self.writer,
+                comp_filters,
+                self.tests,
+                self.functions,
+                comp_opts,
+                comp_active,
+                self.allow_dynamic_include,
+                self.has_resolver,
+                self.resolve_fn,
+                MacroTable(),
+                False,
+                _empty_chain(),
+                "",
+                -1,
+                False,
+                _empty_caller(),
+                HtmlContextTracker(),
+                self.catalog
+            )
+            comp_ev.active_slots = slot_map
+            comp_ev.exec_stmts(comp_tpl.ast.body)
+            if _tracks_markup_context(self.options.output_mode, self.options.autoescape):
+                if not comp_ev.html_ctx.same_state(comp_base):
+                    self.html_ctx.mark_unknown()
+        except Exception as err:
+            self.tracker.exit_include()
+            raise err
         self.tracker.exit_include()
 
 def _noop_resolve(name: str, _tr: BudgetTracker) -> Template:

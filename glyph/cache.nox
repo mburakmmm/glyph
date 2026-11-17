@@ -68,6 +68,7 @@ def build_compile_cache_key(
         + "|rg=" + str(filters_gen) + ":" + str(tests_gen) + ":" + str(functions_gen)
         + "|cat=" + str(catalog_version)
         + "|loc=" + opts.default_locale
+        + "|cf=" + _bool_tag(opts.enable_constant_folding)
         + "|v=" + glyph.version.version()
     )
 
