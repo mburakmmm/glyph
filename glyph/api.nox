@@ -105,6 +105,9 @@ def default_environment(loader: MemoryLoader) -> Environment:
 def clear_cache(env: Environment) -> None:
     glyph.environment.clear_cache(env)
 
+def freeze_environment(env: Environment) -> None:
+    glyph.environment.freeze_environment(env)
+
 def compile_string(source: str, logical_name: str, env: Environment) -> Template:
     return glyph.environment.compile_string(source, logical_name, env)
 

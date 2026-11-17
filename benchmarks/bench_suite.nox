@@ -1,0 +1,227 @@
+# Glyph Reproducible Benchmark Suite (AGENTS.md §22)
+# Compares Glyph v1.0.0 compile/render pipelines and O(n) writer scaling
+# across 3 independent rounds against stdlib nox.template baseline.
+import nox.time
+import nox.strings
+import nox.template
+from nox.collections import OrderedDict
+import glyph.api
+from glyph.api import MemoryLoader, Environment, Template, Context, SourceSpan
+from glyph.api import RenderOptions, OutputMode, TrustTier, UndefinedPolicy
+from glyph.api import ResourceBudget, BudgetTracker, GlyphWriter, RenderResult, Value
+
+def _bench_noop_sink(_chunk: str) -> bool:
+    return True
+
+def _bench_never_cancel() -> bool:
+    return False
+
+def _make_list_ctx(count: int) -> Context:
+    items: list[Value] = []
+    i: int = 0
+    while i < count:
+        row: OrderedDict[str, Value] = OrderedDict[str, Value]()
+        row.set("id", Value.VInt(i))
+        row.set("name", Value.VStr("Item<" + str(i) + ">"))
+        items.append(Value.VList([Value.VStr("row"), Value.VMap(row)]))
+        i = i + 1
+    m: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    m.set("items", Value.VList(items))
+    return glyph.api.context_from_map(m)
+
+def _make_flat_list_ctx(count: int) -> Context:
+    items: list[Value] = []
+    i: int = 0
+    while i < count:
+        row: OrderedDict[str, Value] = OrderedDict[str, Value]()
+        row.set("name", Value.VStr("Item<" + str(i) + ">"))
+        items.append(Value.VMap(row))
+        i = i + 1
+    m: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    m.set("title", Value.VStr("<Catalog>"))
+    m.set("items", Value.VList(items))
+    return glyph.api.context_from_map(m)
+
+def _run_round(round_id: int) -> None:
+    print("=== Benchmark Round " + str(round_id) + " ===")
+    mem: MemoryLoader = MemoryLoader()
+    small_src: str = "<h1>{{ a }}</h1><p>{{ b }} - {{ c }} - {{ d }} - {{ e }}</p>"
+    mem.put("small.html", small_src)
+
+    # 3-level inheritance
+    mem.put("b0.html", "<!doctype html><html>{% block head %}{% endblock %}{% block body %}{% endblock %}</html>")
+    mem.put("b1.html", "{% extends 'b0.html' %}{% block head %}<title>{{ title }}</title>{% endblock %}")
+    mem.put("b2.html", "{% extends 'b1.html' %}{% block body %}<main>{% block main %}{% endblock %}</main>{% endblock %}")
+    mem.put("p3.html", "{% extends 'b2.html' %}{% block main %}<p>{{ msg }}</p>{% endblock %}")
+
+    # 10-level inheritance chain
+    mem.put("d0.html", "[{% block slot %}base{% endblock %}]")
+    di: int = 1
+    while di < 10:
+        mem.put("d" + str(di) + ".html", "{% extends 'd" + str(di - 1) + ".html' %}{% block slot %}L" + str(di) + ":{{ super() }}{% endblock %}")
+        di = di + 1
+
+    # Nested macro + include
+    mem.put("macros.html", "{% macro badge(k, v) %}<span class=\"b\">{{ k }}={{ v }}</span>{% endmacro %}")
+    mem.put("part.html", "{% from 'macros.html' import badge %}{{ badge(label, val) }}")
+    mem.put("comp.html", "<section>{% include 'part.html' with context %}</section>")
+
+    env: Environment = glyph.api.default_environment(mem)
+    glyph.api.freeze_environment(env)
+
+    # 1. Small template cold compile + warm render + nox.template baseline
+    ctx_small: Context = glyph.api.context_from_json('{"a":"Alpha","b":"<Beta>","c":"Gamma","d":"Delta","e":"Epsilon"}')
+    t0: int = nox.time.monotonic_ns()
+    ci: int = 0
+    while ci < 50:
+        _ct: Template = glyph.api.compile_string(small_src, "small_c.html", env)
+        ci = ci + 1
+    cold_ns: int = (nox.time.monotonic_ns() - t0) // 50
+
+    tpl_small: Template = glyph.api.get_template("small.html", env)
+    t1: int = nox.time.monotonic_ns()
+    wi: int = 0
+    while wi < 500:
+        _ws: str = glyph.api.render(tpl_small, ctx_small, env)
+        wi = wi + 1
+    warm_ns: int = (nox.time.monotonic_ns() - t1) // 500
+
+    # Baseline nox.template.render_blocks
+    nox_scalars: dict[str, str] = {"a": "Alpha", "b": "<Beta>", "c": "Gamma", "d": "Delta", "e": "Epsilon"}
+    nox_lists: dict[str, list[dict[str, str]]] = {}
+    tb: int = nox.time.monotonic_ns()
+    bi: int = 0
+    while bi < 500:
+        _bs: str = nox.template.render_blocks(small_src, nox_scalars, nox_lists)
+        bi = bi + 1
+    nox_small_ns: int = (nox.time.monotonic_ns() - tb) // 500
+    print("  small_cold_compile_ns=", cold_ns, "small_warm_render_ns=", warm_ns, "nox_template_ns=", nox_small_ns)
+
+    # 2. Loop scaling (10 / 1000 / 10000 items) & nox.template 100-item baseline
+    loop_src: str = "<ul>{% for x in items %}<li>{{ x.name }}</li>{% endfor %}</ul>"
+    tpl_loop: Template = glyph.api.compile_string(loop_src, "loop.html", env)
+    ctx_10: Context = _make_flat_list_ctx(10)
+    ctx_1k: Context = _make_flat_list_ctx(1000)
+    ctx_10k: Context = _make_flat_list_ctx(10000)
+
+    t10: int = nox.time.monotonic_ns()
+    li: int = 0
+    while li < 100:
+        _o10: str = glyph.api.render(tpl_loop, ctx_10, env)
+        li = li + 1
+    ns_10: int = (nox.time.monotonic_ns() - t10) // 100
+
+    t1k: int = nox.time.monotonic_ns()
+    _o1k: str = glyph.api.render(tpl_loop, ctx_1k, env)
+    ns_1k: int = nox.time.monotonic_ns() - t1k
+
+    t10k: int = nox.time.monotonic_ns()
+    o10k: str = glyph.api.render(tpl_loop, ctx_10k, env)
+    ns_10k: int = nox.time.monotonic_ns() - t10k
+
+    nox_rows_1k: list[dict[str, str]] = []
+    nri: int = 0
+    while nri < 1000:
+        nox_rows_1k.append({"name": "Item<" + str(nri) + ">"})
+        nri = nri + 1
+    nox_lmap: dict[str, list[dict[str, str]]] = {"items": nox_rows_1k}
+    nox_lsc: dict[str, str] = {}
+    tn1k: int = nox.time.monotonic_ns()
+    _no1k: str = nox.template.render_blocks(loop_src, nox_lsc, nox_lmap)
+    nox_1k_ns: int = nox.time.monotonic_ns() - tn1k
+    print("  loop_10_ns=", ns_10, "loop_1k_ns=", ns_1k, "loop_10k_ns=", ns_10k, "loop_10k_bytes=", nox.strings.byte_len(o10k), "nox_template_1k_ns=", nox_1k_ns)
+
+    # 3. 3-level and 10-level inheritance (warm)
+    tpl_p3: Template = glyph.api.get_template("p3.html", env)
+    tpl_d9: Template = glyph.api.get_template("d9.html", env)
+    ctx_inh: Context = glyph.api.context_from_json('{"title":"Doc","msg":"<Ok>"}')
+    t_i3: int = nox.time.monotonic_ns()
+    ii: int = 0
+    while ii < 200:
+        _s3: str = glyph.api.render(tpl_p3, ctx_inh, env)
+        ii = ii + 1
+    ns_i3: int = (nox.time.monotonic_ns() - t_i3) // 200
+
+    t_i10: int = nox.time.monotonic_ns()
+    ij: int = 0
+    while ij < 200:
+        _s10: str = glyph.api.render(tpl_d9, glyph.api.empty_context(), env)
+        ij = ij + 1
+    ns_i10: int = (nox.time.monotonic_ns() - t_i10) // 200
+    print("  inherit_3_ns=", ns_i3, "inherit_10_ns=", ns_i10)
+
+    # 4. Nested include + macro
+    tpl_comp: Template = glyph.api.get_template("comp.html", env)
+    ctx_comp: Context = glyph.api.context_from_json('{"label":"env","val":"<prod>"}')
+    t_mc: int = nox.time.monotonic_ns()
+    mi: int = 0
+    while mi < 200:
+        _mc: str = glyph.api.render(tpl_comp, ctx_comp, env)
+        mi = mi + 1
+    ns_mc: int = (nox.time.monotonic_ns() - t_mc) // 200
+    print("  include_macro_ns=", ns_mc)
+
+    # 5. Heavy HTML escaping vs OutputMode.Text
+    heavy_val: str = nox.strings.repeat("<a&\"'>", 400)
+    hm: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    hm.set("payload", Value.VStr(heavy_val))
+    hctx: Context = glyph.api.context_from_map(hm)
+    tpl_esc: Template = glyph.api.compile_string("<div>{{ payload }}</div>", "esc.html", env)
+    opts_html: RenderOptions = RenderOptions(OutputMode.Html, True, UndefinedPolicy.StrictUndefined, TrustTier.Trusted, glyph.api.default_budget(), "en")
+    opts_text: RenderOptions = RenderOptions(OutputMode.Text, False, UndefinedPolicy.StrictUndefined, TrustTier.Trusted, glyph.api.default_budget(), "en")
+
+    t_eh: int = nox.time.monotonic_ns()
+    ehi: int = 0
+    while ehi < 100:
+        _eh: str = glyph.api.render_with_options(tpl_esc, hctx, opts_html, env)
+        ehi = ehi + 1
+    ns_eh: int = (nox.time.monotonic_ns() - t_eh) // 100
+
+    t_et: int = nox.time.monotonic_ns()
+    eti: int = 0
+    while eti < 100:
+        _et: str = glyph.api.render_with_options(tpl_esc, hctx, opts_text, env)
+        eti = eti + 1
+    ns_et: int = (nox.time.monotonic_ns() - t_et) // 100
+    print("  heavy_html_escape_ns=", ns_eh, "heavy_text_mode_ns=", ns_et)
+
+    # 6. Cache cold vs warm hit
+    glyph.api.clear_cache(env)
+    t_cc: int = nox.time.monotonic_ns()
+    _ct2: Template = glyph.api.get_template("p3.html", env)
+    ns_cold: int = nox.time.monotonic_ns() - t_cc
+
+    t_cw: int = nox.time.monotonic_ns()
+    cwi: int = 0
+    while cwi < 500:
+        _wt2: Template = glyph.api.get_template("p3.html", env)
+        cwi = cwi + 1
+    ns_warm: int = (nox.time.monotonic_ns() - t_cw) // 500
+    print("  cache_cold_ns=", ns_cold, "cache_warm_hit_ns=", ns_warm)
+
+    # 7. Streaming Writer 1 KB and 1 MB
+    chunk_1k: str = nox.strings.repeat("x", 1024)
+    w_tr1: BudgetTracker = BudgetTracker(glyph.api.default_budget())
+    w1: GlyphWriter = glyph.api.streaming_writer(w_tr1, _bench_noop_sink, _bench_never_cancel, 8192)
+    tw1: int = nox.time.monotonic_ns()
+    w1.write(chunk_1k, SourceSpan("<b1k>", 1, 1, 0, 0))
+    w1.close()
+    ns_w1k: int = nox.time.monotonic_ns() - tw1
+
+    chunk_64k: str = nox.strings.repeat("y", 65536)
+    w_tr2: BudgetTracker = BudgetTracker(glyph.api.default_budget())
+    w2: GlyphWriter = glyph.api.streaming_writer(w_tr2, _bench_noop_sink, _bench_never_cancel, 8192)
+    tw2: int = nox.time.monotonic_ns()
+    wi2: int = 0
+    while wi2 < 16:
+        w2.write(chunk_64k, SourceSpan("<b1m>", 1, 1, 0, 0))
+        wi2 = wi2 + 1
+    w2.close()
+    ns_w1m: int = nox.time.monotonic_ns() - tw2
+    print("  writer_1kb_ns=", ns_w1k, "writer_1mb_ns=", ns_w1m, "writer_1mb_flushed=", w2.bytes_flushed)
+
+print("Glyph Benchmark Suite — version=" + glyph.api.engine_version() + " min_nox=" + glyph.api.min_nox_version())
+r: int = 1
+while r <= 3:
+    _run_round(r)
+    r = r + 1

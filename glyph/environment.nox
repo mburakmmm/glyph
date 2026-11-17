@@ -71,6 +71,12 @@ def clear_cache(env: Environment) -> None:
     env.parse_cache.clear()
     env.compile_cache.clear()
 
+def freeze_environment(env: Environment) -> None:
+    env.filters.freeze()
+    env.tests.freeze()
+    env.functions.freeze()
+    env.catalog.freeze()
+
 def compile_string(source: str, logical_name: str, env: Environment) -> Template:
     tracker: BudgetTracker = BudgetTracker(env.options.default_budget)
     ast: TemplateAst = parse_string(source, logical_name, tracker)

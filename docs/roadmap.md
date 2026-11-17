@@ -15,5 +15,5 @@
 | **Phase 7** | `v0.5.0` | Full built-in filter/test catalog, `FilterSpec`/`TestSpec`/`FunctionSpec`, `HelperContext`, cost metering | **Done** (`tests/filters/`) |
 | **Phase 8** | `v0.6.0` | `ADR-0008`, `ADR-0009`, i18n/locale/plural, HTML/Text/XML/MD/JSON/Email modes, streaming `GlyphWriter` | **Done** (`tests/locale/`, `examples/email/`) |
 | **Phase 9** | `v0.7.0` | `ADR-0010`, `integrations/nyx/`, `integrations/aether/`, `glyph` CLI, diagnostic JSON, Vertical Slice #3 | **Done** (`tests/integration/`, `cli/`, `examples/nyx/`, `examples/aether/`) |
-| **Phase 10** | `v1.0.0` **(STABLE)** | Fuzzing, property/differential/mutation/concurrency tests, benchmarks, WASM verification, CI/SBOM, **v1.0 Release Gate** | Planned |
+| **Phase 10** | `v1.0.0` **(STABLE)** | Fuzzing, property/differential/mutation/concurrency tests, benchmarks, WASM verification, CI/SBOM, **v1.0 Release Gate** | **Done** (`tests/fuzz/`, `tests/concurrency/`, `benchmarks/`, `docs/performance.md`, `docs/testing.md`) |
 | **Phase 11** | `v1.1.0+` / `v2.0` | `with`/`filter` blocks, component/slot DSL, constant folding, LSP/grammar, Aura export, AOT & sandbox research | Planned |

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-17
+
+### Added
+- `tests/fuzz/fuzz_and_property_test.nox`: Property-based AST roundtrip equivalence, independent differential reference expression evaluator, escaper idempotence & `forceescape` double-escape properties, 500-sample arbitrary-byte `compile_string`/`lint` fuzzing, and 5 explicit parser/limit/security/loader mutation gates.
+- `tests/concurrency/concurrency_and_stress_test.nox`: Concurrent `1/4/16`-task `spawn` waves sharing a frozen `Environment` under `--strict-spawn-shared`, 64-wave mixed `OutputMode`/`TrustTier`/locale isolation, 320-template LRU eviction & 25-cycle transitive invalidation stress, and 10,000-row O(n) streaming writer verification.
+- `glyph/api.nox` & `glyph/environment.nox`: Added `freeze_environment(env)` and made frozen `FilterRegistry`, `TestRegistry`, and `FunctionRegistry` skip shared `active_renders` counter writes during concurrent renders.
+- `benchmarks/bench_suite.nox` & `docs/performance.md`: Reproducible 3-round benchmark suite comparing cold compile, warm render, 10/1K/10K loops, 3/10-level inheritance, include+macro, dense HTML escaping vs Text mode, cache hit/miss, streaming `GlyphWriter`, and stdlib `nox.template` baseline.
+- `examples/wasm_memory/main.nox`, `examples/static_site/main.nox`, and `docs/testing.md`.
+- Marked `Stable` / `Experimental` / `Internal` API stability tiers and SemVer deprecation policy in `docs/api.md` for `v1.0.0`.
+
+### Changed
+- Bumped `GLYPH_VERSION` and `nox.json` to `1.0.0`.
+- Fixed NUL-safe string literal part concatenation (`_concat_parts_safe`) in `glyph/lexer.nox` (`noxc 2.1.186` `nox.strings.join` workaround documented in `docs/compatibility.md`).
+
 ## [0.7.0] - 2026-11-16
 
 ### Added

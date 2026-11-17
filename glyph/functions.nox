@@ -37,9 +37,13 @@ class FunctionRegistry:
         self.custom_specs = empty_s
 
     def begin_use(self: FunctionRegistry) -> None:
+        if self.frozen:
+            return
         self.active_renders = self.active_renders + 1
 
     def end_use(self: FunctionRegistry) -> None:
+        if self.frozen:
+            return
         if self.active_renders > 0:
             self.active_renders = self.active_renders - 1
 

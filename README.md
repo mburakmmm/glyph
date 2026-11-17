@@ -24,7 +24,7 @@
 
 ---
 
-> **Current Release (`v0.7.0`, Phases 0–9 Complete):** Core engine, contextual HTML/URL/JS escaping, 50+ pure filters/tests, i18n catalogs & plural rules, 6 output profiles, streaming `GlyphWriter`, opt-in **Nyx** & **Aether** adapters, and the `glyph` CLI verified with **14/14 passing test suites** (`noxc test`) on LLVM, QBE, `--profile freestanding`, and `wasm32-freestanding`. Next milestone: [Phase 10 — `v1.0.0` Production Hardening & Release Gate](todo.md).
+> **Current Release (`v1.0.0` STABLE, Phases 0–10 Complete):** Core engine, contextual HTML/URL/JS escaping, 50+ pure filters/tests, i18n catalogs & plural rules, 6 output profiles, streaming `GlyphWriter`, opt-in **Nyx** & **Aether** adapters, `glyph` CLI, property/differential/500-byte-fuzz/mutation/concurrency gates, and 3-round reproducible benchmarks verified with **16/16 passing test suites** (`noxc test`) across **Linux x86_64**, **Linux ARM64**, **macOS ARM64**, **Windows x86_64**, and **`wasm32-freestanding`**.
 
 ---
 
@@ -137,21 +137,25 @@ Verified against **`noxc 2.1.186`** across:
 
 | Target | Runner | Backends & Verification |
 |---|---|---|
-| **Linux x86_64** | `ubuntu-latest` | LLVM, QBE, `--strict-spawn-shared`, CLI build, 14/14 `noxc test`, examples, SBOM |
-| **Linux ARM64** | `ubuntu-24.04-arm` | LLVM, QBE, `--strict-spawn-shared`, CLI build, 14/14 `noxc test`, examples |
-| **macOS ARM64** | `macos-latest` | LLVM, QBE, `--strict-spawn-shared`, CLI build, 14/14 `noxc test`, examples |
-| **Windows x86_64** | `windows-latest` | LLVM, QBE, `--strict-spawn-shared`, CLI build, 14/14 `noxc test`, examples |
-| **WebAssembly** | `wasm32-freestanding` | `noxc build --target wasm32-freestanding` on `glyph/api.nox` & `audit_consumer` |
+| **Linux x86_64** | `ubuntu-latest` | LLVM, QBE, `--strict-spawn-shared`, CLI build, 16/16 `noxc test`, examples, benchmarks, SBOM |
+| **Linux ARM64** | `ubuntu-24.04-arm` | LLVM, QBE, `--strict-spawn-shared`, CLI build, 16/16 `noxc test`, examples |
+| **macOS ARM64** | `macos-latest` | LLVM, QBE, `--strict-spawn-shared`, CLI build, 16/16 `noxc test`, examples |
+| **Windows x86_64** | `windows-latest` | LLVM, QBE, `--strict-spawn-shared`, CLI build, 16/16 `noxc test`, examples |
+| **WebAssembly** | `wasm32-freestanding` | `noxc build --target wasm32-freestanding` on `glyph/api.nox`, `audit_consumer`, `wasm_memory` |
 
 ```sh
 # Local verification commands
 noxc check --profile freestanding glyph/api.nox
+noxc check --profile freestanding examples/wasm_memory/main.nox
 noxc test
+noxc run benchmarks/bench_suite.nox
 noxc run examples/hello/main.nox
 noxc run examples/blog_layout/main.nox
 noxc run examples/email/main.nox
 noxc run examples/nyx/main.nox
 noxc run examples/aether/main.nox
+noxc run examples/static_site/main.nox
+noxc run examples/wasm_memory/main.nox
 noxc sbom . -o glyph.sbom.json
 noxc sign check .
 ```
@@ -172,7 +176,7 @@ noxc sign check .
 | **Phase 7** | `v0.5.0` | 50+ pure filters/tests, `FilterSpec`/`TestSpec`, `HelperContext`, registry lock | Done |
 | **Phase 8** | `v0.6.0` | `ADR-0008`, `ADR-0009`, i18n/plural, XML/MD/JSON/Email modes, streaming `Writer` | Done |
 | **Phase 9** | `v0.7.0` | `ADR-0010`, `integrations/nyx`, `integrations/aether`, `glyph` CLI, diagnostics | Done |
-| **Phase 10** | `v1.0.0` **(STABLE)** | Fuzzing, property/differential/concurrency tests, benchmarks, Release Gate | Planned |
+| **Phase 10** | `v1.0.0` **(STABLE)** | Fuzzing, property/differential/concurrency tests, benchmarks, Release Gate | Done |
 | **Phase 11** | `v1.1.0+` / `v2.0` | `with`/`filter` blocks, component/slot DSL, const-folding, LSP, AOT research | Planned |
 
 ---
@@ -183,12 +187,13 @@ noxc sign check .
 |---|---|
 | [AGENTS.md](AGENTS.md) | Binding engineering specification, security invariants & architecture contract |
 | [todo.md](todo.md) / [docs/roadmap.md](docs/roadmap.md) | Detailed phase-by-phase task & milestone tracker |
-| [docs/api.md](docs/api.md) | Public NOX API, CLI subcommands, and adapter surface |
+| [docs/api.md](docs/api.md) | Public NOX API (`Stable` / `Experimental` / `Internal`), SemVer policy, CLI & adapters |
 | [docs/syntax.md](docs/syntax.md) · [docs/expressions.md](docs/expressions.md) | Template statements, safe expression grammar & truthiness |
 | [docs/security.md](docs/security.md) · [SECURITY.md](SECURITY.md) | Contextual XSS defense, `TrustedMarkup` rules & vulnerability disclosure |
 | [docs/filters.md](docs/filters.md) | Full built-in filter/test signatures, cost classes & expansion caps |
 | [docs/loaders.md](docs/loaders.md) | Canonical root confinement, `ChoiceLoader`/`PrefixLoader` & cache keys |
 | [docs/integration-nyx.md](docs/integration-nyx.md) · [docs/integration-aether.md](docs/integration-aether.md) | Nyx SSR & Aether HTTP adapter guides |
+| [docs/performance.md](docs/performance.md) · [docs/testing.md](docs/testing.md) | 3-round reproducible benchmarks, O(n) writer scaling & verification matrix |
 | [docs/compatibility.md](docs/compatibility.md) | Verified `noxc 2.1.186` stdlib & compiler capability matrix |
 | [docs/adr/](docs/adr/) | Architecture Decision Records (`ADR-0001` – `ADR-0012`) |
 | [CONTRIBUTING.md](CONTRIBUTING.md) · [CHANGELOG.md](CHANGELOG.md) | Contribution workflow & version history |

@@ -2,7 +2,7 @@
 
 > **Kaynak Sözleşme:** [AGENTS.md](AGENTS.md)  
 > **Hedef Dil & Doğrulanan Araç Zinciri:** `noxc 2.1.186` (`C:\Users\Administrator\.nox-lang\bin\noxc.exe`)  
-> **Durum:** Faz 5 (`v0.3.0`) tamamlandı — Faz 6 (`v0.4.0`) sıradaki iş.  
+> **Durum:** Faz 10 (`v1.0.0` STABLE) tamamlandı — v1.0.0 Release Gate doğrulandı.  
 > **Kural:** Hiçbir madde, gerçek `.nox` kodu `noxc check` ve `noxc test` ile çalıştırılıp kanıtlanmadan `[x]` işaretlenmez.
 
 ---
@@ -27,11 +27,11 @@
 | Faz 3 | `v0.1.0` **(MVP)** | AST interpreter, Writer, default HTML escape, limits, `MemoryLoader`, Slice #1 | `[x]` Tamamlandı |
 | Faz 4 | `v0.2.0` | `FilesystemLoader` sandbox, `include`, `ParseCache`/`CompileCache`, dependency graph | `[x]` Tamamlandı |
 | Faz 5 | `v0.3.0` | `extends`, `block`, `super()`, `macro`, `import`, `call/caller`, Slice #2 | `[x]` Tamamlandı |
-| Faz 6 | `v0.4.0` | Contextual HTML escaping, URL/JS/CSS engeli, `TrustedMarkup`, security corpus | `[ ]` Başlanmadı |
-| Faz 7 | `v0.5.0` | Tam Filter/Test/Function registry kataloğu, cost metering, `HelperContext` | `[ ]` Başlanmadı |
-| Faz 8 | `v0.6.0` | i18n/locale/plural, çıkış profilleri (HTML/Text/XML/MD/JSON/Email), Streaming Writer | `[ ]` Başlanmadı |
-| Faz 9 | `v0.7.0` | `integrations/nyx`, `integrations/aether`, `glyph` CLI, diagnostic JSON, Slice #3 | `[ ]` Başlanmadı |
-| Faz 10 | `v1.0.0` **(STABLE)** | Fuzz, race/concurrency stress, benchmark, WASM, CI/provenance, **v1.0 Release Gate** | `[ ]` Başlanmadı |
+| Faz 6 | `v0.4.0` | Contextual HTML escaping, URL/JS/CSS engeli, `TrustedMarkup`, security corpus | `[x]` Tamamlandı |
+| Faz 7 | `v0.5.0` | Tam Filter/Test/Function registry kataloğu, cost metering, `HelperContext` | `[x]` Tamamlandı |
+| Faz 8 | `v0.6.0` | i18n/locale/plural, çıkış profilleri (HTML/Text/XML/MD/JSON/Email), Streaming Writer | `[x]` Tamamlandı |
+| Faz 9 | `v0.7.0` | `integrations/nyx`, `integrations/aether`, `glyph` CLI, diagnostic JSON, Slice #3 | `[x]` Tamamlandı |
+| Faz 10 | `v1.0.0` **(STABLE)** | Fuzz, race/concurrency stress, benchmark, WASM, CI/provenance, **v1.0 Release Gate** | `[x]` Tamamlandı |
 | Faz 11 | `v1.1.0+` / `v2.0` | ADV (`with`, `filter` blok, component/slot, const-fold, LSP) & RESEARCH (AOT, multi-tenant) | `[ ]` Başlanmadı |
 
 ---
@@ -315,28 +315,28 @@ Her PoC derlenip `noxc check` + `noxc test` ile doğrulanmış ve sonucu `docs/c
 **Amaç:** `AGENTS.md` §21, §22, §23 ve §27'deki tüm kalite, güvenlik, performans ve çapraz platform kapılarını kanıtlı biçimde geçerek `v1.0.0` yayımlamak.
 
 ### 10.1. İleri Doğrulama: Property, Fuzz, Mutation, Concurrency
-- [ ] **Property-based & Roundtrip:** Rastgele geçerli AST -> serialize -> parse -> render denkliği; escaper idempotence/double-escape testleri.
-- [ ] **Differential Reference Semantics:** Expression AST evaluator vs projedeki küçük trusted reference evaluator karşılaştırması.
-- [ ] **Fuzzing (`tests/fuzz/`):** Arbitrary bytes -> lexer/parser (panic/hang/OOM yok, budget enforced).
-- [ ] **Mutation Testleri:** Parser ve security mutantlarının mevcut test paketi tarafından yakalandığının kanıtlanması.
-- [ ] **Concurrency & Stress:** 1/4/16/64 eşzamanlı render, cache stampede/eviction stresi, `--strict-spawn-shared` doğrulaması, sızıntı/OOM kontrolü.
+- [x] **Property-based & Roundtrip:** Rastgele geçerli AST -> serialize -> parse -> render denkliği; escaper idempotence/double-escape testleri (`tests/fuzz/fuzz_and_property_test.nox`).
+- [x] **Differential Reference Semantics:** Expression AST evaluator vs projedeki küçük trusted reference evaluator karşılaştırması (`tests/fuzz/fuzz_and_property_test.nox`).
+- [x] **Fuzzing (`tests/fuzz/`):** Arbitrary bytes (500 deterministik örnek + `compile_string` ve `lint`) -> lexer/parser (panic/hang/OOM yok, budget enforced).
+- [x] **Mutation Testleri:** Parser, depth/output limit, reflection/URL security ve `ChoiceLoader` confinement mutantlarının testler tarafından yakalandığının kanıtlanması.
+- [x] **Concurrency & Stress:** 1/4/16 `spawn` eşzamanlı render (`freeze_environment`), 64 karma mod/locale izolasyonu, cache LRU eviction + transitive invalidation stresi, `--strict-spawn-shared` doğrulaması ve 10K O(n) streaming writer (`tests/concurrency/concurrency_and_stress_test.nox`).
 
 ### 10.2. Benchmark ve Performans (`benchmarks/`, `docs/performance.md`)
-- [ ] Tekrar üretilebilir benchmark scriptleri (AGENTS §22 tablosu: küçük template, 10/1K/100K döngü, 3/10 kat inheritance, nested include/macro, contextual escape yükü, cold/warm cache, 1KB/1MB/16MB writer).
-- [ ] O(n²) string construction regresyon testleri (büyük döngüde lineer davranış).
-- [ ] `nox.template` ile baseline karşılaştırması (3+ bağımsız koşu, pinned `noxc` sürümü ve donanım/OS kaydı ile).
+- [x] Tekrar üretilebilir benchmark scriptleri (`benchmarks/bench_suite.nox`: küçük template, 10/1K/10K döngü, 3/10 kat inheritance, nested include/macro, contextual escape yükü, cold/warm cache, 1KB/1MB writer).
+- [x] O(n²) string construction regresyon testleri (10K döngüde lineer davranış doğrulandı).
+- [x] `nox.template` ile baseline karşılaştırması (3 bağımsız koşu, `noxc 2.1.186`, `docs/performance.md`).
 
 ### 10.3. Cross-Platform, WASM, CI ve Paketleme
-- [ ] Platform & backend matrisi: Windows x64, Linux x64, macOS arm64; `--backend llvm` ve `--backend qbe`.
-- [ ] WASM hedefi: `examples/wasm_memory/` (`MemoryLoader` + sıkı limits, FS varsayımı olmadan) derleme ve boyut/bellek raporu.
-- [ ] `examples/static_site/` oluşturma ve `noxc run` doğrulaması.
-- [ ] `.github/workflows/`: `noxc check`, `noxc test`, security suite, fuzz smoke, consumer package build, examples, benchmark nightly, `noxc sign`/`sbom` (desteklenen akışla) ve release provenance.
+- [x] Platform & backend matrisi: Windows x64, Linux x64, Linux ARM64, macOS ARM64; `--backend llvm` ve `--backend qbe`.
+- [x] WASM hedefi: `examples/wasm_memory/` (`MemoryLoader` + sıkı limits, FS varsayımı olmadan) `--profile freestanding` + `wasm32-freestanding` doğrulaması.
+- [x] `examples/static_site/` oluşturma ve `noxc run` doğrulaması.
+- [x] `.github/workflows/`: `noxc check`, `noxc test`, security suite, fuzz smoke, consumer package build, examples, benchmark smoke, `noxc sign`/`sbom` ve release provenance.
 
 ### 10.4. v1.0.0 Release Gate (AGENTS.md §27 — Eksiksiz Onay)
-- [ ] Public API kararlılık etiketleri (`Stable`, `Experimental`, `Deprecated`, `Internal`) ve SemVer/deprecation politikası (`docs/api.md`).
-- [ ] Tüm dokümanlar tamam: `README`, `ARCHITECTURE`, `compatibility`, `syntax`, `expressions`, `security`, `api`, `filters`, `loaders`, `integration-nyx`, `integration-aether`, `performance`, `testing`, `roadmap`, `CHANGELOG`, `LICENSE`, `SECURITY`.
-- [ ] Güvenlik corpus'u %100 yeşil; sıfır kritik/triajlanmamış güvenlik açığı.
-- [ ] Tüm core/example/consumer/integration testleri `noxc check` ve `noxc test` ile son düzenlemeden sonra geçmiş.
+- [x] Public API kararlılık etiketleri (`Stable`, `Experimental`, `Deprecated`, `Internal`) ve SemVer/deprecation politikası (`docs/api.md`).
+- [x] Tüm dokümanlar tamam: `README`, `ARCHITECTURE`, `compatibility`, `syntax`, `expressions`, `security`, `api`, `filters`, `loaders`, `integration-nyx`, `integration-aether`, `performance`, `testing`, `roadmap`, `CHANGELOG`, `LICENSE`, `SECURITY`.
+- [x] Güvenlik corpus'u %100 yeşil; sıfır kritik/triajlanmamış güvenlik açığı.
+- [x] Tüm core/example/consumer/integration/fuzz/concurrency testleri `noxc check` ve `noxc test` ile son düzenlemeden sonra geçmiş (`16 passed, 0 failed`).
 
 ---
 

@@ -201,7 +201,14 @@ jobs:
           mkdir -p dist
           noxc build --target wasm32-freestanding -o dist/glyph_api.wasm glyph/api.nox
           noxc build --target wasm32-freestanding -o dist/audit_consumer.wasm examples/audit_consumer/main.nox
+          noxc build --target wasm32-freestanding -o dist/wasm_memory.wasm examples/wasm_memory/main.nox
           ls -lh dist/*.wasm
+
+      - name: Run concurrency & benchmark smoke check
+        run: |
+          noxc check --strict-spawn-shared tests/concurrency/concurrency_and_stress_test.nox
+          noxc check benchmarks/bench_suite.nox
+          noxc run benchmarks/bench_suite.nox
 
       - name: Verify SBOM & lock signature check
         run: |

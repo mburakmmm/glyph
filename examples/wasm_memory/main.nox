@@ -1,0 +1,28 @@
+# Pure-memory / WASM-compatible Glyph example (no filesystem, no nox.unicode).
+# Builds cleanly under `noxc check --profile freestanding` and `noxc build --target wasm32-freestanding`.
+import glyph.api
+from glyph.api import MemoryLoader, Environment, Template, Context
+from glyph.api import EnvironmentOptions, RenderOptions, OutputMode, TrustTier, UndefinedPolicy
+
+mem: MemoryLoader = MemoryLoader()
+mem.put("layout.html", "<section class=\"wasm-card\">{% block body %}{% endblock %}</section>")
+mem.put(
+    "card.html",
+    "{% extends 'layout.html' %}{% block body %}<h2>{{ title }}</h2><a href=\"{{ link }}\">{{ cta }}</a>{% endblock %}"
+)
+
+opts: EnvironmentOptions = glyph.api.restricted_defaults()
+env: Environment = glyph.api.new_environment(mem, opts)
+glyph.api.freeze_environment(env)
+
+tpl: Template = glyph.api.get_template("card.html", env)
+ctx: Context = glyph.api.context_from_json('{"title":"<WASM Edge Card>","link":"https://noxlang.com","cta":"Open Docs"}')
+ropts: RenderOptions = RenderOptions(
+    OutputMode.Html,
+    True,
+    UndefinedPolicy.StrictUndefined,
+    TrustTier.Restricted,
+    glyph.api.restricted_budget(),
+    "en"
+)
+print(glyph.api.render_with_options(tpl, ctx, ropts, env))

@@ -1,0 +1,32 @@
+# Static site generator example using layout inheritance, macros, i18n catalog, and safe URL attributes.
+import nox.strings
+from nox.collections import OrderedDict
+import glyph.api
+from glyph.api import MemoryLoader, Environment, Template, Context, Value
+
+mem: MemoryLoader = MemoryLoader()
+mem.put(
+    "macros/nav.html",
+    "{% macro nav_item(label, href, active) %}<a class=\"{% if active %}active{% else %}link{% endif %}\" href=\"{{ href }}\">{{ label }}</a>{% endmacro %}"
+)
+mem.put(
+    "layouts/site.html",
+    "<!doctype html>\n<html lang=\"{{ lang }}\">\n<head><meta charset=\"utf-8\"><title>{{ page_title }} | {{ site_name }}</title></head>\n<body>\n{% from 'macros/nav.html' import nav_item %}\n<nav>{{ nav_item(trans('nav_home'), '/', section == 'home') }} {{ nav_item(trans('nav_docs'), '/docs', section == 'docs') }}</nav>\n<main>{% block content %}{% endblock %}</main>\n</body>\n</html>"
+)
+mem.put(
+    "pages/index.html",
+    "{% extends 'layouts/site.html' %}\n{% block content %}\n<h1>{{ heading }}</h1>\n<ul>{% for post in posts %}<li><a href=\"{{ post.url }}\">{{ post.title }}</a></li>{% endfor %}</ul>\n{% endblock %}"
+)
+
+env: Environment = glyph.api.default_environment(mem)
+env.catalog.add("en", "nav_home", "Home")
+env.catalog.add("en", "nav_docs", "Docs")
+glyph.api.freeze_environment(env)
+
+tpl: Template = glyph.api.get_template("pages/index.html", env)
+ctx: Context = glyph.api.context_from_json(
+    '{"lang":"en","site_name":"Glyph","page_title":"Static Site","section":"home","heading":"Release <Notes>","posts":[{"title":"Intro to Glyph","url":"/posts/intro"},{"title":"Security <Model>","url":"https://github.com/mburakmmm/glyph"}]}'
+)
+
+html_out: str = glyph.api.render(tpl, ctx, env)
+print(html_out)

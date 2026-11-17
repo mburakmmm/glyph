@@ -1,12 +1,15 @@
 # Glyph Public API Reference (`docs/api.md`)
 
-> **Version:** `0.7.0` (Phase 9)  
+> **Version:** `1.0.0` (STABLE)  
 > **Entry Module:** `import glyph.api`  
-> **Stability Legend:** `Stable` (contract frozen in SemVer), `Experimental` (v0.x shape subject to refinement before `v1.0`), `Internal` (implementation detail).
+> **Stability Legend (`AGENTS.md` §23):**
+> - **`Stable`**: Frozen for `v1.x` under SemVer; breaking signature or security-default changes require a MAJOR release and deprecation window.
+> - **`Experimental`**: Supported adapter/extension surface whose exact helper options may refine across `v1.x` minor versions.
+> - **`Internal`**: Implementation modules outside `glyph/api.nox`; not guaranteed across minor upgrades.
 
 ---
 
-## 1. Environment & Compilation (`Experimental` until `v1.0.0`)
+## 1. Environment & Compilation (`Stable`)
 
 - `default_environment(loader: MemoryLoader) -> Environment` — Builds an HTML-safe environment (`autoescape=True`, `StrictUndefined`, `allow_safe_filter=False`, `default_budget()`).
 - `new_environment(loader: MemoryLoader, options: EnvironmentOptions) -> Environment` — Builds an environment with explicit `EnvironmentOptions`.
@@ -15,7 +18,9 @@
 - `lint(source: str, name: str, env: Environment) -> list[GlyphError]` — Collects syntax, security, validation, and limit diagnostics without executing the template.
 - `inspect(template: Template) -> TemplateInfo` — Returns referenced external variables, blocks, includes, macros, and imports.
 
-## 2. Rendering & Writer (`Experimental` until `v1.0.0`)
+- `clear_cache(env: Environment)` & `freeze_environment(env: Environment)` — Clears compilation caches or freezes `filters`, `tests`, `functions`, and `catalog` for lock-free shared read-only concurrent renders across `spawn` fibers.
+
+## 2. Rendering & Writer (`Stable`)
 
 - `render(template: Template, context: Context, env: Environment) -> str` — Renders with default `RenderOptions` derived from `env.options`.
 - `render_with_options(template: Template, context: Context, options: RenderOptions, env: Environment) -> str` — Renders with explicit `RenderOptions` and `ResourceBudget`.
@@ -25,7 +30,7 @@
 - `TranslationCatalog`, `LocaleCatalog`, `MissingTranslationPolicy`, `PluralForms`, `default_catalog()` (`env.catalog`, `trans(...)`, `plural(...)`), plus hosted Unicode utilities in `glyph/locale.nox` (`normalize_unicode`, `upper_for_locale`, `lower_for_locale`).
 - `OutputMode` profiles: `Html`, `Text`, `Xml`, `Markdown`, `Json`, `EmailSubject`.
 
-## 3. Context, Value & Safety (`Experimental` until `v1.0.0`)
+## 3. Context, Value & Safety (`Stable`)
 
 - `empty_context() -> Context`
 - `context_from_map(entries: OrderedDict[str, Value]) -> Context`
@@ -37,7 +42,7 @@
 - `trust_js_literal(js: str) -> Value` — Promotes host-generated JSON/JS literals to `MarkupContext.SafeJs` (preferred template pattern: `{{ data | tojson }}`).
 - `OutputContext` — Enum representing contextual HTML positions (`HtmlText`, `HtmlAttributeQuoted`, `HtmlAttributeUnquoted`, `HtmlUrlAttribute`, `HtmlJs`, `HtmlEventHandler`, `HtmlCss`, `StyleAttribute`, `HtmlTagOrAttrName`, `HtmlRawUnsafeAttr`, `HtmlComment`, `Unknown`).
 
-## 4. Loaders, Cache, Options & Registries (`Experimental` until `v1.0.0`)
+## 4. Loaders, Cache, Options & Registries (`Stable`)
 
 - `Loader` (`load`), `MemoryLoader` (`put`, `put_with_trust`, `has`, `load`, `as_loader`)
 - `ChoiceLoader` & `PrefixLoader` (composite loaders; `ChoiceLoader` never falls back on security/path confinement errors)
@@ -51,15 +56,22 @@
 - Full built-in catalog reference: [docs/filters.md](filters.md).
 - `ResourceBudget` (`default_budget()`, `restricted_budget()`)
 
-## 5. Diagnostics, Framework Adapters & CLI
+## 5. Diagnostics, Framework Adapters & CLI (`Stable` Core / `Experimental` Adapters)
 
 - `glyph/diagnostics.nox`: `format_error_human`, `format_error_json`, `format_template_info_json`, `format_template_info_human`, `exit_code_for_error` (`0 OK`, `2 usage`, `3 syntax`, `4 loader`, `5 security`, `6 resource`, `7 runtime`, `8 internal`).
 - `integrations/nyx/glyph_nyx.nox`: Opt-in `render_view` and preflight `render_view_stream` (see [docs/integration-nyx.md](integration-nyx.md)).
 - `integrations/aether/glyph_aether.nox`: Explicit `Accept` content-negotiation adapter (`text/html`, `application/xml`, `text/plain`; see [docs/integration-aether.md](integration-aether.md)).
 - `cli/main.nox` (`cli/app.nox`): Hosted `glyph` CLI (`check`, `lint`, `render`, `inspect`, `deps`, `bench`, `version`).
 
-## 6. Error Hierarchy
+## 6. Error Hierarchy (`Stable`)
 
 All errors inherit `GlyphError(Exception)` and carry `code`, `category`, `logical_name` (redacted), `line`, `column`, `span_start_byte`, `span_end_byte`, `safe_hint`, `render_phase`:
 
 `GlyphSyntaxError`, `GlyphUndefinedError`, `GlyphTypeError`, `GlyphSecurityError`, `GlyphLoadError`, `GlyphLimitError`, `GlyphRenderError`, `GlyphExtensionError`, `GlyphCancelledError`.
+
+## 7. Stability, SemVer & Deprecation Policy (`AGENTS.md` §23)
+
+- **Semantic Versioning (`v1.0.0`+):** Breaking changes to `Stable` public signatures in `glyph/api.nox`, template escaping defaults, or documented security invariants require a **MAJOR** release.
+- **Security Invariant Guarantee:** Weakening default HTML escaping, URL scheme filtering, path confinement, or reflection denial is forbidden in `v1.x` minor/patch releases.
+- **Deprecation Window:** Any `Stable` symbol slated for removal or replacement is first marked `Deprecated` across at least one minor `v1.x` release with documented migration notes before removal in the next MAJOR version.
+- **`Internal` Modules:** Direct imports of internal helper modules (`glyph/runtime.nox`, `glyph/parser.nox`, `glyph/lexer.nox`, etc.) may evolve across `v1.x` minor releases; applications should import `glyph.api` (plus `glyph.loader_fs` and `glyph.locale` on hosted targets).

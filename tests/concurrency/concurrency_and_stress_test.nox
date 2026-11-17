@@ -1,0 +1,151 @@
+# Phase 10 Concurrency, Cache Stress, and Linear Scaling Tests
+# Enforces AGENTS.md §2.9-2.11, §12.2, §21.2.8-9, and §22.
+import nox.test
+import nox.strings
+import nox.time
+import nox.tasks
+from nox.tasks import TaskGroup, TaskHandle
+from nox.collections import OrderedDict
+import glyph.api
+from glyph.api import Environment, Template, Context, MemoryLoader
+from glyph.api import EnvironmentOptions, RenderOptions, OutputMode, TrustTier, UndefinedPolicy
+from glyph.api import ResourceBudget, BudgetTracker, GlyphWriter, RenderResult
+from glyph.api import Value, TranslationCatalog, MissingTranslationPolicy, PluralForms
+
+async def _concurrent_render_worker(tpl: Template, env: Environment, idx: int) -> str:
+    m: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    m.set("user", Value.VStr("<User_" + str(idx) + ">"))
+    m.set("idx", Value.VInt(idx))
+    m.set("items", Value.VList([Value.VInt(idx), Value.VInt(idx * 2)]))
+    ctx: Context = glyph.api.context_from_map(m)
+    return glyph.api.render(tpl, ctx, env)
+
+async def _run_concurrent_wave(count: int, offset: int) -> None:
+    mem: MemoryLoader = MemoryLoader()
+    mem.put(
+        "item.html",
+        "<div data-id=\"{{ idx }}\">{{ user }}:[{% for n in items %}{{ loop.index }}:{{ n }}{% if not loop.last %},{% endif %}{% endfor %}]</div>"
+    )
+    env: Environment = glyph.api.default_environment(mem)
+    glyph.api.freeze_environment(env)
+    tpl: Template = glyph.api.get_template("item.html", env)
+
+    grp: TaskGroup[str] = TaskGroup[str]()
+    i: int = 0
+    while i < count:
+        idx: int = offset + i
+        grp.add(spawn _concurrent_render_worker(tpl, env, idx))
+        i = i + 1
+
+    nox.test.assert_true(grp.wait_all(10000), "TaskGroup wave completed")
+    j: int = 0
+    for h in grp.handles():
+        idx2: int = offset + j
+        ht: Task[str] = h.task
+        got: str = await ht
+        exp: str = "<div data-id=\"" + str(idx2) + "\">&lt;User_" + str(idx2) + "&gt;:[1:" + str(idx2) + ",2:" + str(idx2 * 2) + "]</div>"
+        nox.test.assert_eq_str(got, exp, "concurrent spawn render #" + str(idx2))
+        j = j + 1
+
+def test_spawn_concurrent_renders_shared_frozen_env() -> None:
+    # 1 task, 4 tasks, 16 tasks concurrent waves sharing frozen Environment + compiled Template under --strict-spawn-shared
+    t1: Task[None] = spawn _run_concurrent_wave(1, 0)
+    nox.test.assert_true(t1.wait(10000), "1-task wave completed within timeout")
+
+    t4: Task[None] = spawn _run_concurrent_wave(4, 100)
+    nox.test.assert_true(t4.wait(10000), "4-task wave completed within timeout")
+
+    t16: Task[None] = spawn _run_concurrent_wave(16, 200)
+    nox.test.assert_true(t16.wait(15000), "16-task wave completed within timeout")
+
+def test_64_mixed_mode_trust_locale_isolation() -> None:
+    mem: MemoryLoader = MemoryLoader()
+    mem.put("base.html", "{% block content %}{% endblock %}")
+    mem.put("card.html", "{% extends 'base.html' %}{% block content %}{{ trans('hi', name=user) }}{% endblock %}")
+    env: Environment = glyph.api.default_environment(mem)
+    env.catalog.add("en", "hi", "Hello {name}")
+    env.catalog.add("tr", "hi", "Merhaba {name}")
+    glyph.api.freeze_environment(env)
+
+    tpl: Template = glyph.api.get_template("card.html", env)
+    b: ResourceBudget = glyph.api.default_budget()
+
+    i: int = 0
+    while i < 64:
+        m: OrderedDict[str, Value] = OrderedDict[str, Value]()
+        m.set("user", Value.VStr("<A&" + str(i) + ">"))
+        ctx: Context = glyph.api.context_from_map(m)
+        if i % 2 == 0:
+            opts_html: RenderOptions = RenderOptions(OutputMode.Html, True, UndefinedPolicy.StrictUndefined, TrustTier.Trusted, b, "en")
+            out_h: str = glyph.api.render_with_options(tpl, ctx, opts_html, env)
+            nox.test.assert_eq_str(out_h, "Hello &lt;A&amp;" + str(i) + "&gt;", "64-wave html en #" + str(i))
+        else:
+            opts_txt: RenderOptions = RenderOptions(OutputMode.Text, False, UndefinedPolicy.StrictUndefined, TrustTier.Restricted, b, "tr")
+            out_t: str = glyph.api.render_with_options(tpl, ctx, opts_txt, env)
+            nox.test.assert_eq_str(out_t, "Merhaba <A&" + str(i) + ">", "64-wave text tr #" + str(i))
+        i = i + 1
+
+def test_cache_eviction_and_transitive_invalidation_stress() -> None:
+    mem: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(mem)
+
+    # Push 320 unique templates through bounded caches (ParseCache=256, CompileCache=256)
+    i: int = 0
+    while i < 320:
+        name: str = "dyn_" + str(i) + ".html"
+        mem.put(name, "<p>{{ v }}#" + str(i) + "</p>")
+        tpl: Template = glyph.api.get_template(name, env)
+        ctx: Context = glyph.api.context_from_json('{"v":"ok"}')
+        nox.test.assert_eq_str(glyph.api.render(tpl, ctx, env), "<p>ok#" + str(i) + "</p>", "cache churn #" + str(i))
+        i = i + 1
+
+    # Re-fetch evicted earliest key and verify exact output
+    tpl0: Template = glyph.api.get_template("dyn_0.html", env)
+    nox.test.assert_eq_str(glyph.api.render(tpl0, glyph.api.context_from_json('{"v":"reloaded"}'), env), "<p>reloaded#0</p>", "evicted template reloads cleanly")
+
+    # Transitive dependency invalidation loop across 25 layout updates
+    mem.put("child.html", "{% extends 'parent.html' %}{% block body %}<span>{{ x }}</span>{% endblock %}")
+    u: int = 0
+    while u < 25:
+        mem.put("parent.html", "<v" + str(u) + ">{% block body %}{% endblock %}</v" + str(u) + ">")
+        tc: Template = glyph.api.get_template("child.html", env)
+        got: str = glyph.api.render(tc, glyph.api.context_from_json('{"x":"&"}'), env)
+        nox.test.assert_eq_str(got, "<v" + str(u) + "><span>&amp;</span></v" + str(u) + ">", "transitive invalidation #" + str(u))
+        u = u + 1
+
+def _noop_stream_sink(_chunk: str) -> bool:
+    return True
+
+def _never_cancel() -> bool:
+    return False
+
+def test_10k_loop_linear_streaming_writer() -> None:
+    mem: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(mem)
+    tpl: Template = glyph.api.compile_string(
+        "{% for i in range(0, 10000) %}<li>{{ i }}</li>{% endfor %}",
+        "loop10k.html",
+        env
+    )
+
+    budget: ResourceBudget = glyph.api.default_budget()
+    tracker: BudgetTracker = BudgetTracker(budget)
+    writer: GlyphWriter = glyph.api.streaming_writer(tracker, _noop_stream_sink, _never_cancel, 8192)
+    opts: RenderOptions = RenderOptions(OutputMode.Html, True, UndefinedPolicy.StrictUndefined, TrustTier.Trusted, budget, "en")
+
+    t0: int = nox.time.monotonic_ns()
+    res: RenderResult = glyph.api.render_to_writer(tpl, glyph.api.empty_context(), writer, opts, env)
+    writer.close()
+    dt_ms: int = (nox.time.monotonic_ns() - t0) // 1000000
+
+    nox.test.assert_true(res.completed, "10k streaming loop completed")
+    nox.test.assert_eq_int(res.loop_steps_used, 10000, "10k loop steps accounted")
+    nox.test.assert_eq_int(res.bytes_written, 128890, "10k loop exact byte count")
+    nox.test.assert_eq_int(writer.bytes_flushed, 128890, "10k loop flushed all bytes")
+    nox.test.assert_true(writer.flush_count >= 15, "10k loop used batched streaming flushes")
+    nox.test.assert_true(dt_ms < 10000, "10k streaming loop finishes cleanly in sub-10s (no O(n^2) blowup)")
+
+test_spawn_concurrent_renders_shared_frozen_env()
+test_64_mixed_mode_trust_locale_isolation()
+test_cache_eviction_and_transitive_invalidation_stress()
+test_10k_loop_linear_streaming_writer()

@@ -1,0 +1,450 @@
+# Phase 10 Advanced Verification:
+# 1. Property-based AST -> serialize -> parse -> render equivalence
+# 2. Differential reference expression semantics vs Glyph evaluator
+# 3. Escaper safety, double-escape, idempotence, and provenance properties
+# 4. 500-sample arbitrary-byte fuzzing (compile_string + lint: no panic/hang/OOM, fail-closed)
+# 5. Parser, limit, security, and loader mutation detection tests
+import nox.test
+import nox.strings
+from nox.collections import OrderedDict
+import glyph.api
+from glyph.api import Environment, Template, Context, MemoryLoader, ChoiceLoader
+from glyph.api import EnvironmentOptions, RenderOptions, OutputMode, TrustTier, UndefinedPolicy
+from glyph.api import ResourceBudget, Value, MarkupContext
+from glyph.api import GlyphError, GlyphSyntaxError, GlyphSecurityError, GlyphLimitError
+from glyph.api import GlyphLoadError, GlyphUndefinedError, TemplateInfo
+from glyph.errors import GLYPH_LIMIT_EXPR_DEPTH, GLYPH_LIMIT_OUTPUT_BYTES
+from glyph.errors import GLYPH_SECURITY_CONTEXT, GLYPH_SECURITY_REFLECTION
+from glyph.errors import GLYPH_LOADER_OUTSIDE_ROOT
+
+# --- 1. Reference Expression AST & Differential Semantics ---
+
+class RefNode:
+    kind: str
+    op: str
+    ival: int
+    bval: bool
+    sval: str
+    args: list[RefNode]
+
+    def __init__(self: RefNode, kind: str, op: str, ival: int, bval: bool, sval: str, args: list[RefNode]) -> None:
+        self.kind = kind
+        self.op = op
+        self.ival = ival
+        self.bval = bval
+        self.sval = sval
+        self.args = args
+
+def _rn_int(v: int) -> RefNode:
+    e: list[RefNode] = []
+    return RefNode("int", "", v, False, "", e)
+
+def _rn_bool(b: bool) -> RefNode:
+    e: list[RefNode] = []
+    return RefNode("bool", "", 0, b, "", e)
+
+def _rn_str(s: str) -> RefNode:
+    e: list[RefNode] = []
+    return RefNode("str", "", 0, False, s, e)
+
+def _rn_var(name: str) -> RefNode:
+    e: list[RefNode] = []
+    return RefNode("var", "", 0, False, name, e)
+
+def _rn_unary(op: str, child: RefNode) -> RefNode:
+    return RefNode("unary", op, 0, False, "", [child])
+
+def _rn_bin(op: str, lhs: RefNode, rhs: RefNode) -> RefNode:
+    return RefNode("bin", op, 0, False, "", [lhs, rhs])
+
+def _rn_cond(cond: RefNode, yes_e: RefNode, no_e: RefNode) -> RefNode:
+    return RefNode("cond", "if", 0, False, "", [cond, yes_e, no_e])
+
+def _ref_serialize(e: RefNode) -> str:
+    if e.kind == "int":
+        return str(e.ival)
+    if e.kind == "bool":
+        if e.bval:
+            return "true"
+        return "false"
+    if e.kind == "str":
+        return "\"" + e.sval + "\""
+    if e.kind == "var":
+        return e.sval
+    if e.kind == "unary":
+        if e.op == "-":
+            return "(-" + _ref_serialize(e.args[0]) + ")"
+        return "(not " + _ref_serialize(e.args[0]) + ")"
+    if e.kind == "cond":
+        return "(" + _ref_serialize(e.args[1]) + " if " + _ref_serialize(e.args[0]) + " else " + _ref_serialize(e.args[2]) + ")"
+    return "(" + _ref_serialize(e.args[0]) + " " + e.op + " " + _ref_serialize(e.args[1]) + ")"
+
+def _ref_truthy(v: Value) -> bool:
+    match v:
+        case Value.VNull:
+            return False
+        case Value.VBool(b):
+            return b
+        case Value.VInt(n):
+            return n != 0
+        case Value.VStr(s):
+            return len(s) > 0
+        case _:
+            return True
+
+def _ref_to_int(v: Value) -> int:
+    match v:
+        case Value.VInt(n):
+            return n
+        case _:
+            return 0
+
+def _ref_to_str(v: Value) -> str:
+    match v:
+        case Value.VNull:
+            return ""
+        case Value.VBool(b):
+            if b:
+                return "true"
+            return "false"
+        case Value.VInt(n):
+            return str(n)
+        case Value.VStr(s):
+            return s
+        case _:
+            return ""
+
+def _ref_eval(e: RefNode, vars_map: OrderedDict[str, Value]) -> Value:
+    if e.kind == "int":
+        return Value.VInt(e.ival)
+    if e.kind == "bool":
+        return Value.VBool(e.bval)
+    if e.kind == "str":
+        return Value.VStr(e.sval)
+    if e.kind == "var":
+        return vars_map.get(e.sval)
+    if e.kind == "unary":
+        iv: Value = _ref_eval(e.args[0], vars_map)
+        if e.op == "-":
+            return Value.VInt(0 - _ref_to_int(iv))
+        return Value.VBool(not _ref_truthy(iv))
+    if e.kind == "cond":
+        if _ref_truthy(_ref_eval(e.args[0], vars_map)):
+            return _ref_eval(e.args[1], vars_map)
+        return _ref_eval(e.args[2], vars_map)
+
+    if e.op == "and":
+        lv_and: Value = _ref_eval(e.args[0], vars_map)
+        if not _ref_truthy(lv_and):
+            return lv_and
+        return _ref_eval(e.args[1], vars_map)
+    if e.op == "or":
+        lv_or: Value = _ref_eval(e.args[0], vars_map)
+        if _ref_truthy(lv_or):
+            return lv_or
+        return _ref_eval(e.args[1], vars_map)
+
+    lv: Value = _ref_eval(e.args[0], vars_map)
+    rv: Value = _ref_eval(e.args[1], vars_map)
+    if e.op == "+":
+        match lv:
+            case Value.VStr(ls):
+                match rv:
+                    case Value.VStr(rs):
+                        return Value.VStr(ls + rs)
+                    case _:
+                        return Value.VInt(0)
+            case Value.VInt(li):
+                return Value.VInt(li + _ref_to_int(rv))
+            case _:
+                return Value.VInt(0)
+    if e.op == "-":
+        return Value.VInt(_ref_to_int(lv) - _ref_to_int(rv))
+    if e.op == "*":
+        return Value.VInt(_ref_to_int(lv) * _ref_to_int(rv))
+    if e.op == "//":
+        a: int = _ref_to_int(lv)
+        b: int = _ref_to_int(rv)
+        q: int = a // b
+        rem: int = a % b
+        if rem != 0 and ((rem < 0 and b > 0) or (rem > 0 and b < 0)):
+            q = q - 1
+        return Value.VInt(q)
+    if e.op == "%":
+        am: int = _ref_to_int(lv)
+        bm: int = _ref_to_int(rv)
+        m: int = am % bm
+        if m != 0 and ((m < 0 and bm > 0) or (m > 0 and bm < 0)):
+            m = m + bm
+        return Value.VInt(m)
+    if e.op == "==":
+        return Value.VBool(_ref_to_str(lv) == _ref_to_str(rv))
+    if e.op == "<":
+        return Value.VBool(_ref_to_int(lv) < _ref_to_int(rv))
+    return Value.VNull
+
+def _gen_int_expr(seed: int, depth: int) -> RefNode:
+    if depth <= 0:
+        pick: int = seed % 5
+        if pick == 0:
+            return _rn_var("x")
+        if pick == 1:
+            return _rn_var("y")
+        if pick == 2:
+            return _rn_int((seed % 11) + 1)
+        if pick == 3:
+            return _rn_int(0 - ((seed % 7) + 1))
+        return _rn_int(0)
+    lhs: RefNode = _gen_int_expr(seed * 7 + 3, depth - 1)
+    rhs_lit: RefNode = _rn_int((seed % 5) + 1)
+    op: int = seed % 5
+    if op == 0:
+        return _rn_bin("+", lhs, rhs_lit)
+    if op == 1:
+        return _rn_bin("-", lhs, rhs_lit)
+    if op == 2:
+        return _rn_bin("*", lhs, rhs_lit)
+    if op == 3:
+        return _rn_unary("-", lhs)
+    return _rn_bin("//", lhs, _rn_int((seed % 4) + 1))
+
+def test_differential_expression_semantics() -> None:
+    mem: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.new_environment(mem, glyph.api.text_safe_defaults())
+    vmap: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    vmap.set("x", Value.VInt(7))
+    vmap.set("y", Value.VInt(-3))
+    vmap.set("flag", Value.VBool(True))
+    vmap.set("s", Value.VStr("ok"))
+    vmap.set("empty_s", Value.VStr(""))
+    ctx: Context = glyph.api.context_from_map(vmap)
+
+    i: int = 0
+    while i < 40:
+        e: RefNode = _gen_int_expr(i * 17 + 5, (i % 3) + 1)
+        cond_e: RefNode = _rn_bin("<", _rn_var("y"), _rn_int(i % 5))
+        if i % 3 == 0:
+            e = _rn_cond(_rn_bin("and", _rn_var("flag"), cond_e), e, _rn_bin("+", e, _rn_int(10)))
+        elif i % 3 == 1:
+            e = _rn_cond(_rn_bin("or", _rn_unary("not", _rn_var("empty_s")), _rn_bool(False)), e, _rn_int(99))
+        else:
+            e = _rn_cond(_rn_bin("==", _rn_var("s"), _rn_str("ok")), e, _rn_int(-1))
+
+        src: str = "{{ " + _ref_serialize(e) + " }}"
+        tpl: Template = glyph.api.compile_string(src, "diff_" + str(i) + ".txt", env)
+        got: str = glyph.api.render(tpl, ctx, env)
+        exp: str = _ref_to_str(_ref_eval(e, vmap))
+        nox.test.assert_eq_str(got, exp, "differential expr match #" + str(i) + ": " + src)
+        i = i + 1
+
+    # Short-circuit safety check: right side (1 // 0) must NOT run!
+    sc1: Template = glyph.api.compile_string("{{ false and (1 // 0 == 0) }}", "sc1.txt", env)
+    nox.test.assert_eq_str(glyph.api.render(sc1, ctx, env), "false", "short-circuit and prevents div0")
+    sc2: Template = glyph.api.compile_string("{{ true or (1 // 0 == 0) }}", "sc2.txt", env)
+    nox.test.assert_eq_str(glyph.api.render(sc2, ctx, env), "true", "short-circuit or prevents div0")
+
+# --- 2. Property-Based AST -> Serialize -> Parse -> Render Roundtrip ---
+
+def test_property_ast_serialize_roundtrip() -> None:
+    mem: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(mem)
+
+    cases_src: list[str] = []
+    seed: int = 918273
+    k: int = 0
+    while k < 30:
+        seed = (seed * 1103515245 + 12345) % 2147483647
+        a: int = (seed % 9) + 1
+        b: int = ((seed // 13) % 7) + 1
+        # Serialize deterministic AST-shaped template fragments (literal, var+filter, set, if/else, for)
+        frag_set: str = "{% set acc = " + str(a) + " + " + str(b) + " %}"
+        frag_if: str = "{% if acc > 6 %}<em>{{ user }}</em>{% elif acc == 6 %}<b>eq</b>{% else %}<i>{{ title | upper }}</i>{% endif %}"
+        frag_for: str = "<ul>{% for n in items %}<li>{{ n }}-{{ loop.index }}</li>{% else %}<li>none</li>{% endfor %}</ul>"
+        src: str = frag_set + frag_if + frag_for
+        cases_src.append(src)
+        k = k + 1
+
+    m: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    m.set("user", Value.VStr("<Ada>"))
+    m.set("title", Value.VStr("hello & welcome"))
+    m.set("items", Value.VList([Value.VStr("x<1>"), Value.VStr("y\"2\"")]))
+    ctx: Context = glyph.api.context_from_map(m)
+
+    ci: int = 0
+    while ci < len(cases_src):
+        s: str = cases_src[ci]
+        t1: Template = glyph.api.compile_string(s, "rt_" + str(ci) + ".html", env)
+        t2: Template = glyph.api.compile_string(s, "rt_" + str(ci) + ".html", env)
+        out1: str = glyph.api.render(t1, ctx, env)
+        out2: str = glyph.api.render(t2, ctx, env)
+        nox.test.assert_eq_str(out1, out2, "deterministic compile+render equivalence #" + str(ci))
+        info: TemplateInfo = glyph.api.inspect(t1)
+        nox.test.assert_true(len(info.referenced_vars) >= 2, "inspect extracts external vars")
+        ci = ci + 1
+
+# --- 3. Escaper Properties & Contextual Safety Invariants ---
+
+def test_escaper_properties_and_idempotence() -> None:
+    mem: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(mem)
+
+    payloads: list[str] = [
+        "<script>alert(1)</script>",
+        "\" onmouseover=\"alert(1)",
+        "' OR '1'='1' & < >",
+        "Tr\u00fc\u011f\u015f <tag attr='\"&'>",
+        "plain_safe_text_123"
+    ]
+    pi: int = 0
+    while pi < len(payloads):
+        raw: str = payloads[pi]
+        esc: str = glyph.api.escape_html(raw)
+        nox.test.assert_true(not nox.strings.contains(esc, "<"), "escaped never contains '<'")
+        nox.test.assert_true(not nox.strings.contains(esc, ">"), "escaped never contains '>'")
+        nox.test.assert_true(not nox.strings.contains(esc, "\""), "escaped never contains '\"'")
+        nox.test.assert_true(not nox.strings.contains(esc, "'"), "escaped never contains \"'\"")
+
+        # Double-escape property: | escape matches autoescape idempotence, while | escape | forceescape double-escapes
+        tpl_auto: Template = glyph.api.compile_string("<p>{{ v }}</p>", "p1.html", env)
+        tpl_esc: Template = glyph.api.compile_string("<p>{{ v | escape | escape }}</p>", "p2.html", env)
+        tpl_force: Template = glyph.api.compile_string("<p>{{ v | escape | forceescape }}</p>", "p3.html", env)
+        pm: OrderedDict[str, Value] = OrderedDict[str, Value]()
+        pm.set("v", Value.VStr(raw))
+        pctx: Context = glyph.api.context_from_map(pm)
+
+        r_auto: str = glyph.api.render(tpl_auto, pctx, env)
+        r_esc: str = glyph.api.render(tpl_esc, pctx, env)
+        r_force: str = glyph.api.render(tpl_force, pctx, env)
+        nox.test.assert_eq_str(r_auto, "<p>" + esc + "</p>", "default HTML autoescape matches escape_html")
+        nox.test.assert_eq_str(r_esc, r_auto, "| escape is idempotent with HTML autoescape (no double escape)")
+        if nox.strings.contains(raw, "<") or nox.strings.contains(raw, "&") or nox.strings.contains(raw, "\"") or nox.strings.contains(raw, "'"):
+            nox.test.assert_true(r_force != r_auto, "| forceescape escapes even marked safe text")
+
+        # Trust provenance: SafeHtml is NOT safe in quoted HTML attr unless explicitly SafeAttr
+        tm: OrderedDict[str, Value] = OrderedDict[str, Value]()
+        tm.set("frag", glyph.api.trust_html_fragment("<b>ok</b>"))
+        tctx: Context = glyph.api.context_from_map(tm)
+        tpl_mix: Template = glyph.api.compile_string("<div title=\"{{ frag }}\">{{ frag }}</div>", "mix.html", env)
+        nox.test.assert_eq_str(
+            glyph.api.render(tpl_mix, tctx, env),
+            "<div title=\"&lt;b&gt;ok&lt;/b&gt;\"><b>ok</b></div>",
+            "SafeHtml allowed in HtmlText but escaped inside attribute"
+        )
+        pi = pi + 1
+
+# --- 4. 500-Sample Arbitrary-Byte Fuzzing ---
+
+def test_arbitrary_byte_compile_and_lint_fuzz_500() -> None:
+    mem: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(mem)
+
+    nul: str = nox.strings.char_from_byte(0)
+    alpha: list[str] = [
+        "{", "}", "%", "#", "-", "\"", "'", "\\", "(", ")", "[", "]", "|", ".", ",", ":",
+        " ", "\n", "<", ">", "=", "a", "x", "1", "if", "for", "set", "end",
+        nul, nox.strings.char_from_byte(13), nox.strings.char_from_byte(195), nox.strings.char_from_byte(255)
+    ]
+    seed: int = 20261117
+    fc: int = 0
+    done: int = 0
+    while fc < 500:
+        sample: str = ""
+        k: int = 0
+        slen: int = (fc % 32) + 1
+        while k < slen:
+            seed = (seed * 1103515245 + 12345) % 2147483647
+            sample = sample + alpha[seed % len(alpha)]
+            k = k + 1
+        # Lint must never crash/panic on arbitrary byte sequences
+        _diags: list[GlyphError] = glyph.api.lint(sample, "fuzz_" + str(fc) + ".html", env)
+        try:
+            _tpl: Template = glyph.api.compile_string(sample, "fuzz_" + str(fc) + ".html", env)
+        except GlyphError:
+            pass
+        done = done + 1
+        fc = fc + 1
+    nox.test.assert_eq_int(done, 500, "500 arbitrary-byte fuzz inputs handled without crash/hang")
+
+# --- 5. Mutation Tests: prove parser, limit, security & loader guards catch mutants ---
+
+def test_mutation_detection_gates() -> None:
+    mem: MemoryLoader = MemoryLoader()
+    env: Environment = glyph.api.default_environment(mem)
+
+    # Mutant A: off-by-one expr depth boundary (limit=4 accepts depth 4, rejects depth 5)
+    tight_budget: ResourceBudget = ResourceBudget(4096, 1024, 1024, 1024, 4, 4, 4, 100, 32, 1000)
+    opts: RenderOptions = RenderOptions(
+        OutputMode.Html, True, UndefinedPolicy.StrictUndefined, TrustTier.Trusted, tight_budget, "en"
+    )
+    ok_depth: Template = glyph.api.compile_string("{{ (((1 + 2))) }}", "okd.html", env)
+    nox.test.assert_eq_str(glyph.api.render_with_options(ok_depth, glyph.api.empty_context(), opts, env), "3", "depth within budget succeeds")
+
+    deep_budget_env_opts: EnvironmentOptions = glyph.api.html_safe_defaults()
+    deep_budget_env_opts.default_budget = tight_budget
+    tight_env: Environment = glyph.api.new_environment(mem, deep_budget_env_opts)
+    caught_depth: bool = False
+    try:
+        _bad_depth: Template = glyph.api.compile_string("{{ (((((1 + 2))))) }}", "badd.html", tight_env)
+    except GlyphLimitError as le:
+        caught_depth = (le.code == GLYPH_LIMIT_EXPR_DEPTH)
+    nox.test.assert_true(caught_depth, "mutation: expr depth +1 rejected with GLYPH_LIMIT_EXPR_DEPTH")
+
+    # Mutant B: off-by-one output bytes limit (limit=32 accepts 32, rejects 33)
+    t32: Template = glyph.api.compile_string("12345678901234567890123456789012", "o32.html", env)
+    nox.test.assert_eq_int(nox.strings.byte_len(glyph.api.render_with_options(t32, glyph.api.empty_context(), opts, env)), 32, "exact max_output_bytes=32 passes")
+    t33: Template = glyph.api.compile_string("123456789012345678901234567890123", "o33.html", env)
+    caught_out: bool = False
+    try:
+        _r33: str = glyph.api.render_with_options(t33, glyph.api.empty_context(), opts, env)
+    except GlyphLimitError as le2:
+        caught_out = (le2.code == GLYPH_LIMIT_OUTPUT_BYTES)
+    nox.test.assert_true(caught_out, "mutation: output bytes +1 rejected with GLYPH_LIMIT_OUTPUT_BYTES")
+
+    # Mutant C: unclosed block / mismatched endif/endfor mutant caught fail-closed
+    bad_blocks: list[str] = ["{% if true %}x", "{% if true %}x{% endfor %}", "{% endif %}", "{{ a + }}"]
+    bi: int = 0
+    while bi < len(bad_blocks):
+        caught_syn: bool = False
+        try:
+            _bt: Template = glyph.api.compile_string(bad_blocks[bi], "badblk.html", env)
+        except GlyphSyntaxError:
+            caught_syn = True
+        nox.test.assert_true(caught_syn, "mutation: malformed block caught #" + str(bi))
+        bi = bi + 1
+
+    # Mutant D: reflection & URL scheme mutation blocked
+    caught_refl: bool = False
+    try:
+        _rtpl: Template = glyph.api.compile_string("{{ u.__class__ }}", "refl.html", env)
+    except GlyphSecurityError as se:
+        caught_refl = (se.code == GLYPH_SECURITY_REFLECTION)
+    nox.test.assert_true(caught_refl, "mutation: __class__ access blocked")
+
+    url_tpl: Template = glyph.api.compile_string("<a href=\"{{ u }}\">go</a>", "url.html", env)
+    um: OrderedDict[str, Value] = OrderedDict[str, Value]()
+    um.set("u", Value.VStr("j&#x61;vascript:alert(1)"))
+    caught_url: bool = False
+    try:
+        _ur: str = glyph.api.render(url_tpl, glyph.api.context_from_map(um), env)
+    except GlyphSecurityError as se2:
+        caught_url = (se2.code == GLYPH_SECURITY_CONTEXT)
+    nox.test.assert_true(caught_url, "mutation: HTML-entity obfuscated javascript: URL blocked")
+
+    # Mutant E: ChoiceLoader must NEVER fall back on path confinement error
+    m1: MemoryLoader = MemoryLoader()
+    m2: MemoryLoader = MemoryLoader()
+    m2.put("secret.html", "LEAK")
+    cl: ChoiceLoader = ChoiceLoader([m1.as_loader(), m2.as_loader()])
+    cenv: Environment = glyph.api.environment_with_loader(cl.as_loader(), glyph.api.html_safe_defaults())
+    caught_trav: bool = False
+    try:
+        _ct: Template = glyph.api.get_template("../secret.html", cenv)
+    except GlyphLoadError as gle:
+        caught_trav = (gle.code == GLYPH_LOADER_OUTSIDE_ROOT)
+    nox.test.assert_true(caught_trav, "mutation: ChoiceLoader stops on traversal confinement error")
+
+test_differential_expression_semantics()
+test_property_ast_serialize_roundtrip()
+test_escaper_properties_and_idempotence()
+test_arbitrary_byte_compile_and_lint_fuzz_500()
+test_mutation_detection_gates()

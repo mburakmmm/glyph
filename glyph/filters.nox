@@ -129,9 +129,13 @@ class FilterRegistry:
         self.frozen = False
 
     def begin_use(self: FilterRegistry) -> None:
+        if self.frozen:
+            return
         self.active_renders = self.active_renders + 1
 
     def end_use(self: FilterRegistry) -> None:
+        if self.frozen:
+            return
         if self.active_renders > 0:
             self.active_renders = self.active_renders - 1
 
