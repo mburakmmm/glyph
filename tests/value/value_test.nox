@@ -167,3 +167,34 @@ try:
 except GlyphLimitError as le2:
     out_lim = (le2.code == GLYPH_LIMIT_OUTPUT_BYTES)
 nox.test.assert_true(out_lim, "output bytes budget enforced")
+
+# 8. nox.json.pos_* edge cases: scalar root, 1.0/1e2 float vs 64-bit int, oversized int64 overflow, reflection filter
+match from_json_str("42", sp):
+    case Value.VInt(sv):
+        nox.test.assert_eq_int(sv, 42, "scalar JSON root preserved")
+    case _:
+        nox.test.assert_true(False, "expected VInt for scalar JSON")
+
+edge_map: Value = from_json_str('{"f1":1.0,"f2":1e2,"neg":-99,"s":"ok","__dict__":"bad"}', sp)
+match edge_map:
+    case Value.VMap(em):
+        match map_get(em, "f1", sp):
+            case Value.VFloat(f1v):
+                nox.test.assert_true(f1v == 1.0, "1.0 stays VFloat under pos_*")
+            case _:
+                nox.test.assert_true(False, "1.0 should remain VFloat")
+        match map_get(em, "f2", sp):
+            case Value.VFloat(f2v):
+                nox.test.assert_true(f2v == 100.0, "1e2 stays VFloat under pos_*")
+            case _:
+                nox.test.assert_true(False, "1e2 should remain VFloat")
+        nox.test.assert_true(not em.contains("__dict__"), "forbidden key stripped in pos_* map")
+    case _:
+        nox.test.assert_true(False, "expected VMap for edge JSON")
+
+ovf_json: bool = False
+try:
+    _big_bad: Value = from_json_str('{"huge":9223372036854775808}', sp)
+except GlyphTypeError as jte:
+    ovf_json = (jte.code == GLYPH_EVAL_OVERFLOW)
+nox.test.assert_true(ovf_json, "int64 overflow caught under pos_* traversal")

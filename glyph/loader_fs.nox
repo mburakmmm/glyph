@@ -9,6 +9,8 @@ from glyph.errors import GlyphLoadError, empty_span, GLYPH_LOADER_NOT_FOUND, GLY
 from glyph.options import TrustTier
 from glyph.loader import SourceRecord, Loader, compute_fingerprint, validate_logical_template_name
 
+__all__: list[str] = ["FilesystemLoader"]
+
 def _components_start_with(full: list[str], base: list[str]) -> bool:
     if len(full) < len(base):
         return False

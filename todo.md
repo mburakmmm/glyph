@@ -356,3 +356,13 @@ Her PoC derlenip `noxc check` + `noxc test` ile doğrulanmış ve sonucu `docs/c
 - [ ] Async I/O writer / platform-bağımlı async cancellation (`v2.0` adayı; mevcut senkron `streaming_writer` `v0.6.0`'dan beri kooperatif iptal ve backpressure destekler).
 - [x] **ADR-0011:** Ahead-of-Time (AOT) `TemplateAst -> typed .nox` source codegen fizibilite ve çalışan PoC (`tools/aot_codegen.nox`, compiler yaması olmadan).
 - [x] **ADR-0012 Güncellemesi:** Hostile multi-tenant sınırları ve WASM/process host izolasyon dokümantasyonu + `TrustTier`/`PackageLoader`/`TelemetryHook` korumaları.
+
+---
+
+## Faz 12 — `v1.2.0`: NOX `2.2.38` Entegrasyonu & Sertleştirme
+
+- [x] Toolchain & manifest uyumu: `v2.2.38` CI/Release pinleri, `nox.json` `"source": "nox"` + `"bin": {"name": "glyph", "path": "cli/main.nox"}`, `docs/compatibility.md` matris güncellemesi.
+- [x] `nox.json.pos_*` sıfır-düğüm imleç gezinmesi (`glyph/value.nox`) + `JsonWriter` tanılama çıktısı (`glyph/diagnostics.nox`).
+- [x] Skaler `match` (`glyph/safety.nox`, `glyph/diagnostics.nox`, `cli/app.nox`) ve yaprak/barındırılan modüllerde `__all__` derleme-zamanı API koruması.
+- [x] `nox.wasm.Limits` (`strict_limits()`) çok kiracılı sandbox host örneği (`examples/wasm_multitenant_host/main.nox`) ve `nox.safehttp` uzaktan şablon yükleyici tarifi (`docs/loaders.md`).
+- [x] `noxc 2.2.38` 3-tur benchmark yenilemesi (`docs/performance.md`) ve tam çapraz-platform CI/Release/`noxc publish`.

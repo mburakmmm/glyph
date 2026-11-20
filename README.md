@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/mburakmmm/glyph/actions/workflows/ci.yml/badge.svg)](https://github.com/mburakmmm/glyph/actions/workflows/ci.yml)
 [![Release](https://github.com/mburakmmm/glyph/actions/workflows/release.yml/badge.svg)](https://github.com/mburakmmm/glyph/actions/workflows/release.yml)
-[![NOX Version](https://img.shields.io/badge/NOX-%E2%89%A5%202.1.186-38bdf8.svg)](https://github.com/mburakmmm/nox-lang)
+[![NOX Version](https://img.shields.io/badge/NOX-%E2%89%A5%202.2.38-38bdf8.svg)](https://github.com/mburakmmm/nox-lang)
 [![Platforms](https://img.shields.io/badge/Targets-Linux%20x64%20%7C%20Linux%20ARM64%20%7C%20macOS%20ARM64%20%7C%20Windows%20x64%20%7C%20WASM-10b981.svg)](#cross-platform-ci--targets)
 [![Security](https://img.shields.io/badge/Security-Fail--Closed-ef4444.svg)](SECURITY.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-64748b.svg)](LICENSE)
@@ -24,7 +24,7 @@
 
 ---
 
-> **Current Release (`v1.1.0`, Phases 0–11 Complete):** Core engine, contextual HTML/URL/JS escaping, 50+ pure filters/tests, i18n catalogs & plural rules, 6 output profiles, streaming `GlyphWriter`, `{% with %}`/`{% filter %}` blocks, `{% component %}`/`{% slot %}` DSL, `namespace()`, pure constant folding, `PackageLoader`/`ReadOnlyAdapterLoader`, `TelemetryHook`, opt-in **Nyx** / **Aether** / **Aura Export** adapters, `glyph` CLI, Tree-sitter grammar & AOT codegen PoC, and full property/fuzz/mutation/concurrency gates verified across **Linux x86_64**, **Linux ARM64**, **macOS ARM64**, **Windows x86_64**, and **`wasm32-freestanding`**.
+> **Current Release (`v1.2.0`, Phases 0–12 Complete):** Core engine, contextual HTML/URL/JS escaping, zero-node `nox.json.pos_*` context traversal, 50+ pure filters/tests, i18n catalogs & plural rules, 6 output profiles, streaming `GlyphWriter`, `{% with %}`/`{% filter %}` blocks, `{% component %}`/`{% slot %}` DSL, `namespace()`, pure constant folding, `PackageLoader`/`ReadOnlyAdapterLoader`, `TelemetryHook`, `__all__` API boundary enforcement, `nox.wasm.Limits` multi-tenant runner, opt-in **Nyx** / **Aether** / **Aura Export** adapters, `glyph` CLI (`noxc install` ready), Tree-sitter grammar & AOT codegen PoC verified across **Linux x86_64**, **Linux ARM64**, **macOS ARM64**, **Windows x86_64**, and **`wasm32-freestanding`**.
 
 ---
 
@@ -134,7 +134,7 @@ Exit codes are deterministic: `0` OK, `2` usage, `3` syntax, `4` loader, `5` sec
 
 ## Cross-Platform CI & Targets
 
-Verified against **`noxc 2.1.186`** across:
+Verified against **`noxc 2.2.38`** across:
 
 | Target | Runner | Backends & Verification |
 |---|---|---|
@@ -157,7 +157,9 @@ noxc run examples/nyx/main.nox
 noxc run examples/aether/main.nox
 noxc run examples/static_site/main.nox
 noxc run examples/wasm_memory/main.nox
+noxc run examples/wasm_multitenant_host/main.nox
 noxc run examples/aura_export/main.nox
+noxc install github.com/mburakmmm/glyph
 noxc sbom . -o glyph.sbom.json
 noxc sign check .
 ```
@@ -180,6 +182,7 @@ noxc sign check .
 | **Phase 9** | `v0.7.0` | `ADR-0010`, `integrations/nyx`, `integrations/aether`, `glyph` CLI, diagnostics | Done |
 | **Phase 10** | `v1.0.0` **(STABLE)** | Fuzzing, property/differential/concurrency tests, benchmarks, Release Gate | Done |
 | **Phase 11** | `v1.1.0` | `with`/`filter` blocks, `component`/`slot`, `namespace()`, const-folding, telemetry, Aura export, Tree-sitter & AOT PoC | Done (`tests/advanced/`) |
+| **Phase 12** | `v1.2.0` | NOX `2.2.38` alignment: `pos_*` JSON, `JsonWriter`, scalar `match`, `__all__`, `nox.json` `source`/`bin`, `nox.wasm.Limits` | Done (`tests/value/`, `examples/wasm_multitenant_host/`) |
 
 ---
 
@@ -196,7 +199,7 @@ noxc sign check .
 | [docs/loaders.md](docs/loaders.md) | Canonical root confinement, `ChoiceLoader`/`PrefixLoader` & cache keys |
 | [docs/integration-nyx.md](docs/integration-nyx.md) · [docs/integration-aether.md](docs/integration-aether.md) | Nyx SSR & Aether HTTP adapter guides |
 | [docs/performance.md](docs/performance.md) · [docs/testing.md](docs/testing.md) | 3-round reproducible benchmarks, O(n) writer scaling & verification matrix |
-| [docs/compatibility.md](docs/compatibility.md) · [docs/tooling.md](docs/tooling.md) | Verified `noxc 2.1.186` matrix, Tree-sitter grammar, CLI & telemetry tooling |
+| [docs/compatibility.md](docs/compatibility.md) · [docs/tooling.md](docs/tooling.md) | Verified `noxc 2.2.38` matrix, Tree-sitter grammar, CLI & telemetry tooling |
 | [docs/adr/](docs/adr/) | Architecture Decision Records (`ADR-0001` – `ADR-0013`) |
 | [CONTRIBUTING.md](CONTRIBUTING.md) · [CHANGELOG.md](CHANGELOG.md) | Contribution workflow & version history |
 

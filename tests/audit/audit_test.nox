@@ -31,8 +31,8 @@ def _make_filter(suffix: str) -> (str) -> str:
     return apply_suffix
 
 # 1. Core package import & version
-nox.test.assert_eq_str(glyph.api.engine_version(), "1.1.0", "engine version")
-nox.test.assert_eq_str(glyph.api.min_nox_version(), "2.1.186", "min nox version")
+nox.test.assert_eq_str(glyph.api.engine_version(), "1.2.0", "engine version")
+nox.test.assert_eq_str(glyph.api.min_nox_version(), "2.2.38", "min nox version")
 
 # 2. Enum Value + OrderedDict + list[Value] + match exhaustiveness
 entries: OrderedDict[str, Value] = OrderedDict[str, Value]()
@@ -101,3 +101,17 @@ try:
 except PathError as pe:
     escaped = True
 nox.test.assert_true(escaped, "safe_join rejects parent traversal")
+
+# 10. noxc 2.2.38 pos_* JSON cursor & scalar match checks
+pos_r: int = nox.json.pos_root(jv)
+pos_big_p: int = nox.json.pos_get(jv, pos_r, "big")
+nox.test.assert_eq_str(nox.json.pos_dump(jv, pos_big_p), "9007199254740993", "pos_dump preserves exact integer text")
+def _audit_scalar_match(code: int) -> str:
+    match code:
+        case 0:
+            return "zero"
+        case 1 | 2:
+            return "low"
+        case _:
+            return "other"
+nox.test.assert_eq_str(_audit_scalar_match(2), "low", "scalar int match works in 2.2.38")

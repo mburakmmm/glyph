@@ -1,6 +1,6 @@
 # Glyph Public API Reference (`docs/api.md`)
 
-> **Version:** `1.1.0` (STABLE)  
+> **Version:** `1.2.0` (STABLE, `noxc >= 2.2.38`)  
 > **Entry Module:** `import glyph.api`  
 > **Stability Legend (`AGENTS.md` §23):**
 > - **`Stable`**: Frozen for `v1.x` under SemVer; breaking signature or security-default changes require a MAJOR release and deprecation window.
@@ -36,7 +36,7 @@
 
 - `empty_context() -> Context`
 - `context_from_map(entries: OrderedDict[str, Value]) -> Context`
-- `context_from_json(raw: str) -> Context` — Parses JSON into `Value` (preserving 64-bit integer precision; never marks JSON strings as `VTrustedMarkup`).
+- `context_from_json(raw: str) -> Context` — Parses JSON into `Value` via zero-node `nox.json.pos_*` cursor traversal (`v1.2.0`; preserves 64-bit integer precision; never marks JSON strings as `VTrustedMarkup`).
 - `escape_html(text: str) -> str` — Escapes `&`, `<`, `>`, `"`, `'` and rejects NUL bytes in HTML output.
 - `trust_html_fragment(html: str) -> Value` — Promotes host-verified HTML to `MarkupContext.SafeHtml` (still downgraded/escaped outside `HtmlText` and stripped under `TrustTier.Restricted`).
 - `trust_attr_value(attr: str) -> Value` — Promotes host-verified attribute content to `MarkupContext.SafeAttr`.
@@ -49,7 +49,9 @@
 - `Loader` (`load`), `MemoryLoader` (`put`, `put_with_trust`, `has`, `load`, `as_loader`)
 - `ChoiceLoader` & `PrefixLoader` (composite loaders; `ChoiceLoader` never falls back on security/path confinement errors)
 - `PackageLoader` & `ReadOnlyAdapterLoader` (`v1.1.0`: `@pkg/...` package prefix isolation, host adapter callback bridge without core I/O, trust clamping)
-- `FilesystemLoader` (`glyph/loader_fs.nox` — hosted-only, canonical root lock, path traversal & sibling-prefix protection)
+- `FilesystemLoader` (`glyph/loader_fs.nox`, `__all__`-enforced hosted module — canonical root lock, path traversal & sibling-prefix protection)
+- **Hosted Safe Remote Pattern:** Pair `ReadOnlyAdapterLoader` with `nox.safehttp.request` (`v2.2.38+`) for SSRF/DNS-rebinding-safe remote templates (see [docs/loaders.md](loaders.md)).
+- **Compile-Time API Enforcement:** Leaf/hosted/adapter modules (`loader_fs.nox`, `locale.nox`, `integrations/*/*.nox`) declare `__all__` (`v2.2.5+`) to prevent internal helper imports across module boundaries.
 - `environment_with_loader(loader: Loader, options: EnvironmentOptions) -> Environment`
 - `ParseCache`, `CompileCache`, `clear_cache(env)` (composite policy/version/locale/registry keys + transitive dependency invalidation)
 - `html_safe_defaults()`, `text_safe_defaults()`, `restricted_defaults()`, `default_render_options(env_opts)`

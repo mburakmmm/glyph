@@ -556,29 +556,31 @@ class HtmlContextTracker:
             i = i + 1
 
     def current_output_context(self: HtmlContextTracker) -> OutputContext:
-        if self.state == ST_DATA:
-            return OutputContext.HtmlText
-        if self.state == ST_RAW_SCRIPT:
-            return OutputContext.HtmlJs
-        if self.state == ST_RAW_STYLE:
-            return OutputContext.HtmlCss
-        if self.state == ST_COMMENT:
-            return OutputContext.HtmlComment
-        if self.state == ST_TAG_OPEN or self.state == ST_TAG_NAME or self.state == ST_BEFORE_ATTR_NAME or self.state == ST_ATTR_NAME or self.state == ST_AFTER_ATTR_NAME:
-            return OutputContext.HtmlTagOrAttrName
-        if self.state == ST_BEFORE_ATTR_VALUE or self.state == ST_ATTR_VAL_UNQUOTED:
-            return OutputContext.HtmlAttributeUnquoted
-        if self.state == ST_ATTR_VAL_DQ or self.state == ST_ATTR_VAL_SQ:
-            if _is_event_handler_attr(self.cur_attr):
-                return OutputContext.HtmlEventHandler
-            if self.cur_attr == "style":
-                return OutputContext.StyleAttribute
-            if _is_unsafe_raw_attr_name(self.cur_attr):
-                return OutputContext.HtmlRawUnsafeAttr
-            if _is_url_attribute_name(self.cur_attr):
-                return OutputContext.HtmlUrlAttribute
-            return OutputContext.HtmlAttributeQuoted
-        return OutputContext.Unknown
+        match self.state:
+            case 0:
+                return OutputContext.HtmlText
+            case 10:
+                return OutputContext.HtmlJs
+            case 11:
+                return OutputContext.HtmlCss
+            case 12:
+                return OutputContext.HtmlComment
+            case 1 | 2 | 3 | 4 | 5:
+                return OutputContext.HtmlTagOrAttrName
+            case 6 | 9:
+                return OutputContext.HtmlAttributeUnquoted
+            case 7 | 8:
+                if _is_event_handler_attr(self.cur_attr):
+                    return OutputContext.HtmlEventHandler
+                if self.cur_attr == "style":
+                    return OutputContext.StyleAttribute
+                if _is_unsafe_raw_attr_name(self.cur_attr):
+                    return OutputContext.HtmlRawUnsafeAttr
+                if _is_url_attribute_name(self.cur_attr):
+                    return OutputContext.HtmlUrlAttribute
+                return OutputContext.HtmlAttributeQuoted
+            case _:
+                return OutputContext.Unknown
 
 def _is_trusted_ctx_for(mctx: MarkupContext, expected: MarkupContext) -> bool:
     return mctx == expected

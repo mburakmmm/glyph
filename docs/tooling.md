@@ -1,21 +1,27 @@
 # Developer Tooling, Diagnostics, Source Maps & Telemetry
 
-> **Phase 11 (`v1.1.0`) Tooling Guide.**
+> **Version:** `1.2.0` (`noxc 2.2.38`+) Tooling Guide.
 
 ## 1. Glyph CLI (`cli/main.nox`)
 
-Build the standalone executable:
+Install globally via `nox.json` `"bin"` (`noxc 2.2.38+`) or build locally:
 
 ```bash
+noxc install github.com/mburakmmm/glyph
+# or locally:
 noxc build -o glyph-cli cli/main.nox
 ```
 
 Supported subcommands:
 
-- `glyph-cli check <file> [--strict|--restricted|--json]`: Parse + static validate without executing template logic.
-- `glyph-cli lint <file> [--json]`: Collect parse/security/nesting diagnostics with redacted logical paths.
-- `glyph-cli inspect <file> [--json]`: Print `TemplateInfo` (`referenced_vars`, `blocks`, `includes`, `macros`, `imports`, `extends_target`).
-- `glyph-cli render <file> [--data ctx.json] [--mode html|text|xml|markdown]`: Execute safely in bounded `Environment`.
+- `glyph check [--root <dir>] [--format human|json] <template>`: Parse + static validate without executing template logic.
+- `glyph lint [--root <dir>] [--format human|json] <template>`: Collect parse/security/nesting diagnostics with redacted logical paths.
+- `glyph render [--root <dir>] [--context <file.json> | --context-json <json>] [--mode html|text|xml|md|json|email_subject] [--trust trusted|restricted] [--locale <loc>] [--format human|json] [--out <file>] <template>`: Execute safely in bounded `Environment`.
+- `glyph inspect [--root <dir>] [--format human|json] <template>` & `glyph deps`: Print `TemplateInfo` and transitive dependencies.
+- `glyph bench [--root <dir>] [--iterations <n>] [--context-json <json>] [--format human|json] <template>`: Local micro-benchmark.
+- `glyph version [--format human|json]`
+
+For OS-level syscall confinement on macOS (`sandbox-exec`) or Linux (`bwrap`), run CLI workloads under `noxc run --sandbox --allow-read=<templates_dir> cli/main.nox -- ...`.
 
 Exit codes (from `glyph/diagnostics.nox`):
 

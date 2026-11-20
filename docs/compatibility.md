@@ -1,12 +1,12 @@
 # NOX Capability & Compatibility Matrix (`docs/compatibility.md`)
 
-> **Pinned Audit Compiler:** `noxc 2.1.186`  
-> **Audit Date:** 2026-11-16  
+> **Pinned Audit Compiler:** `noxc 2.2.38`  
+> **Audit Date:** 2026-11-20  
 > **Rule:** Every capability below is classified strictly by direct observation (`noxc check`, `noxc test`, `noxc build`, `noxc run`), never from memory or Python assumptions.
 
 ## Status Key
 
-- **verified**: Compiled and executed with `noxc 2.1.186` in `tests/audit/audit_test.nox` or CLI probes.
+- **verified**: Compiled and executed with `noxc 2.2.38` in `tests/audit/audit_test.nox` or CLI probes.
 - **experimental**: Exists in compiler/stdlib; requires deeper edge-case testing before stable reliance.
 - **unavailable**: Forbidden or unsupported in the noted profile/backend/syntax.
 - **planned**: Not yet probed; scheduled for its target phase.
@@ -17,16 +17,15 @@
 
 | Capability | Status | Evidence / Notes |
 |---|---|---|
-| `noxc check`, `noxc run`, `noxc test` | **verified** | `noxc 2.1.186` executes `*_test.nox` and exits 0 on pass (`tests/audit/audit_test.nox`). |
-| `--backend llvm` (default) | **verified** | Compiles and runs native Windows x64 binaries and tests. |
+| `noxc check`, `noxc run`, `noxc test` | **verified** | `noxc 2.2.38` executes `*_test.nox` and exits 0 on pass (`17/17` suites). |
+| `--backend llvm` (default) | **verified** | Compiles and runs native Windows x64, Linux, macOS, and WASM targets with 2.2.x string-fusion & collection speedups. |
 | `--backend qbe` | **verified** | `noxc check --backend qbe glyph/api.nox` reports `no type errors`. |
-| `--profile freestanding` | **verified** | Works with QBE backend; rejects hosted-only modules such as `nox.unicode`. |
+| `--profile freestanding` | **verified** | Works cleanly without hosted-only/C-backed modules (`nox.fs`, `nox.unicode`, `nox.yyjson`, `nox.xxhash`, `nox.pcre2`, `nox.zstd`). |
 | `--target wasm32-freestanding` / `wasm32-wasi` | **verified** | Compiles via LLVM backend (cannot combine `--backend qbe` or `--profile freestanding` with `wasm32-*`). |
-| `--strict-spawn-shared` | **verified** | `noxc check --strict-spawn-shared glyph/api.nox` passes. |
-| `noxc sbom` | **verified** | Emits deterministic CycloneDX 1.5 JSON SBOM from `nox.json`. |
+| `--strict-spawn-shared` | **verified** | `noxc check --strict-spawn-shared tests/concurrency/concurrency_and_stress_test.nox` passes. |
+| `noxc sbom` | **verified** | Emits CycloneDX 1.5 JSON SBOM (`nox:native=false`, `nox:bin=true`) from `nox.json` (`source: "nox"` + `bin`). |
 | `noxc sign check` | **verified** | Exits 0 on clean zero-dependency workspace. |
-| `nox.json` (`requires: []`) | **verified** | Zero-dependency manifest accepted by `noxc update` / `noxc fetch` / `noxc sbom`. |
-| `nox.json` `"bin"` field | **unavailable** (v2.1.186 caveat) | Probed `"bin"` string and object schemas (`{"entry":...}`, `{"name":...,"entry":...}`, `{"glyph":...}`) all trigger `InvalidManifest` alongside `"entry"` on `noxc 2.1.186`; CLI builds directly via `noxc build -o glyph cli/main.nox`. |
+| `nox.json` (`"source": "nox"`, `"bin": {"name","path"}`, `"requires": []`) | **verified** | Validated on `noxc 2.2.38`: `"bin"` requires `"path"` (not `"entry"`) alongside top-level `"entry"`; enables `noxc install` + pure `noxpkg` source badge. |
 
 ---
 
@@ -35,18 +34,19 @@
 | Feature | Status | Observed Behavior |
 |---|---|---|
 | `enum` tagged unions + `match` | **verified** | Recursive `enum Value` with `list[Value]` and `OrderedDict[str, Value]` compiles, runs, and enforces exhaustiveness. |
+| Scalar `match` (`int` / `str` / `bool`) | **verified** (v2.2.37+) | `match st:` on scalar ints/strings (`case 1 | 2:`, `case _:`) compiles & runs on LLVM and QBE. |
+| Opt-in `__all__` API boundary | **verified** (v2.2.5+) | Module-level `__all__: list[str] = [...]` blocks cross-module imports of unlisted functions/classes defined in that module at compile time. |
 | Closures & function types `(T) -> R` | **verified** | First-class nested closure functions compile and capture immutable outer locals. |
 | `class` inheritance for `Exception` | **verified** | Subclasses (`AuditSubError(AuditBaseError)`) can carry custom fields and be caught via base class. |
-| `except` type syntax | **verified** | Requires unqualified imported name (`from m import Err` then `except Err as e:`); dotted `except m.Err:` is a syntax error. |
+| `except` type syntax | **verified** | Requires unqualified imported name (`from m import Err` then `except Err as e:`); dotted `except m.Err:` also supported in `2.1.195+`. |
 | Variable shadowing in same scope | **unavailable** | Redefining a variable name with a different type in the same scope is rejected (`TypeMismatch`). |
-| `break` / `continue` | **unavailable** | Not supported in Nox loops (`collections.nox` confirms boolean loop flags are required). |
-| `.append()` on member fields | **unavailable** | Requires local copy-append-assign (`xs = self.items; xs.append(v); self.items = xs`). |
-| `.append()` on function parameters | **unavailable** | Codegen rejects `.append()` on `list[T]` function parameters (`genListAppend`); build a local list or reassign returned list. |
+| `break` / `continue` | **unavailable** | Not supported in Nox loops (boolean loop flags remain required). |
+| `.append()` on member fields / params | **unavailable** (v2.2.38) | Requires local copy-append-assign (`xs = self.items; xs.append(v); self.items = xs`) in `2.2.38` (`2.2.43` stable list handle is post-`v2.2.38`). |
 | Mutually recursive `class` + `enum` | **verified** | `class Expr { kind: ExprKind }` + `enum ExprKind` with `list[Expr]` compiles and passes `match` on LLVM and QBE. |
 | Empty list literal `[]` | **verified** | Allowed when explicitly type-annotated (`items: list[T] = []`). |
 | Function overloading | **unavailable** | Separate typed function names are required. |
-| Parenthesized `from m import (...)` | **unavailable** | Use comma-separated imports per line (`from m import A, B`). |
-| Top-level `while` + `try/except` heap locals | **experimental** (caveat) | Observed `0xC0000005` exit cleanup crash when running `while` + `try/except` with list allocations at module top-level; execute loops inside `def` functions. |
+| Parenthesized `from m import (...)` | **verified** (v2.1.195+) | Multiline parenthesized imports compile cleanly (`poc_2238.nox`, `tests/audit/audit_test.nox`). |
+| Top-level `while` + `try/except` heap locals | **experimental** (caveat) | Keep complex loop + exception allocations inside `def` functions. |
 
 ---
 
@@ -55,15 +55,13 @@
 | Module / Symbol | Status | Profile Notes & Constraints |
 |---|---|---|
 | `nox.core` (`JsonValue`) | **verified** | `JsonValue` is a built-in type in `nox.core`, **not** `nox.json.JsonValue`. |
-| `nox.json` (`parse`, `get`, `as_int`, `number_text`, `is_*`, `as_bool`) | **verified** | Preserves 64-bit integer precision via `number_text` / `as_int`. |
-| `nox.collections` (`OrderedDict[K, V]`, `LRUCache[K, V]`) | **verified** | Pure NOX (no `extern def`); works in freestanding profile; deterministic insertion order. |
-| `nox.strings` (`byte_len`, `byte_at`, `trim`, `replace`, `split`, `join`) | **verified** (with NUL caveat) | `len(s)` counts UTF-8 codepoints; `nox.strings.byte_len(s)` counts raw UTF-8 bytes (`"ğ"` = 1 vs 2). **Upstream `noxc 2.1.186` caveat:** `nox_strings_join_raw` (`runtime/stdlib_shims/strings.zig:398`) computes `total_len` with `std.mem.len(p)` (`strlen`, stops at `\0`) while copying `nox_str_slice(p)` (`strByteLen`, past `\0`), causing NUL truncation / heap-buffer OOB corruption (surfacing as `nox_rc_pool_drain` `SIGSEGV` on `macos-arm64`). Workaround: use `+` (`nox_str_concat`, which uses `strByteLen`) on strings that may contain NUL bytes (`glyph/lexer.nox` `_scan_string`, `tests/lexer/lexer_test.nox`). |
-| `nox.unicode` (`upper_tr`, `lower_tr`, `normalize`) | **verified** (hosted) / **unavailable** (freestanding) | Must remain isolated in optional/locale layer (`glyph/locale.nox`), never imported unconditionally by core if freestanding compatibility is required. |
-| `nox.regex` (`search`, `Match`) | **verified** | Supports bounded matching; byte-indexed spans; `rx_match != None` works cleanly. |
-| `nox.path` (`safe_join`, `PathError`) | **verified** (with host caveat) | Rejects `..` traversal; **caveat:** treats leading `/etc/passwd` as `<root>/etc/passwd` and includes physical path in `PathError.message`. Glyph `FilesystemLoader` must pre-reject `/`, `\`, drive letters, UNC, NUL, `%2e%2e` and redact error messages. |
-| `nox.fs` | **verified** (hosted) | `read_to_string`, `write_string_atomic`, `create_dir_all`, `remove_dir_all`, `canonicalize`/`safe_join` confined to `loader_fs.nox` and `cli/app.nox`; never imported in `glyph/api.nox` or `wasm32`/`freestanding`. |
-| `nox.os` / `nox.time` / `nox.log` | **verified** (hosted) | `nox.os.arg_count`/`arg`/`exit` and `nox.time.monotonic_ns` verified in `cli/`; stdlib `nox.log` documents `no stderr write primitive yet` (all `print` output goes to stdout). |
-| `nox.test` (`assert_eq_*`, `assert_true`, `TestSuite`) | **verified** | Works natively with `noxc test`. |
-| `nox.template` | **verified** (baseline only) | Separate stdlib simple string/block renderer; Glyph does **not** modify or silently wrap it. |
-| `integrations/nyx` (`glyph_nyx`) | **verified** (adapter) | Opt-in SSR adapter (`render_view`, `render_view_stream`, CSP nonce, preflight) compiles & runs cleanly; core `glyph/` never imports `nyx` or `integrations/`. |
-| `integrations/aether` (`glyph_aether`) | **verified** (adapter) | Opt-in content-negotiation adapter (`text/html`, `application/xml`, `text/plain`) compiles & runs cleanly; core `glyph/` never imports `aether`. |
+| `nox.json` (`parse`, `pos_*`, `JsonWriter`, `as_int`, `number_text`) | **verified** | `pos_root`/`pos_kind`/`pos_len`/`pos_at`/`pos_key`/`pos_int`/`pos_number`/`pos_dump` walk JSON without allocating `JsonValue` nodes; combine `pos_dump` + `_is_int_json_text` to distinguish `1.0`/`1e2` floats from 64-bit ints (`9007199254740993`). |
+| `nox.collections` (`OrderedDict[K, V]`, `LRUCache[K, V]`) | **verified** | Pure NOX; freestanding/WASM-safe; benefits from 2.1.188/2.2.8 hash-index & LRU speedups. |
+| `nox.strings` (`byte_len`, `byte_at`, `trim`, `replace`, `split`, `join`) | **verified** (with NUL caveat) | **Upstream `v2.2.38` verified caveat:** `runtime/stdlib_shims/strings.zig@v2.2.38` `nox_strings_join_raw` still computes `total_len` with `std.mem.len(p)` (`\0`-terminated) while copying `str_mod.nox_str_slice(p)` (`strByteLen`). Retain `+` (`nox_str_concat`) on NUL-capable template/lexer strings. |
+| `nox.unicode` (`upper_tr`, `lower_tr`, `normalize`) | **verified** (hosted) / **unavailable** (freestanding) | Isolated in `glyph/locale.nox` (ASCII normalization fast-path improved in `2.1.185+`). |
+| `nox.regex` (`search`, `Match`) | **verified** | Freestanding/WASM-safe subset engine; keep `nox.pcre2` out of core (requires `dynamic_code`, no WASM/mobile). |
+| `nox.path` (`safe_join`, `PathError`) | **verified** (hosted) | Pre-reject `/`, `\`, `:`, NUL, `%2e%2e` and redact errors in `FilesystemLoader`. |
+| `nox.fs` | **verified** (hosted) | Confined strictly to `loader_fs.nox` and `cli/`; never imported by `glyph/api.nox`. |
+| `nox.wasm` (`Limits`, `strict_limits`, `from_bytes_limited`, `Host`) | **verified** (hosted) | Pure-Zig sandboxed WASM interpreter with fuel/pages/depth/table/stack/output caps; enforces ADR-0012 multi-tenant boundaries on hosted targets. |
+| `nox.safehttp`, `nox.dns`, `nox.ip` | **verified** (hosted) | Safe host pattern for remote template adapters (SSRF / DNS rebinding / downgrade protection); not imported by core `glyph/`. |
+| `nox.yyjson`, `nox.xxhash`, `nox.pcre2`, `nox.zstd` | **verified** (hosted-only C) | Unavailable on WASM/mobile/freestanding; excluded from `glyph/` core to preserve universal portability. |

@@ -179,9 +179,68 @@ def _is_int_json_text(txt: str) -> bool:
         return False
     return True
 
-# Converts a JsonValue tree into Glyph Value.
-# Preserves 64-bit integer precision via number_text/as_int; never promotes JSON data to TrustedMarkup.
+def _from_json_pos(jv: JsonValue, p: int, depth: int, span: SourceSpan) -> Value:
+    if depth > 64:
+        raise GlyphTypeError(
+            GLYPH_EVAL_TYPE,
+            "JSON nesting depth exceeded maximum limit (64)",
+            span,
+            "flatten deeply nested JSON inputs"
+        )
+    knd: int = nox.json.pos_kind(jv, p)
+    match knd:
+        case 0:
+            return Value.VNull
+        case 1:
+            return Value.VBool(nox.json.pos_bool(jv, p))
+        case 2:
+            txt: str = nox.json.pos_dump(jv, p)
+            if _is_int_json_text(txt):
+                try:
+                    return Value.VInt(nox.json.pos_int(jv, p))
+                except JsonError:
+                    raise GlyphTypeError(
+                        GLYPH_EVAL_OVERFLOW,
+                        "JSON integer exceeds 64-bit signed integer range",
+                        span,
+                        "pass oversized integers as strings"
+                    )
+            fv: float = nox.json.pos_number(jv, p)
+            validate_float(fv, span)
+            return Value.VFloat(fv)
+        case 3:
+            return Value.VStr(nox.json.pos_str(jv, p))
+        case 4:
+            n: int = nox.json.pos_len(jv, p)
+            out: list[Value] = []
+            i: int = 0
+            while i < n:
+                out.append(_from_json_pos(jv, nox.json.pos_at(jv, p, i), depth + 1, span))
+                i = i + 1
+            return Value.VList(out)
+        case 5:
+            n_obj: int = nox.json.pos_len(jv, p)
+            entries: OrderedDict[str, Value] = OrderedDict[str, Value]()
+            j: int = 0
+            while j < n_obj:
+                k: str = nox.json.pos_key(jv, p, j)
+                if not is_forbidden_key(k):
+                    entries.set(k, _from_json_pos(jv, nox.json.pos_at(jv, p, j), depth + 1, span))
+                j = j + 1
+            return Value.VMap(entries)
+        case _:
+            raise GlyphTypeError(
+                GLYPH_EVAL_TYPE,
+                "unsupported JSON value kind",
+                span,
+                "provide valid JSON data"
+            )
+
+# Converts a JsonValue tree into Glyph Value using zero-node pos_* traversal for containers.
+# Preserves 64-bit integer precision via pos_dump/pos_int; never promotes JSON data to TrustedMarkup.
 def from_json(jv: JsonValue, span: SourceSpan) -> Value:
+    if nox.json.is_array(jv) or nox.json.is_object(jv):
+        return _from_json_pos(jv, nox.json.pos_root(jv), 0, span)
     if nox.json.is_null(jv):
         return Value.VNull
     if nox.json.is_bool(jv):
@@ -204,24 +263,6 @@ def from_json(jv: JsonValue, span: SourceSpan) -> Value:
         return Value.VFloat(fv)
     if nox.json.is_string(jv):
         return Value.VStr(nox.json.as_string(jv))
-    if nox.json.is_array(jv):
-        n: int = nox.json.array_len(jv)
-        out: list[Value] = []
-        i: int = 0
-        while i < n:
-            out.append(from_json(nox.json.array_get(jv, i), span))
-            i = i + 1
-        return Value.VList(out)
-    if nox.json.is_object(jv):
-        n_obj: int = nox.json.object_len(jv)
-        entries: OrderedDict[str, Value] = OrderedDict[str, Value]()
-        j: int = 0
-        while j < n_obj:
-            k: str = nox.json.object_key(jv, j)
-            if not is_forbidden_key(k):
-                entries.set(k, from_json(nox.json.object_value(jv, j), span))
-            j = j + 1
-        return Value.VMap(entries)
     raise GlyphTypeError(
         GLYPH_EVAL_TYPE,
         "unsupported JSON value kind",

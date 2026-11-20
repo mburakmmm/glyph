@@ -4,6 +4,8 @@ import nox.unicode
 import nox.strings
 from glyph.errors import SourceSpan, GlyphTypeError, GLYPH_EVAL_TYPE
 
+__all__: list[str] = ["normalize_unicode", "is_normalized", "upper_for_locale", "lower_for_locale"]
+
 def normalize_unicode(text: str, form: str, span: SourceSpan) -> str:
     upper_form: str = nox.strings.upper(nox.strings.trim(form))
     if upper_form != "NFC" and upper_form != "NFD" and upper_form != "NFKC" and upper_form != "NFKD":

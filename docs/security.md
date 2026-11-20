@@ -36,3 +36,10 @@
 ## 4. `|tojson` JS-in-HTML Contract
 
 `|tojson` serializes `Value` to JSON and escapes `<` (`\u003c`), `>` (`\u003e`), `&` (`\u0026`), `</` (`<\/`), `U+2028` (`\u2028`), and `U+2029` (`\u2029`), returning `MarkupContext.SafeJs`.
+
+## 5. Hostile Multi-Tenant Isolation & Sandboxing (`ADR-0012`, NOX `2.2.38`)
+
+For untrusted user-authored templates (`TrustTier.Untrusted`):
+- **In-Process Engine Bounds:** Pair `restricted_defaults()` (`restricted_budget()`, `allow_safe_filter=False`, `allow_dynamic_include=False`, strict contextual XSS checks).
+- **WASM Host Isolation (`nox.wasm.Limits`):** Execute tenant render workers inside `--target wasm32-wasi` / `wasm32-freestanding` instances via `nox.wasm.from_bytes_limited` or `Host.open_limited` with `nox.wasm.strict_limits()` (`fuel`, `max_pages`, `max_depth`, `max_table`, `max_stack`, `max_output`). See [examples/wasm_multitenant_host/main.nox](../examples/wasm_multitenant_host/main.nox).
+- **OS Process Sandbox (`noxc run --sandbox`):** When executing standalone CLI renders or untrusted template tests on macOS (`sandbox-exec`) or Linux (`bwrap`), prefer `noxc run --sandbox --allow-read=<templates_dir>` to confine filesystem and network syscalls at the OS level.

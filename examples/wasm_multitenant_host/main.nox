@@ -1,0 +1,49 @@
+# Hosted Multi-Tenant WASM Sandbox Runner Example for Glyph (ADR-0012 + NOX 2.2.7 nox.wasm.Limits).
+# Demonstrates bounding untrusted/tenant workloads with strict_limits() fuel/memory/depth/output quotas
+# without putting OS/WASM host APIs inside freestanding Glyph core.
+import nox.os
+import nox.wasm
+from nox.wasm import Instance, Limits, Host, WasmError
+
+# 1. Valid minimal WASM module: (module (memory 1) (func (export "add") (param i32 i32) (result i32) local.get 0 local.get 1 i32.add))
+valid_wasm: list[int] = [
+    0, 97, 115, 109, 1, 0, 0, 0, 1, 7, 1, 96, 2, 127, 127, 1, 127,
+    3, 2, 1, 0, 5, 3, 1, 0, 1, 7, 13, 2, 3, 97, 100, 100, 0, 0,
+    3, 109, 101, 109, 2, 0, 10, 9, 1, 7, 0, 32, 0, 32, 1, 106, 11
+]
+lim: Limits = nox.wasm.strict_limits()
+lim.max_pages = 32
+lim.fuel = 100000
+inst: Instance = nox.wasm.from_bytes_limited(valid_wasm, lim)
+print("bounded wasm add(40, 2) =", inst.call("add", [40, 2]))
+inst.close()
+
+# 2. Hostile infinite-loop WASM payload trapped deterministically by fuel limit:
+#    (module (func (export "spin") (loop br 0 end)))
+spin_wasm: list[int] = [
+    0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0,
+    3, 2, 1, 0, 7, 8, 1, 4, 115, 112, 105, 110, 0, 0,
+    10, 9, 1, 7, 0, 3, 64, 12, 0, 11, 11
+]
+tight: Limits = nox.wasm.strict_limits()
+tight.fuel = 500
+spin_trapped: bool = False
+spin_inst: Instance = nox.wasm.from_bytes_limited(spin_wasm, tight)
+try:
+    _r: int = spin_inst.call("spin", [])
+except WasmError:
+    spin_trapped = True
+spin_inst.close()
+print("infinite loop trapped by fuel quota =", spin_trapped)
+
+# 3. Optional external WASI .wasm path execution (e.g. `-- path/to/glyph_tenant.wasm`):
+if nox.os.arg_count() >= 2:
+    target_wasm: str = nox.os.arg(1)
+    host_lim: Limits = nox.wasm.strict_limits()
+    h: Host = nox.wasm.host()
+    h.enable_wasi([])
+    w_inst: Instance = h.open_limited(target_wasm, host_lim)
+    rc: int = w_inst.run_start()
+    print("wasi tenant exit_code =", rc)
+    print(w_inst.stdout())
+    w_inst.close()

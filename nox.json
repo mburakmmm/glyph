@@ -1,9 +1,14 @@
 {
   "name": "glyph",
-  "version": "1.1.0",
+  "version": "1.2.0",
+  "source": "nox",
   "description": "Independent, statically typed, security-first template engine for NOX",
   "license": "MIT",
   "repository": "https://github.com/mburakmmm/glyph",
   "entry": "glyph/api.nox",
+  "bin": {
+    "name": "glyph",
+    "path": "cli/main.nox"
+  },
   "requires": []
 }

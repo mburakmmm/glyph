@@ -44,27 +44,31 @@ def _emit_glyph_err(ge: GlyphError, fmt: str) -> int:
 
 def _parse_mode(mode_s: str) -> OutputMode:
     ml: str = nox.strings.lower(mode_s)
-    if ml == "html":
-        return OutputMode.Html
-    if ml == "text":
-        return OutputMode.Text
-    if ml == "xml":
-        return OutputMode.Xml
-    if ml == "md" or ml == "markdown":
-        return OutputMode.Markdown
-    if ml == "json":
-        return OutputMode.Json
-    if ml == "email_subject":
-        return OutputMode.EmailSubject
-    raise GlyphTypeError(GLYPH_EVAL_TYPE, "unknown --mode '" + mode_s + "'", empty_span("<cli>"), "use html, text, xml, md, json, or email_subject")
+    match ml:
+        case "html":
+            return OutputMode.Html
+        case "text":
+            return OutputMode.Text
+        case "xml":
+            return OutputMode.Xml
+        case "md" | "markdown":
+            return OutputMode.Markdown
+        case "json":
+            return OutputMode.Json
+        case "email_subject":
+            return OutputMode.EmailSubject
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "unknown --mode '" + mode_s + "'", empty_span("<cli>"), "use html, text, xml, md, json, or email_subject")
 
 def _parse_trust(trust_s: str) -> TrustTier:
     tl: str = nox.strings.lower(trust_s)
-    if tl == "trusted":
-        return TrustTier.Trusted
-    if tl == "restricted":
-        return TrustTier.Restricted
-    raise GlyphTypeError(GLYPH_EVAL_TYPE, "unknown --trust '" + trust_s + "'", empty_span("<cli>"), "use trusted or restricted")
+    match tl:
+        case "trusted":
+            return TrustTier.Trusted
+        case "restricted":
+            return TrustTier.Restricted
+        case _:
+            raise GlyphTypeError(GLYPH_EVAL_TYPE, "unknown --trust '" + trust_s + "'", empty_span("<cli>"), "use trusted or restricted")
 
 def _make_fs_env(root_dir: str, mode: OutputMode, trust: TrustTier, loc: str) -> Environment:
     fs_loader: FilesystemLoader = FilesystemLoader(root_dir, trust)

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-20
+
+### Added
+- **NOX `2.2.38` Toolchain & Manifest Alignment:** Pinned CI/Release/minimum NOX version to `2.2.38`, added `"source": "nox"` and `"bin": {"name": "glyph", "path": "cli/main.nox"}` in `nox.json` (`nox:bin=true` & `noxc install` support), and updated `docs/compatibility.md` with observed `2.2.38` audits (including continued `nox_strings_join_raw` NUL safeguard and pre-`2.2.43` list copy-append rules).
+- `examples/wasm_multitenant_host/main.nox`: Hosted multi-tenant WASM runner using `nox.wasm.Limits` / `strict_limits()` (`fuel` exhaustion trapping and memory/stack quotas per ADR-0012).
+- Added `__all__` compile-time public API enforcement to leaf/hosted/integration modules (`glyph/loader_fs.nox`, `glyph/locale.nox`, `integrations/nyx/glyph_nyx.nox`, `integrations/aether/glyph_aether.nox`, `integrations/aura_export/glyph_aura_export.nox`).
+- Added `nox.safehttp` remote `ReadOnlyAdapterLoader` recipe in `docs/loaders.md` and `noxc run --sandbox` / `nox.wasm.Limits` guidance in `docs/security.md` & `docs/tooling.md`.
+- Expanded `tests/value/value_test.nox` and `tests/audit/audit_test.nox` for `nox.json.pos_*` cursor edge cases (`1.0`, `1e2`, 64-bit integers, overflow, `__dict__` filtering, scalar roots) and scalar `match`.
+
+### Changed
+- **Zero-Node JSON Traversal (`glyph/value.nox`):** Migrated `from_json` / `context_from_json` containers to `nox.json.pos_*` cursor traversal (`pos_root`/`pos_kind`/`pos_len`/`pos_at`/`pos_key`/`pos_int`/`pos_number`/`pos_dump`) while preserving 64-bit integer precision and scalar fallback.
+- **Diagnostics & Scalar `match`:** Updated `glyph/diagnostics.nox` JSON serialization to use `nox.json.JsonWriter` and migrated scalar dispatch in `glyph/diagnostics.nox`, `glyph/safety.nox` (`current_output_context`), and `cli/app.nox` (`_parse_mode`, `_parse_trust`) to NOX `2.2.37+` scalar `match`.
+
 ## [1.1.0] - 2026-11-17
 
 ### Added

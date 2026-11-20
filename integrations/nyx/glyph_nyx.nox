@@ -7,6 +7,14 @@ from glyph.api import Environment, Template, Context, RenderOptions, OutputMode
 from glyph.api import BudgetTracker, GlyphWriter, RenderResult, GlyphSecurityError
 from glyph.errors import SourceSpan, GLYPH_SECURITY_CONTEXT
 
+__all__: list[str] = [
+    "NyxViewOptions",
+    "NyxViewResponse",
+    "default_nyx_options",
+    "render_view",
+    "render_view_stream",
+]
+
 class NyxViewOptions:
     status: int
     content_type: str
